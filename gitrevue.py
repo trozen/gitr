@@ -178,6 +178,15 @@ class App:
 
     # --UI ------------------------------------------------------------
 
+    def _make_read_only(self, widget: tk.Text) -> None:
+        # Ctrl+W conflicts: Text class binds it to "delete previous word".
+        # Overriding it here is unavoidable; extract to one place so each
+        # read-only widget needs only a single call.
+        widget.bind('<Key>', lambda e: 'break')
+        widget.bind('<Control-c>', lambda e: None)
+        widget.bind('<Control-w>', lambda e: self.root.destroy())
+        widget.bind('<Control-q>', lambda e: self.root.destroy())
+
     def _make_scrollbar(self, parent: tk.Widget, **kw) -> tk.Scrollbar:
         return tk.Scrollbar(parent,
                             bg=C['selected_bg'],
@@ -215,8 +224,10 @@ class App:
         lf.grid_columnconfigure(0, weight=1)
         self._diff = tk.Text(lf, bg=C['bg'], fg=C['fg'],
                               font=font, wrap='none',
-                              relief='flat', bd=0, state='disabled', cursor='arrow',
-                              selectbackground=C['selected_bg'])
+                              relief='flat', bd=0, cursor='arrow',
+                              selectbackground=C['selected_bg'],
+                              selectforeground=C['fg'])
+        self._make_read_only(self._diff)
         vs = self._make_scrollbar(lf, orient='vertical',   command=self._diff.yview)
         hs = self._make_scrollbar(lf, orient='horizontal', command=self._diff.xview)
         self._diff.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
@@ -256,14 +267,26 @@ class App:
         self._flist.tag_configure('stats',     foreground=C['subdued'])
         self._flist.tag_configure('selected',  background=C['selected_bg'])
 
+        self._diff.tag_raise('sel')
+
         self._flist.bind('<Button-1>', self._on_file_click)
 
     def _init_sash(self) -> None:
         w = self._sash.winfo_width()
         if w > 1:
             self._sash.sash_place(0, int(w * CFG.sash_ratio), 0)
+            self.root.bind('<Configure>', self._on_window_configure)
         else:
             self.root.after(50, self._init_sash)
+
+    def _on_window_configure(self, event: tk.Event) -> None:
+        if event.widget is self.root:
+            self.root.after_idle(self._place_sash)
+
+    def _place_sash(self) -> None:
+        w = self._sash.winfo_width()
+        if w > 1:
+            self._sash.sash_place(0, int(w * CFG.sash_ratio), 0)
 
     # --data ------------------------------------------------------------
 
@@ -286,7 +309,6 @@ class App:
         self._lbl_stat.configure(text=f'  {stat}' if stat else '')
 
         # diff panel
-        self._diff.configure(state='normal')
         self._diff.delete('1.0', 'end')
         self._positions.clear()
 
@@ -297,8 +319,6 @@ class App:
                     self._diff.insert('end', dl.text + '\n', dl.kind)
         else:
             self._diff.insert('end', 'Empty diff.\n', 'subdued')
-
-        self._diff.configure(state='disabled')
 
         # file list panel
         self._flist.configure(state='normal')

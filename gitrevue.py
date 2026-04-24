@@ -125,6 +125,7 @@ class CFG:
     sash_ratio    = 0.70
     scrollbar_w   = 28
     minimap_w     = 120
+    scroll_speed  = 12   # lines per mouse-wheel tick
 
 
 # --colour scheme (dracula) --------------------------------------------------
@@ -170,7 +171,7 @@ _MINIMAP_COLORS: dict[str, str | None] = {
     'hunk':    _blend(C['hunk_fg'],       0.35),
     'filehdr': _blend(C['fileheader_fg'], 0.35),
     'fileidx': _blend(C['fileheader_fg'], 0.35),
-    'context': None,
+    'context': _blend(C['fg'], 0.18),
 }
 
 
@@ -210,6 +211,9 @@ class App:
         self._minimap_lines: list[tuple[str, str]] = []  # (kind, text)
         self._scroll_pos: tuple[float, float] = (0.0, 1.0)
         self._minimap_content_h: int = 0
+        self._hunk_seps: list[tk.Canvas] = []
+        self._scroll_target: float = 0.0
+        self._scroll_animating: bool = False
 
         self._build_ui()
         self._load()
@@ -271,6 +275,10 @@ class App:
                               selectbackground=C['selected_bg'],
                               selectforeground=C['fg'])
         self._make_read_only(self._diff)
+        self._diff.bind('<Configure>', self._on_diff_configure)
+        self._diff.bind('<Button-4>',  lambda e: self._on_wheel(-1) or 'break')
+        self._diff.bind('<Button-5>',  lambda e: self._on_wheel( 1) or 'break')
+        self._diff.bind('<MouseWheel>', lambda e: self._on_wheel(-e.delta // 120) or 'break')
         self._diff_vs = self._make_scrollbar(lf, orient='vertical', command=self._diff.yview)
         hs = self._make_scrollbar(lf, orient='horizontal', command=self._diff.xview)
         self._diff.configure(yscrollcommand=self._on_diff_yscroll, xscrollcommand=hs.set)
@@ -344,6 +352,45 @@ class App:
         w = self._sash.winfo_width()
         if w > 1:
             self._sash.sash_place(0, int(w * CFG.sash_ratio), 0)
+
+    # --smooth scroll ---------------------------------------------------------
+
+    def _on_wheel(self, ticks: int) -> None:
+        total = int(self._diff.index('end').split('.')[0])
+        if total < 2:
+            return
+        first, last = self._diff.yview()
+        max_pos = 1.0 - (last - first)  # true bottom: yview[0] never exceeds this
+        step = (CFG.scroll_speed * ticks) / total
+        self._scroll_target = max(0.0, min(max_pos, self._scroll_target + step))
+        if not self._scroll_animating:
+            self._scroll_animating = True
+            self._animate_scroll()
+
+    def _animate_scroll(self) -> None:
+        current = self._diff.yview()[0]
+        remaining = self._scroll_target - current
+        if abs(remaining) < 0.0003:
+            self._diff.yview_moveto(self._scroll_target)
+            self._scroll_animating = False
+            return
+        self._diff.yview_moveto(current + remaining * 0.35)
+        self.root.after(16, self._animate_scroll)
+
+    # --hunk separators -------------------------------------------------------
+
+    def _on_diff_configure(self, event: tk.Event) -> None:
+        if event.width > 1:
+            for sep in self._hunk_seps:
+                sep.configure(width=event.width)
+
+    def _update_hunk_sep_widths(self) -> None:
+        w = self._diff.winfo_width()
+        if w > 1:
+            for sep in self._hunk_seps:
+                sep.configure(width=w)
+        else:
+            self.root.after(50, self._update_hunk_sep_widths)
 
     # --minimap ---------------------------------------------------------------
 
@@ -423,6 +470,8 @@ class App:
     def _on_diff_yscroll(self, first: str, last: str) -> None:
         self._diff_vs.set(first, last)
         self._scroll_pos = (float(first), float(last))
+        if not self._scroll_animating:
+            self._scroll_target = float(first)
         self._update_sticky_header()
         self._update_minimap_viewport()
 
@@ -467,6 +516,9 @@ class App:
         self._diff_files = diff_files
 
         # diff panel
+        for sep in self._hunk_seps:
+            sep.destroy()
+        self._hunk_seps.clear()
         self._diff.delete('1.0', 'end')
         self._positions.clear()
         self._minimap_lines = []
@@ -485,6 +537,12 @@ class App:
                     self._minimap_lines.append(('fileidx', f' {idx}'))
                 for dl in df.lines:
                     if dl.kind != 'fileheader':
+                        if dl.kind == 'hunk':
+                            sep = tk.Canvas(self._diff, height=1, bg=C['subdued'],
+                                            highlightthickness=0, bd=0, width=1)
+                            self._diff.window_create('end', window=sep)
+                            self._diff.insert('end', '\n')
+                            self._hunk_seps.append(sep)
                         self._diff.insert('end', dl.text + '\n', dl.kind)
                         self._minimap_lines.append((dl.kind, dl.text))
         else:
@@ -496,6 +554,7 @@ class App:
         )
         self.root.after_idle(self._update_sticky_header)
         self.root.after_idle(self._render_minimap)
+        self.root.after_idle(self._update_hunk_sep_widths)
 
         # file list panel
         self._flist.configure(state='normal')

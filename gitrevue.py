@@ -2,6 +2,7 @@
 """gitrevue - lightweight Git diff viewer"""
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -456,7 +457,7 @@ class App:
 
     def _on_page_scroll(self, direction: int) -> None:
         first, last = self._diff.yview()
-        self._scroll_by(direction * (last - first))
+        self._scroll_by(direction * (last - first) * 2 / 3)
 
     def _animate_scroll(self) -> None:
         current = self._diff.yview()[0]
@@ -627,9 +628,9 @@ class App:
                 if i > 0:
                     self._diff.insert('end', '\n', 'context')
                     self._minimap_lines.append(('context', ''))
-                self._positions[df.path] = self._diff.index('end-1c linestart')
                 name, idx = self._file_label(df)
                 self._diff.insert('end', f' {name}\n', 'filehdr')
+                self._positions[df.path] = self._diff.index('end-1c linestart')
                 self._minimap_lines.append(('filehdr', f' {name}'))
                 if idx:
                     self._diff.insert('end', f' {idx}\n', 'fileidx')
@@ -721,10 +722,7 @@ class App:
         pos = self._positions.get(path)
         if not pos:
             return
-        line = int(pos.split('.')[0])
-        total = int(self._diff.index('end').split('.')[0])
-        if total > 1:
-            self._diff.yview_moveto((line - 1) / total)
+        self._diff.yview(pos)
 
 
 # --entry point ------------------------------------------------------------
@@ -738,7 +736,12 @@ def main() -> None:
     diff_text = sys.stdin.read()
 
     root = tk.Tk()
-    root.title('gitrevue')
+    cwd = Path(os.getcwd())
+    try:
+        cwd_label = '~/' + cwd.relative_to(Path.home()).as_posix()
+    except ValueError:
+        cwd_label = cwd.as_posix()
+    root.title(f'gitrevue | {cwd_label}')
     root.bind('<Control-w>', lambda _: root.destroy())
     root.bind('<Control-q>', lambda _: root.destroy())
     App(root, diff_text)

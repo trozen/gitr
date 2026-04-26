@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """gitrevue - lightweight Git diff viewer"""
 
+import argparse
 import json
 import os
 import re
@@ -15,17 +16,16 @@ _CONFIG_PATH = Path.home() / '.config' / 'gitrevue' / 'config.json'
 
 
 USAGE = """\
-usage: <git-command> | gitrevue
+usage:
+  gitrevue                         # git diff (unstaged changes)
+  gitrevue master                  # git diff master (to working tree)
+  gitrevue --merge-base master     # diff from common ancestor to working tree
+  gitrevue master HEAD             # git diff master HEAD (committed only)
+  git diff | gitrevue              # pipe a patch
+  gitrevue -                       # read stdin explicitly
+  gitrevue -p patch.diff           # read from a patch file
 
-Examples:
-  git diff main...HEAD | gitrevue          # branch diff vs main
-  git diff HEAD | gitrevue                 # staged + unstaged vs last commit
-  git diff --cached | gitrevue             # staged only
-  git diff HEAD~5 | gitrevue              # last 5 commits
-  git show HEAD | gitrevue                 # single commit
-  git diff --first-parent main...HEAD | gitrevue
-
-  GITREVUE_SCALE=2 git diff HEAD | gitrevue   # scale UI up (HiDPI)
+  GITREVUE_SCALE=2 gitrevue master   # scale UI up (HiDPI)
 """
 
 
@@ -60,6 +60,58 @@ def try_current_branch() -> str:
     r = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
                        capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else ''
+
+
+# --diff sources ------------------------------------------------------------
+
+class PatchSource:
+    """Diff text from stdin or a patch file. Cannot fetch full file contents."""
+    def __init__(self, text: str, label: str = '') -> None:
+        self._text = text
+        self._label = label
+
+    def diff_text(self) -> str:
+        return self._text
+
+    def label(self) -> str:
+        return self._label
+
+    def file_content(self, path: str, ref: str) -> 'str | None':
+        return None
+
+
+class GitSource:
+    """Diff text from a live git invocation. Can also fetch full file contents."""
+    def __init__(self, refs: list[str], merge_base: bool = False) -> None:
+        self._refs = refs
+        self._merge_base = merge_base
+
+    def diff_text(self) -> str:
+        try:
+            if self._merge_base:
+                sha = subprocess.check_output(
+                    ['git', 'merge-base', self._refs[0], 'HEAD'],
+                    text=True, stderr=subprocess.PIPE).strip()
+                return subprocess.check_output(
+                    ['git', 'diff', sha], text=True, stderr=subprocess.PIPE)
+            return subprocess.check_output(
+                ['git', 'diff'] + self._refs, text=True, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            sys.exit(f'gitrevue: git command failed: {e.stderr.strip()}')
+        except FileNotFoundError:
+            sys.exit('gitrevue: git not found in PATH')
+
+    def label(self) -> str:
+        if self._merge_base:
+            return f'--merge-base {self._refs[0]}'
+        return ' '.join(self._refs)
+
+    def file_content(self, path: str, ref: str) -> 'str | None':
+        try:
+            return subprocess.check_output(
+                ['git', 'show', f'{ref}:{path}'], text=True, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            return None
 
 
 # --diff parsing ------------------------------------------------------------
@@ -268,9 +320,11 @@ _MM_LINE_H = 2  # natural minimap pixels per source line (matches VS Code behavi
 
 
 class App:
-    def __init__(self, root: tk.Tk, diff_text: str) -> None:
+    def __init__(self, root: tk.Tk, diff_text: str,
+                 source: 'PatchSource | GitSource | None' = None) -> None:
         self.root = root
         self.diff_text = diff_text
+        self._source = source
         self._entries: list[FileEntry] = []
         self._diff_files: list[DiffFile] = []
         self._positions: dict[str, str] = {}
@@ -865,11 +919,38 @@ class App:
 
 
 def main() -> None:
-    if sys.stdin.isatty():
-        print(USAGE, end='')
-        sys.exit(0)
+    parser = argparse.ArgumentParser(prog='gitrevue', description=USAGE,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--merge-base', action='store_true', dest='merge_base')
+    parser.add_argument('-p', '--patch', metavar='FILE', default=None)
+    parser.add_argument('refs', nargs='*')
+    args = parser.parse_args()
 
-    diff_text = sys.stdin.read()
+    if args.merge_base and not args.refs:
+        sys.exit('gitrevue: --merge-base requires a ref (e.g. gitrevue --merge-base master)')
+
+    source: PatchSource | GitSource
+
+    if args.patch is not None:
+        try:
+            text = sys.stdin.read() if args.patch == '-' else Path(args.patch).read_text()
+        except OSError as e:
+            sys.exit(f'gitrevue: {e}')
+        label = '' if args.patch == '-' else args.patch
+        source = PatchSource(text, label=label)
+    elif args.refs == ['-']:
+        source = PatchSource(sys.stdin.read())
+    elif args.refs or args.merge_base:
+        source = GitSource(args.refs, merge_base=args.merge_base)
+    elif not sys.stdin.isatty():
+        source = PatchSource(sys.stdin.read())
+    else:
+        source = GitSource([])
+
+    diff_text = source.diff_text()
+    if not diff_text.strip():
+        print('gitrevue: no changes')
+        sys.exit(0)
 
     root = tk.Tk()
     cwd = Path(os.getcwd())
@@ -877,10 +958,14 @@ def main() -> None:
         cwd_label = '~/' + cwd.relative_to(Path.home()).as_posix()
     except ValueError:
         cwd_label = cwd.as_posix()
-    root.title(f'gitrevue | {cwd_label}')
+    title_parts = ['gitrevue', cwd_label]
+    src_label = source.label()
+    if src_label:
+        title_parts.append(src_label)
+    root.title(' | '.join(title_parts))
     root.bind('<Control-w>', lambda _: root.destroy())
     root.bind('<Control-q>', lambda _: root.destroy())
-    App(root, diff_text)
+    App(root, diff_text, source)
     root.mainloop()
 
 

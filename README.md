@@ -1,7 +1,6 @@
 # gitrevue
 
-Lightweight terminal-launched Git diff viewer. Pipe any `git diff` into it and
-get a two-panel GUI: coloured diff on the left, clickable file list on the right.
+Lightweight terminal-launched Git diff viewer. Two-panel GUI: coloured diff on the left, clickable file list on the right.
 
 ## Install
 
@@ -12,15 +11,15 @@ uv tool install .
 ## Usage
 
 ```bash
-git diff main...HEAD | gitrevue          # branch diff vs main
-git diff HEAD | gitrevue                 # staged + unstaged vs last commit
-git diff --cached | gitrevue             # staged only
-git diff HEAD~5 | gitrevue              # last 5 commits
-git show HEAD | gitrevue                 # single commit
-git diff --first-parent main...HEAD | gitrevue
-```
+gitrevue                         # git diff (unstaged changes)
+gitrevue master                  # git diff master (to working tree)
+gitrevue --merge-base master     # diff from common ancestor to working tree
+gitrevue master HEAD             # git diff master HEAD (committed only)
 
-Running `gitrevue` without a pipe prints the above as a reminder.
+git diff | gitrevue              # pipe a patch
+gitrevue -                       # read stdin explicitly
+gitrevue -p patch.diff           # read from a patch file
+```
 
 ## Requirements
 

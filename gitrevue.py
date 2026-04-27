@@ -2,6 +2,7 @@
 """gitrevue - lightweight Git diff viewer"""
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -76,10 +77,6 @@ class PatchSource:
     def label(self) -> str:
         return self._label
 
-    def file_content(self, path: str, ref: str) -> 'str | None':
-        return None
-
-
 class GitSource:
     """Diff text from a live git invocation. Can also fetch full file contents."""
     def __init__(self, refs: list[str], merge_base: bool = False) -> None:
@@ -106,27 +103,6 @@ class GitSource:
             return f'--merge-base {self._refs[0]}'
         return ' '.join(self._refs)
 
-    def file_content(self, path: str, ref: str) -> 'str | None':
-        try:
-            return subprocess.check_output(
-                ['git', 'show', f'{ref}:{path}'], text=True, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError:
-            return None
-
-    def blob_content(self, sha: str) -> 'str | None':
-        if not sha or all(c == '0' for c in sha):
-            return None
-        try:
-            return subprocess.check_output(
-                ['git', 'cat-file', '-p', sha], text=True, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError:
-            return None
-
-    def read_worktree_file(self, path: str) -> 'str | None':
-        try:
-            return Path(path).read_text(errors='replace')
-        except OSError:
-            return None
 
 
 # --diff parsing ------------------------------------------------------------
@@ -186,21 +162,6 @@ def entries_from_diff(diff_files: list[DiffFile]) -> list[FileEntry]:
                   sum(1 for l in df.lines if l.kind == 'removed'))
         for df in diff_files
     ]
-
-
-def _parse_index_shas(index_line: str) -> tuple[str, str]:
-    m = re.match(r'index ([0-9a-f]+)\.\.([0-9a-f]+)', index_line)
-    if not m:
-        return '', ''
-    return m.group(1), m.group(2)
-
-
-def _parse_hunk_header(line: str) -> tuple[int, int, int, int]:
-    m = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
-    if not m:
-        return 0, 1, 0, 1
-    return (int(m.group(1)), int(m.group(2) or 1),
-            int(m.group(3)), int(m.group(4) or 1))
 
 
 def _build_tree_rows(
@@ -268,13 +229,16 @@ def _walk_trie(node: dict, rows: list, depth: int, dir_label: str) -> None:
 # --config -------------------------------------------------------------------
 
 class CFG:
-    font_family   = 'monospace'
-    font_size     = 12
-    window_scale  = 0.75    # fraction of screen size on startup
-    sash_ratio    = 0.70
-    scrollbar_w   = 28
-    minimap_w     = 120
-    scroll_speed  = 8   # lines per mouse-wheel tick
+    font_family        = 'monospace'
+    font_size          = 12
+    window_scale       = 0.75    # fraction of screen size on startup
+    sash_ratio         = 0.70
+    scrollbar_w        = 28
+    minimap_w          = 120
+    scroll_speed       = 8   # lines per mouse-wheel tick
+    diff_hi_blend      = 0.12   # bg intensity for changed lines / word-diff changed words
+    diff_dim_blend     = 0.06   # bg intensity for word-diff unchanged words
+    diff_dim_fg        = 0.50   # fg intensity for word-diff unchanged words
 
 
 # --colour scheme (dracula) --------------------------------------------------
@@ -311,6 +275,16 @@ def _blend(color: str, factor: float = 0.5) -> str:
     g = int(g0 + (g1 - g0) * factor)
     b = int(b0 + (b1 - b0) * factor)
     return f'#{r:02x}{g:02x}{b:02x}'
+
+
+def _mix(c1: str, c2: str, t: float) -> str:
+    """Linear interpolation between two hex colors (t=0 → c1, t=1 → c2)."""
+    def _p(h: str) -> tuple[int, int, int]:
+        h = h.lstrip('#')
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r1, g1, b1 = _p(c1)
+    r2, g2, b2 = _p(c2)
+    return f'#{int(r1+(r2-r1)*t):02x}{int(g1+(g2-g1)*t):02x}{int(b1+(b2-b1)*t):02x}'
 
 
 # non-whitespace pixel colours in the minimap; None = leave as canvas bg
@@ -350,11 +324,9 @@ _MM_LINE_H = 2  # natural minimap pixels per source line (matches VS Code behavi
 
 
 class App:
-    def __init__(self, root: tk.Tk, diff_text: str,
-                 source: 'PatchSource | GitSource | None' = None) -> None:
+    def __init__(self, root: tk.Tk, diff_text: str) -> None:
         self.root = root
         self.diff_text = diff_text
-        self._source = source
         self._entries: list[FileEntry] = []
         self._diff_files: list[DiffFile] = []
         self._positions: dict[str, str] = {}
@@ -369,11 +341,10 @@ class App:
         self._flist_row_to_entry: list[FileEntry | None] = []
         self._flist_path_to_row: dict[str, int] = {}
         self._manual_scroll: bool = False
-        self._current_file_idx: int = 0
         cfg = self._load_config()
         self._wrap_var = tk.BooleanVar(value=cfg.get('wrap_lines', True))
         self._tree_var = tk.BooleanVar(value=cfg.get('tree_view', False))
-        self._whole_file_var = tk.BooleanVar(value=cfg.get('whole_file', False))
+        self._word_diff_var = tk.BooleanVar(value=cfg.get('word_diff', False))
 
         self._build_ui()
         self._load()
@@ -412,11 +383,9 @@ class App:
                                   command=self._on_wrap_toggle)
         view_menu.add_checkbutton(label='Tree view', variable=self._tree_var,
                                   command=self._on_tree_toggle)
-        view_menu.add_checkbutton(label='Whole file view', accelerator='w',
-                                  variable=self._whole_file_var,
-                                  command=self._on_whole_file_toggle)
-        if not hasattr(self._source, 'blob_content'):
-            view_menu.entryconfigure('Whole file view', state='disabled')
+        view_menu.add_checkbutton(label='Word diff', accelerator='d',
+                                  variable=self._word_diff_var,
+                                  command=self._on_word_diff_toggle)
         menubar.add_cascade(label='View', menu=view_menu)
         go_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
         go_menu.add_command(label='Next file',     accelerator='n / Tab',
@@ -472,7 +441,7 @@ class App:
         self._diff.bind('<End>',   lambda e: self._scroll_to(1.0) or 'break')
         self._diff.bind('n',              lambda e: self._jump_to_adjacent_file( 1) or 'break')
         self._diff.bind('p',              lambda e: self._jump_to_adjacent_file(-1) or 'break')
-        self._diff.bind('w',              lambda e: self._toggle_whole_file() or 'break')
+        self._diff.bind('d',              lambda e: self._toggle_word_diff() or 'break')
         self._diff.bind('<Tab>',          lambda e: self._jump_to_adjacent_file( 1) or 'break')
         self._diff.bind('<Shift-Tab>',      lambda e: self._jump_to_adjacent_file(-1) or 'break')
         self._diff.bind('<ISO_Left_Tab>',   lambda e: self._jump_to_adjacent_file(-1) or 'break')
@@ -515,9 +484,11 @@ class App:
         self._sash.add(rf, stretch='never')
         self.root.after(50, self._init_sash)
 
-        # diff tags
-        self._diff.tag_configure('added',      foreground=C['added_fg'],      background=C['added_bg'])
-        self._diff.tag_configure('removed',     foreground=C['removed_fg'],    background=C['removed_bg'])
+        # diff tags — line highlight is a little more visible than the raw added_bg/removed_bg
+        _rem_hi = _blend(C['removed_fg'], CFG.diff_hi_blend)
+        _add_hi = _blend(C['added_fg'],   CFG.diff_hi_blend)
+        self._diff.tag_configure('added',      foreground=C['added_fg'],   background=_add_hi)
+        self._diff.tag_configure('removed',    foreground=C['removed_fg'], background=_rem_hi)
         self._diff.tag_configure('hunk',        foreground=C['hunk_fg'])
         self._diff.tag_configure('fileheader',  foreground=C['fileheader_fg'])
         self._diff.tag_configure('context',     foreground=C['fg'])
@@ -538,6 +509,12 @@ class App:
         self._flist.tag_configure('dir',       foreground=C['subdued'])
         self._flist.tag_configure('selected',  background=C['selected_bg'])
 
+        # Word diff: unchanged words — colored text, barely-there bg so they recede
+        self._diff.tag_configure('removed_word', foreground=_blend(C['removed_fg'], CFG.diff_dim_fg), background=_blend(C['removed_fg'], CFG.diff_dim_blend))
+        self._diff.tag_configure('added_word',   foreground=_blend(C['added_fg'],   CFG.diff_dim_fg), background=_blend(C['added_fg'],   CFG.diff_dim_blend))
+        # Word diff: changed words — same "change highlight" bg as the full-line removed/added tags
+        self._diff.tag_configure('removed_hi',   foreground=C['removed_fg'], background=_rem_hi)
+        self._diff.tag_configure('added_hi',     foreground=C['added_fg'],   background=_add_hi)
         self._diff.tag_raise('sel')
 
         self._flist.bind('<Button-1>', self._on_file_click)
@@ -550,7 +527,7 @@ class App:
         self._flist.bind('<Up>',         lambda e: self._flist_nav(-1) or 'break')
         self._flist.bind('<Down>',       lambda e: self._flist_nav( 1) or 'break')
         self._flist.bind('<Return>',     lambda e: self._flist_activate() or 'break')
-        self._flist.bind('w',            lambda e: self._toggle_whole_file() or 'break')
+        self._flist.bind('d',            lambda e: self._toggle_word_diff() or 'break')
         self._on_wrap_toggle()
 
     def _on_wrap_toggle(self) -> None:
@@ -569,21 +546,16 @@ class App:
         self._save_config({'tree_view': self._tree_var.get()})
         self._render_flist(self._entries)
 
-    def _toggle_whole_file(self) -> None:
-        if hasattr(self._source, 'blob_content'):
-            self._whole_file_var.set(not self._whole_file_var.get())
-            self._on_whole_file_toggle()
+    def _toggle_word_diff(self) -> None:
+        self._word_diff_var.set(not self._word_diff_var.get())
+        self._on_word_diff_toggle()
 
-    def _on_whole_file_toggle(self) -> None:
-        self._save_config({'whole_file': self._whole_file_var.get()})
-        if self._whole_file_var.get() and self._flist_selected_row > 0:
-            entry = self._flist_row_to_entry[self._flist_selected_row - 1]
-            if entry:
-                self._current_file_idx = next(
-                    (i for i, df in enumerate(self._diff_files) if df.path == entry.path), 0)
+    def _on_word_diff_toggle(self) -> None:
+        self._save_config({'word_diff': self._word_diff_var.get()})
+        top_line = int(self._diff.index('@0,0').split('.')[0])
         self._render_diff_panel()
-        if not self._whole_file_var.get() and self._diff_files:
-            self._jump_to(self._diff_files[self._current_file_idx].path)
+        self._diff.yview(f'{top_line}.0')
+        self._scroll_target = self._diff.yview()[0]
 
     @staticmethod
     def _load_config() -> dict:
@@ -814,12 +786,7 @@ class App:
         self._minimap_lines = []
 
         if self._diff_files:
-            whole = self._whole_file_var.get() and hasattr(self._source, 'blob_content')
-            files_to_render = (
-                [self._diff_files[self._current_file_idx]] if whole
-                else self._diff_files
-            )
-            for i, df in enumerate(files_to_render):
+            for i, df in enumerate(self._diff_files):
                 if i > 0:
                     self._diff.insert('end', '\n', 'context')
                     self._minimap_lines.append(('context', ''))
@@ -830,10 +797,7 @@ class App:
                 if idx:
                     self._diff.insert('end', f' {idx}\n', 'fileidx')
                     self._minimap_lines.append(('fileidx', f' {idx}'))
-                if whole:
-                    self._render_file_whole(df)
-                else:
-                    self._render_file_diff(df)
+                self._render_file_diff(df)
         else:
             self._diff.insert('end', 'Empty diff.\n', 'subdued')
 
@@ -845,74 +809,82 @@ class App:
         self.root.after_idle(self._render_minimap)
         self.root.after_idle(self._update_hunk_sep_widths)
 
+    def _insert_word_diff(self, old_text: str, new_text: str) -> None:
+        """Insert a removed/added line pair with two-level background highlighting.
+
+        Equal words: white text on line background (subtle tint, like the rest of the line).
+        Changed words: white text on saturated background (clearly different).
+        Text colour is always white so nothing becomes illegible.
+        """
+        tok_old = re.findall(r'\S+|\s+', old_text) or ['']
+        tok_new = re.findall(r'\S+|\s+', new_text) or ['']
+        opcodes = difflib.SequenceMatcher(None, tok_old, tok_new, autojunk=False).get_opcodes()
+
+        self._diff.insert('end', '-', 'removed')
+        for op, i1, i2, j1, j2 in opcodes:
+            text = ''.join(tok_old[i1:i2])
+            tag = 'removed_word' if (op == 'equal' or text.isspace()) else 'removed_hi'
+            self._diff.insert('end', text, tag)
+        self._diff.insert('end', '\n')
+        self._minimap_lines.append(('removed', '-' + old_text))
+
+        self._diff.insert('end', '+', 'added')
+        for op, i1, i2, j1, j2 in opcodes:
+            text = ''.join(tok_new[j1:j2])
+            tag = 'added_word' if (op == 'equal' or text.isspace()) else 'added_hi'
+            self._diff.insert('end', text, tag)
+        self._diff.insert('end', '\n')
+        self._minimap_lines.append(('added', '+' + new_text))
+
     def _render_file_diff(self, df: DiffFile) -> None:
-        for dl in df.lines:
-            if dl.kind != 'fileheader':
-                if dl.kind == 'hunk':
-                    sep = tk.Canvas(self._diff, height=1, bg=C['subdued'],
-                                    highlightthickness=0, bd=0, width=1)
-                    self._diff.window_create('end', window=sep)
-                    self._diff.insert('end', '\n')
-                    self._hunk_seps.append(sep)
-                self._diff.insert('end', dl.text + '\n', dl.kind)
-                self._minimap_lines.append((dl.kind, dl.text))
+        word_diff = self._word_diff_var.get()
+        pending_rem: list[str] = []
+        pending_add: list[str] = []
 
-    def _render_file_whole(self, df: DiffFile) -> None:
-        old_sha, new_sha = _parse_index_shas(df.index)
+        def flush():
+            if word_diff:
+                n = min(len(pending_rem), len(pending_add))
+                for old, new in zip(pending_rem[:n], pending_add[:n]):
+                    self._insert_word_diff(old, new)
+                for old in pending_rem[n:]:
+                    self._diff.insert('end', f'-{old}\n', 'removed')
+                    self._minimap_lines.append(('removed', f'-{old}'))
+                for new in pending_add[n:]:
+                    self._diff.insert('end', f'+{new}\n', 'added')
+                    self._minimap_lines.append(('added', f'+{new}'))
+            else:
+                for old in pending_rem:
+                    self._diff.insert('end', f'-{old}\n', 'removed')
+                    self._minimap_lines.append(('removed', f'-{old}'))
+                for new in pending_add:
+                    self._diff.insert('end', f'+{new}\n', 'added')
+                    self._minimap_lines.append(('added', f'+{new}'))
+            pending_rem.clear()
+            pending_add.clear()
 
-        if df.status == 'D':
-            content = self._source.blob_content(old_sha) if old_sha else None
-            if content is not None:
-                for line in content.splitlines():
-                    self._diff.insert('end', line + '\n', 'removed')
-                    self._minimap_lines.append(('removed', line))
-                return
-            self._render_file_diff(df)
-            return
-
-        after_lines: list[str] | None = None
-        if new_sha and not all(c == '0' for c in new_sha):
-            content = self._source.blob_content(new_sha)
-            if content is not None:
-                after_lines = content.splitlines()
-        if after_lines is None:
-            content = self._source.read_worktree_file(df.path)
-            if content is not None:
-                after_lines = content.splitlines()
-        if after_lines is None:
-            self._render_file_diff(df)
-            return
-
-        current_after_pos = 0
         for dl in df.lines:
             if dl.kind == 'fileheader':
                 continue
             if dl.kind == 'hunk':
-                _, _, new_start, _ = _parse_hunk_header(dl.text)
-                for i in range(current_after_pos, new_start - 1):
-                    if i < len(after_lines):
-                        line = after_lines[i]
-                        self._diff.insert('end', line + '\n', 'context')
-                        self._minimap_lines.append(('context', line))
-                current_after_pos = new_start - 1
-            elif dl.text.startswith('\\'):
-                continue  # '\ No newline at end of file'
-            elif dl.kind == 'added':
-                self._diff.insert('end', dl.text[1:] + '\n', 'added')
-                self._minimap_lines.append(('added', dl.text[1:]))
-                current_after_pos += 1
+                flush()
+                sep = tk.Canvas(self._diff, height=1, bg=C['subdued'],
+                                highlightthickness=0, bd=0, width=1)
+                self._diff.window_create('end', window=sep)
+                self._diff.insert('end', '\n')
+                self._hunk_seps.append(sep)
+                self._diff.insert('end', dl.text + '\n', dl.kind)
+                self._minimap_lines.append((dl.kind, dl.text))
             elif dl.kind == 'removed':
-                self._diff.insert('end', dl.text[1:] + '\n', 'removed')
-                self._minimap_lines.append(('removed', dl.text[1:]))
-            elif dl.kind == 'context':
-                self._diff.insert('end', dl.text[1:] + '\n', 'context')
-                self._minimap_lines.append(('context', dl.text[1:]))
-                current_after_pos += 1
-
-        for i in range(current_after_pos, len(after_lines)):
-            line = after_lines[i]
-            self._diff.insert('end', line + '\n', 'context')
-            self._minimap_lines.append(('context', line))
+                if pending_add:
+                    flush()
+                pending_rem.append(dl.text[1:])
+            elif dl.kind == 'added':
+                pending_add.append(dl.text[1:])
+            else:
+                flush()
+                self._diff.insert('end', dl.text + '\n', dl.kind)
+                self._minimap_lines.append((dl.kind, dl.text))
+        flush()
 
     def _render_flist(self, entries: list[FileEntry]) -> None:
         self._flist_selected_row = -1
@@ -1017,24 +989,15 @@ class App:
             idx = paths.index(cur_entry.path)
         except ValueError:
             return
-        target = idx + offset
-        if 0 <= target < len(self._entries):
-            target_entry = self._entries[target]
-            display_row = self._flist_path_to_row.get(target_entry.path, -1)
-            if display_row > 0:
-                self._highlight_row(display_row)
-            self._jump_to(target_entry.path)
-            self._diff.focus_set()
+        target = (idx + offset) % len(self._entries)
+        target_entry = self._entries[target]
+        display_row = self._flist_path_to_row.get(target_entry.path, -1)
+        if display_row > 0:
+            self._highlight_row(display_row)
+        self._jump_to(target_entry.path)
+        self._diff.focus_set()
 
     def _jump_to(self, path: str) -> None:
-        if self._whole_file_var.get() and hasattr(self._source, 'blob_content'):
-            idx = next((i for i, df in enumerate(self._diff_files) if df.path == path), -1)
-            if idx >= 0 and idx != self._current_file_idx:
-                self._current_file_idx = idx
-                self._render_diff_panel()
-            self._diff.yview_moveto(0.0)
-            self._scroll_target = 0.0
-            return
         self._manual_scroll = False
         pos = self._positions.get(path)
         if not pos:
@@ -1095,7 +1058,7 @@ def main() -> None:
     root.title(' | '.join(title_parts))
     root.bind('<Control-w>', lambda _: root.destroy())
     root.bind('<Control-q>', lambda _: root.destroy())
-    App(root, diff_text, source)
+    App(root, diff_text)
     root.mainloop()
 
 

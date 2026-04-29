@@ -8,6 +8,12 @@ Lightweight terminal-launched Git diff viewer. Two-panel GUI: coloured diff on t
 uv tool install .
 ```
 
+Or just point an alias at the script directly (no install step needed):
+
+```bash
+alias gitr=~/path/to/gitr/gitr.py
+```
+
 ## Usage
 
 ```bash

@@ -90,9 +90,9 @@ class GitSource:
                     ['git', 'merge-base', self._refs[0], 'HEAD'],
                     text=True, stderr=subprocess.PIPE).strip()
                 return subprocess.check_output(
-                    ['git', 'diff', sha], text=True, stderr=subprocess.PIPE)
+                    ['git', 'diff', '--no-color', sha], text=True, stderr=subprocess.PIPE)
             return subprocess.check_output(
-                ['git', 'diff'] + self._refs, text=True, stderr=subprocess.PIPE)
+                ['git', 'diff', '--no-color'] + self._refs, text=True, stderr=subprocess.PIPE)
         except subprocess.CalledProcessError as e:
             sys.exit(f'gitr: git command failed: {e.stderr.strip()}')
         except FileNotFoundError:

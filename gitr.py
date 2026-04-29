@@ -226,6 +226,19 @@ def _walk_trie(node: dict, rows: list, depth: int, dir_label: str) -> None:
             _walk_trie(child, rows, depth, name + '/')
 
 
+def _common_dir_prefix(prev: str, curr: str) -> str:
+    """Return the directory prefix shared between prev and curr, at path boundaries."""
+    prev_dirs = prev.split('/')[:-1]
+    curr_dirs = curr.split('/')[:-1]
+    common = []
+    for a, b in zip(prev_dirs, curr_dirs):
+        if a == b:
+            common.append(a)
+        else:
+            break
+    return '/'.join(common) + '/' if common else ''
+
+
 # --config -------------------------------------------------------------------
 
 class CFG:
@@ -446,7 +459,9 @@ class App:
                               font=font, wrap='char',
                               relief='flat', bd=0, cursor='arrow',
                               selectbackground=C['selected_bg'],
-                              selectforeground=C['fg'])
+                              selectforeground=C['fg'],
+                              inactiveselectbackground=C['selected_bg'],
+                              insertwidth=0)
         self._make_read_only(self._diff)
         self._diff.bind('<Configure>', self._on_diff_configure)
         self._diff.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
@@ -937,6 +952,7 @@ class App:
                     self._flist_path_to_row[entry.path] = display_row
                     self._flist_row_to_entry.append(entry)
         else:
+            prev_path = ''
             for e in entries:
                 parts: list[str] = []
                 if e.additions:
@@ -944,13 +960,20 @@ class App:
                 if e.deletions:
                     parts.append(f'-{e.deletions}')
                 self._flist.insert('end', f' {e.status} ', f'status_{e.status}')
-                self._flist.insert('end', f' {e.path}')
+                prefix = _common_dir_prefix(prev_path, e.path)
+                self._flist.insert('end', ' ')
+                if prefix:
+                    self._flist.insert('end', prefix, 'dir')
+                    self._flist.insert('end', e.path[len(prefix):])
+                else:
+                    self._flist.insert('end', e.path)
                 if parts:
                     self._flist.insert('end', f'  {" ".join(parts)}', 'stats')
                 self._flist.insert('end', '\n')
                 display_row = len(self._flist_row_to_entry) + 1
                 self._flist_path_to_row[e.path] = display_row
                 self._flist_row_to_entry.append(e)
+                prev_path = e.path
 
         self._flist.configure(state='disabled')
         if entries:

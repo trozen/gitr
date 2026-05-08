@@ -584,10 +584,12 @@ class App:
         self._active_comment_entry: tk.Text | None = None
         self._comment_target: tuple[str, str, int] | None = None
         self._hover_line: int = -1
+        self._hover_range: tuple[str, str] | None = None
         self._hover_btn_line: int = -1
         self._hide_after_id: str | None = None
         self._over_hover_btn: bool = False
         self._btn_leave_after_id: str | None = None
+        self._has_focus: bool = True
         cfg = self._load_config()
         self._wrap_var = tk.BooleanVar(value=cfg.get('wrap_lines', True))
         self._tree_var = tk.BooleanVar(value=cfg.get('tree_view', False))
@@ -745,6 +747,8 @@ class App:
         self._diff.bind('<ButtonRelease-3>', self._show_diff_context_menu)
         self._diff.bind('<Motion>', self._on_diff_hover)
         self._diff.bind('<Leave>',  lambda e: self._schedule_hide())
+        self.root.bind('<FocusOut>', self._on_root_focus_out, add='+')
+        self.root.bind('<FocusIn>',  self._on_root_focus_in,  add='+')
         self._comment_hover_btn = self._make_hover_button('+comment(a)', C['comment_fg'], self._on_comment_btn_click)
         self._copy_hover_btn    = self._make_hover_button('copy(c)',      C['fg'],          self._on_copy_btn_click)
         self._diff_vs = self._make_scrollbar(lf, orient='vertical', command=self._diff.yview)
@@ -1047,15 +1051,19 @@ class App:
 
     # --hunk separators -------------------------------------------------------
 
-    def _make_hover_button(self, text: str, fg: str, command) -> tk.Button:
-        btn = tk.Button(
+    def _make_hover_button(self, text: str, fg: str, command) -> tk.Label:
+        # Match the diff text's font so the label's natural height equals the
+        # diff line height. Multiplying menu_font_size by self._scale (as menus
+        # do) double-applies DPI scaling and overflows the ruler row.
+        # tk.Label (rather than tk.Button) avoids the platform theme shadow.
+        btn = tk.Label(
             self._diff, text=text,
             bg=C['topbar_bg'], fg=fg,
-            activebackground=C['topbar_bg'], activeforeground=fg,
-            relief='flat', bd=0, highlightthickness=0, cursor='hand2',
-            font=(CFG.font_family, int(CFG.menu_font_size * self._scale)),
-            command=command,
+            bd=0, highlightthickness=0, cursor='hand2',
+            padx=4, pady=0,
+            font=(CFG.font_family, CFG.font_size),
         )
+        btn.bind('<Button-1>', lambda e: command())
         btn.bind('<Enter>', lambda e: self._on_btn_enter())
         btn.bind('<Leave>', lambda e: self._on_btn_leave())
         return btn
@@ -1184,7 +1192,7 @@ class App:
         self._update_sticky_header()
         self._update_minimap_viewport()
         if self._hover_line >= 0 or self._hover_btn_line >= 0:
-            self._do_hide_hover()
+            self._do_hide_hover(force=True)
 
     def _update_sticky_header(self) -> None:
         if not self._pos_order:
@@ -1788,42 +1796,77 @@ class App:
         self._over_hover_btn = False
         self._schedule_hide()
 
-    def _do_hide_hover(self) -> None:
+    def _on_root_focus_out(self, event: tk.Event) -> None:
+        # FocusOut fires for child widgets too; only act when the toplevel
+        # itself loses focus (another app/window taking it).
+        if event.widget is self.root:
+            self._has_focus = False
+            self._do_hide_hover(force=True)
+
+    def _on_root_focus_in(self, event: tk.Event) -> None:
+        if event.widget is self.root:
+            self._has_focus = True
+
+    def _do_hide_hover(self, force: bool = False) -> None:
         self._hide_after_id = None
-        if self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
+        if not force and self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
             return
-        if self._hover_line >= 0:
-            self._diff.tag_remove('hover', f'{self._hover_line}.0', f'{self._hover_line}.end+1c')
-            self._hover_line = -1
+        if self._hover_range is not None:
+            start, end = self._hover_range
+            self._diff.tag_remove('hover', start, end)
+            self._hover_range = None
+        self._hover_line = -1
         self._comment_hover_btn.place_forget()
         self._copy_hover_btn.place_forget()
         self._hover_btn_line = -1
+        self._over_hover_btn = False
 
     def _on_diff_hover(self, event: tk.Event) -> None:
+        if not self._has_focus:
+            return
         if self._active_comment_frame or self._over_hover_btn:
             return
         self._cancel_hide_schedule()
-        line_no = int(self._diff.index(f'@{event.x},{event.y}').split('.')[0])
+        idx = self._diff.index(f'@{event.x},{event.y}')
+        line_no = int(idx.split('.')[0])
         if line_no == self._hover_line:
             return
         tags = set(self._diff.tag_names(f'{line_no}.0'))
         if not tags & {'added', 'removed', 'context'}:
             self._do_hide_hover()
             return
-        if self._hover_line >= 0:
-            self._diff.tag_remove('hover', f'{self._hover_line}.0', f'{self._hover_line}.end+1c')
-        self._hover_line = line_no
-        self._diff.tag_add('hover', f'{line_no}.0', f'{line_no}.end+1c')
-        bbox = self._diff.bbox(f'{line_no}.0')
-        if bbox:
-            _, y, _, h = bbox
+        if self._hover_range is not None:
+            start, end = self._hover_range
+            self._diff.tag_remove('hover', start, end)
+        # Highlight a single display row under the cursor. For unwrapped lines
+        # we extend past the newline so Tk fills the tag bg to the row's right
+        # edge; for wrapped lines we stop at display lineend (no newline to
+        # latch onto, and we don't want to highlight the other wrap rows).
+        disp_start = self._diff.index(f'{idx} display linestart')
+        disp_end   = self._diff.index(f'{idx} display lineend')
+        line_end   = self._diff.index(f'{disp_start} lineend')
+        if self._diff.compare(disp_end, '>=', line_end):
+            tag_end = self._diff.index(f'{line_end}+1c')
+        else:
+            tag_end = disp_end
+        self._hover_range = (disp_start, tag_end)
+        self._hover_line  = line_no
+        self._diff.tag_add('hover', disp_start, tag_end)
+        info = self._diff.dlineinfo(disp_start)
+        if info:
+            _, y, _, h, _ = info
+            # Inset the button so it can never exceed the ruler vertically,
+            # regardless of font metrics / theme quirks. Centered in the row.
+            inset  = 2
+            btn_h  = max(1, h - 2 * inset)
+            btn_y  = y + inset
             comment_w = self._comment_hover_btn.winfo_reqwidth()
             copy_w    = self._copy_hover_btn.winfo_reqwidth()
             comment_x = self._diff.winfo_width() - comment_w - 4
             copy_x    = comment_x - copy_w - 6
             if copy_x > 0:
-                self._comment_hover_btn.place(x=comment_x, y=y, height=h)
-                self._copy_hover_btn.place(x=copy_x, y=y, height=h)
+                self._comment_hover_btn.place(x=comment_x, y=btn_y, height=btn_h)
+                self._copy_hover_btn.place(x=copy_x, y=btn_y, height=btn_h)
                 self._hover_btn_line = line_no
             else:
                 self._comment_hover_btn.place_forget()

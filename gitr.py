@@ -3,6 +3,7 @@
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -44,6 +45,11 @@ class FileEntry:
 class DiffLine:
     text: str
     kind: str                # added | removed | context | hunk | fileheader
+    # Post-image line number (None for hunk/fileheader; for removed lines this
+    # is the new-side position the line would occupy if restored, i.e. the
+    # post-image line number of the next + or context line in the hunk).
+    new_line_no: Optional[int] = None
+    old_line_no: Optional[int] = None  # pre-image line number, similarly defined
 
 
 @dataclass
@@ -53,6 +59,38 @@ class DiffFile:
     status: str = 'M'
     old_path: str = ''
     index: str = ''
+
+
+@dataclass
+class _CommentEditTarget:
+    """In-flight state for the inline comment editor. Set when the editor
+    opens, consumed (or discarded) when the user confirms or cancels."""
+    file: str
+    new_line_no: int
+    side: str
+    line_text: str
+    # Non-None when editing an existing comment; None for a fresh comment
+    # whose snapshot will be taken at confirm time.
+    existing_snapshot: Optional[str] = None
+    existing_snap_line_no: Optional[int] = None
+
+
+@dataclass
+class _ResolvedAnchor:
+    """A comment entry mapped through its snapshot to a position in the
+    current diff. ``target_line_no`` is the post-image line number we expect
+    to find the line at (after diffing the snapshot vs. the current file);
+    ``moved`` is set when the line shifted or its text changed."""
+    file: str
+    snapshot: str
+    snap_line_no: int       # line_no stored with the entry
+    target_line_no: int     # snap_line_no remapped to the current file
+    side: str               # '+', '-', or ' '
+    line_text: str          # diff line text including +/-/ prefix
+    comment: str
+    moved: bool = False
+    matched: bool = False
+    src_line: Optional[int] = None  # diff Text line number once rendered
 
 
 # --git helpers ------------------------------------------------------------
@@ -150,63 +188,177 @@ class GitSource:
 
 
 
-def _find_gitr_dir() -> 'Path | None':
+def _find_repo_root() -> 'Path | None':
     for d in [Path.cwd(), *Path.cwd().parents]:
         if (d / '.git').is_dir() or (d / '.git').is_file():
-            return d / '.gitr'
+            return d
     return None
 
 
+def _find_gitr_dir() -> 'Path | None':
+    root = _find_repo_root()
+    return (root / '.gitr') if root else None
+
+
+def _read_text_safe(path: Path) -> 'str | None':
+    try:
+        return path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _compute_line_map(snapshot: str, current: str) -> dict[int, int]:
+    """Return a mapping {snapshot_line_no -> current_line_no} (1-based).
+
+    For 'equal' opcode blocks the mapping is exact. For 'replace' / 'delete'
+    blocks each snapshot line maps to the closest surviving current line
+    (clamped to the new block's range, or to the line just before for pure
+    deletes). The caller decides what to do with such mappings (typically
+    flag the comment as 'moved').
+    """
+    a = snapshot.splitlines()
+    b = current.splitlines()
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    out: dict[int, int] = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = j1 + k + 1
+        elif tag == 'replace':
+            span_b = max(j2 - j1, 1)
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = min(j2, j1 + k * span_b // max(i2 - i1, 1)) + 1
+        elif tag == 'delete':
+            # Anchor each deleted snapshot line to the surviving current line
+            # right before the delete. For a pure prefix delete (j1 == 0)
+            # there's no surviving line above, so leave it unmapped — the
+            # caller falls back to the original line_no, which won't match
+            # any rendered diff line and routes the comment to the orphan
+            # section instead of attaching it to unrelated code at line 1.
+            if j1 == 0:
+                continue
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = j1
+    return out
+
+
 class ReviewStore:
-    """Comments keyed by (file, line_text, occurrence) so duplicate diff lines
-    in the same file (e.g. several blank lines or repeated `return None`s)
-    don't share a single comment slot."""
+    """Comments anchored to a snapshot of the file at creation time. On
+    lookup the snapshot is diffed against the current working-tree file to
+    remap line numbers, so a comment stays near the right line even after
+    the file is edited.
+
+    JSON layout (.gitr/review.json):
+      {"files": {"<path>": [
+          {"snapshot": "<sha1>", "line_no": <int>, "side": "+|-| ",
+           "line_text": "<diff line text>", "comment": "<text>"}
+      ]}}
+
+    Snapshot blobs live in .gitr/snapshots/<sha1> as plain text. Multiple
+    comments on the same file at the same time share one snapshot.
+
+    TODO: GC unreferenced snapshot files periodically (e.g. on store load
+    when the count exceeds a threshold).
+    """
 
     def __init__(self) -> None:
         gitr_dir = _find_gitr_dir()
+        self._gitr_dir = gitr_dir
         self._path = (gitr_dir / 'review.json') if gitr_dir else None
-        self._data: dict[str, dict[tuple[str, int], str]] = {}
+        self._snap_dir = (gitr_dir / 'snapshots') if gitr_dir else None
+        self._data: dict[str, list[dict]] = {}
+        # Cache of snapshot content keyed by sha; populated on demand.
+        self._snap_cache: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
-        if self._path and self._path.exists():
-            try:
-                for entry in json.loads(self._path.read_text()):
-                    occ = int(entry.get('occurrence', 0))
-                    self._data.setdefault(entry['file'], {})[(entry['line'], occ)] = entry['comment']
-            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-                pass
+        if not (self._path and self._path.exists()):
+            return
+        try:
+            obj = json.loads(self._path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(obj, dict):
+            # Old list-shaped review.json from before the snapshot anchor
+            # rewrite. The comments there don't have snapshots and can't be
+            # remapped, so they're ignored. Tell the user once so the data
+            # vanishing isn't a surprise.
+            print(f'gitr: ignoring legacy {self._path} '
+                  '(snapshot-based anchors required)', file=sys.stderr)
+            return
+        files = obj.get('files')
+        if isinstance(files, dict):
+            self._data = {f: list(entries) for f, entries in files.items()
+                          if isinstance(entries, list)}
 
     def _save(self) -> None:
         if not self._path:
             return
-        entries = [{'file': f, 'line': line, 'occurrence': occ, 'comment': c}
-                   for f, lines in self._data.items()
-                   for (line, occ), c in lines.items()]
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(entries, indent=2))
+            self._path.write_text(json.dumps({'files': self._data}, indent=2))
         except OSError:
             pass
 
-    def get(self, file: str, line_text: str, occurrence: int = 0) -> str | None:
-        return self._data.get(file, {}).get((line_text, occurrence))
+    def write_snapshot(self, content: str) -> 'str | None':
+        """Persist ``content`` under .gitr/snapshots/<sha1> and return the sha,
+        or ``None`` if the snapshot can't be persisted. Returning ``None``
+        prevents callers from storing an entry whose snapshot won't survive
+        this process — without persistence the in-memory cache is the only
+        copy and remap on the next run would silently degrade."""
+        sha = hashlib.sha1(content.encode('utf-8', errors='replace')).hexdigest()
+        if not self._snap_dir:
+            return None
+        try:
+            self._snap_dir.mkdir(parents=True, exist_ok=True)
+            p = self._snap_dir / sha
+            if not p.exists():
+                p.write_text(content)
+        except OSError as e:
+            print(f'gitr: cannot write snapshot {sha}: {e}', file=sys.stderr)
+            return None
+        self._snap_cache[sha] = content
+        return sha
 
-    def set(self, file: str, line_text: str, occurrence: int, comment: str) -> None:
-        self._data.setdefault(file, {})[(line_text, occurrence)] = comment
+    def read_snapshot(self, sha: str) -> 'str | None':
+        if sha in self._snap_cache:
+            return self._snap_cache[sha]
+        if not self._snap_dir:
+            return None
+        text = _read_text_safe(self._snap_dir / sha)
+        if text is not None:
+            self._snap_cache[sha] = text
+        return text
+
+    def add(self, file: str, snapshot: str, line_no: int, side: str,
+            line_text: str, comment: str) -> None:
+        entries = self._data.setdefault(file, [])
+        for e in entries:
+            if (e.get('snapshot') == snapshot and e.get('line_no') == line_no
+                    and e.get('side') == side):
+                e['line_text'] = line_text
+                e['comment'] = comment
+                self._save()
+                return
+        entries.append({'snapshot': snapshot, 'line_no': line_no, 'side': side,
+                        'line_text': line_text, 'comment': comment})
         self._save()
 
-    def delete(self, file: str, line_text: str, occurrence: int = 0) -> None:
-        if file in self._data and (line_text, occurrence) in self._data[file]:
-            del self._data[file][(line_text, occurrence)]
-            if not self._data[file]:
-                del self._data[file]
-            self._save()
+    def delete(self, file: str, snapshot: str, line_no: int, side: str) -> None:
+        entries = self._data.get(file)
+        if not entries:
+            return
+        for i, e in enumerate(entries):
+            if (e.get('snapshot') == snapshot and e.get('line_no') == line_no
+                    and e.get('side') == side):
+                del entries[i]
+                if not entries:
+                    del self._data[file]
+                self._save()
+                return
 
-    def all_comments(self) -> list[tuple[str, str, int, str]]:
-        return [(f, line, occ, c)
-                for f in sorted(self._data)
-                for (line, occ), c in self._data[f].items()]
+    def all_entries(self) -> list[tuple[str, dict]]:
+        return [(f, e) for f in sorted(self._data) for e in self._data[f]]
 
     def is_empty(self) -> bool:
         return not any(self._data.values())
@@ -238,9 +390,13 @@ def _classify(line: str) -> str:
     return 'context'
 
 
+_HUNK_RE = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
+
+
 def parse_diff(text: str) -> list[DiffFile]:
     files: list[DiffFile] = []
     current: Optional[DiffFile] = None
+    cur_old = cur_new = 0  # next line numbers within the active hunk
 
     for raw in text.splitlines():
         if raw.startswith('diff --git '):
@@ -249,10 +405,32 @@ def parse_diff(text: str) -> list[DiffFile]:
             b_idx = raw.rfind(' b/')
             path = raw[b_idx + 3:] if b_idx != -1 else 'unknown'
             current = DiffFile(path)
+            cur_old = cur_new = 0
         if current is not None:
-            dl = DiffLine(raw, _classify(raw))
+            kind = _classify(raw)
+            new_no: Optional[int] = None
+            old_no: Optional[int] = None
+            if kind == 'hunk':
+                m = _HUNK_RE.match(raw)
+                if m:
+                    cur_old = int(m.group(1))
+                    cur_new = int(m.group(2))
+            elif kind == 'context':
+                old_no, new_no = cur_old, cur_new
+                cur_old += 1
+                cur_new += 1
+            elif kind == 'added':
+                new_no = cur_new
+                cur_new += 1
+            elif kind == 'removed':
+                old_no = cur_old
+                # Anchor a removed line to the post-image position it sits
+                # between (same as the next + / context line that follows it).
+                new_no = cur_new
+                cur_old += 1
+            dl = DiffLine(raw, kind, new_line_no=new_no, old_line_no=old_no)
             current.lines.append(dl)
-            if dl.kind == 'fileheader':
+            if kind == 'fileheader':
                 if raw.startswith('new file'):
                     current.status = 'A'
                 elif raw.startswith('deleted file'):
@@ -566,10 +744,15 @@ class App:
         self._minimap_content_h: int = 0
         self._hunk_seps: list[tk.Canvas] = []
         self._comment_frames: list[tk.Frame] = []
-        self._render_occ: dict[str, dict[str, int]] = {}
-        self._line_occurrence: dict[int, int] = {}
-        self._line_index: dict[str, dict[str, dict[int, int]]] = {}
-        self._comments_by_file: dict[str, list[tuple[str, int, str]]] = {}
+        # Rebuilt every render from the review store + working-tree files.
+        self._pending_anchors: dict[str, list['_ResolvedAnchor']] = {}
+        self._line_to_anchor: dict[int, '_ResolvedAnchor'] = {}
+        # (file, new_line_no, side, line_text) for every rendered diff line —
+        # used when opening the editor on a not-yet-commented line.
+        self._line_post_image: dict[int, tuple[str, int, str, str]] = {}
+        # Avoid re-reading and re-hashing a file for each new comment in a burst.
+        self._session_snapshots: dict[str, str] = {}
+        self._repo_root = _find_repo_root()
         self._scroll_target: float = 0.0
         self._scroll_animating: bool = False
         self._flist_selected_row: int = -1
@@ -582,7 +765,7 @@ class App:
         self._has_unstaged = has_unstaged
         self._active_comment_frame: tk.Frame | None = None
         self._active_comment_entry: tk.Text | None = None
-        self._comment_target: tuple[str, str, int] | None = None
+        self._comment_target: '_CommentEditTarget | None' = None
         self._hover_line: int = -1
         self._hover_range: tuple[str, str] | None = None
         self._hover_btn_line: int = -1
@@ -1256,12 +1439,9 @@ class App:
             sep.destroy()
         self._hunk_seps.clear()
         self._comment_frames.clear()
-        self._render_occ = {}
-        self._line_occurrence = {}
-        self._line_index = {}
-        self._comments_by_file = {}
-        for file, line, occ, cmt in self._review.all_comments():
-            self._comments_by_file.setdefault(file, []).append((line, occ, cmt))
+        self._line_to_anchor = {}
+        self._line_post_image = {}
+        self._pending_anchors = self._resolve_review_anchors()
         self._diff.delete('1.0', 'end')
         self._positions.clear()
         self._minimap_lines = []
@@ -1291,7 +1471,9 @@ class App:
         self.root.after_idle(self._update_hunk_sep_widths)
         self.root.after_idle(self._update_comments_section)
 
-    def _insert_word_diff(self, old_text: str, new_text: str, file_path: str) -> None:
+    def _insert_word_diff(self, old_dl: DiffLine, new_dl: DiffLine, file_path: str) -> None:
+        old_text = old_dl.text[1:]
+        new_text = new_dl.text[1:]
         tok_old = re.findall(r'\w+|[^\w\s]|\s+', old_text) or ['']
         tok_new = re.findall(r'\w+|[^\w\s]|\s+', new_text) or ['']
         nws_old = [t for t in tok_old if not t.isspace()]
@@ -1299,15 +1481,18 @@ class App:
         if difflib.SequenceMatcher(None, nws_old, nws_new, autojunk=False).ratio() < CFG.word_diff_min_ratio:
             self._diff.insert('end', f'-{old_text}\n', 'removed')
             self._minimap_lines.append(('removed', '-' + old_text))
-            self._insert_comment_annotation(file_path, f'-{old_text}')
+            self._insert_comment_annotation(file_path, old_dl, old_dl.text)
             self._diff.insert('end', f'+{new_text}\n', 'added')
             self._minimap_lines.append(('added', '+' + new_text))
-            self._insert_comment_annotation(file_path, f'+{new_text}')
+            self._insert_comment_annotation(file_path, new_dl, new_dl.text)
             return
         if nws_old == nws_new and self._word_diff_var.get() == 2:
             self._diff.insert('end', f'~{new_text}\n', 'reindent')
             self._minimap_lines.append(('reindent', new_text))
-            self._insert_comment_annotation(file_path, f'~{new_text}')
+            # The single rendered line stands in for both the - and + sides;
+            # offer both as anchor candidates.
+            self._insert_comment_annotation(file_path, old_dl, old_dl.text)
+            self._insert_comment_annotation(file_path, new_dl, new_dl.text)
             return
         opcodes = difflib.SequenceMatcher(None, tok_old, tok_new, autojunk=False).get_opcodes()
 
@@ -1318,7 +1503,7 @@ class App:
             self._diff.insert('end', text, tag)
         self._diff.insert('end', '\n')
         self._minimap_lines.append(('removed', '-' + old_text))
-        self._insert_comment_annotation(file_path, f'-{old_text}')
+        self._insert_comment_annotation(file_path, old_dl, old_dl.text)
 
         self._diff.insert('end', '+', 'added')
         for op, i1, i2, j1, j2 in opcodes:
@@ -1327,35 +1512,44 @@ class App:
             self._diff.insert('end', text, tag)
         self._diff.insert('end', '\n')
         self._minimap_lines.append(('added', '+' + new_text))
-        self._insert_comment_annotation(file_path, f'+{new_text}')
+        self._insert_comment_annotation(file_path, new_dl, new_dl.text)
 
     def _render_file_diff(self, df: DiffFile) -> None:
         word_diff = self._word_diff_var.get()
-        pending_rem: list[str] = []
-        pending_add: list[str] = []
+        pending_rem: list[DiffLine] = []
+        pending_add: list[DiffLine] = []
 
         def flush():
             if word_diff and pending_rem and pending_add:
-                for action in _pair_lines_for_word_diff(pending_rem, pending_add):
+                actions = _pair_lines_for_word_diff(
+                    [d.text[1:] for d in pending_rem],
+                    [d.text[1:] for d in pending_add])
+                rem_iter = iter(pending_rem)
+                add_iter = iter(pending_add)
+                for action in actions:
                     if action[0] == 'pair':
-                        self._insert_word_diff(action[1], action[2], df.path)
+                        old_dl = next(rem_iter)
+                        new_dl = next(add_iter)
+                        self._insert_word_diff(old_dl, new_dl, df.path)
                     elif action[0] == 'rem':
-                        self._diff.insert('end', f'-{action[1]}\n', 'removed')
-                        self._minimap_lines.append(('removed', f'-{action[1]}'))
-                        self._insert_comment_annotation(df.path, f'-{action[1]}')
+                        dl = next(rem_iter)
+                        self._diff.insert('end', dl.text + '\n', 'removed')
+                        self._minimap_lines.append(('removed', dl.text))
+                        self._insert_comment_annotation(df.path, dl, dl.text)
                     else:
-                        self._diff.insert('end', f'+{action[1]}\n', 'added')
-                        self._minimap_lines.append(('added', f'+{action[1]}'))
-                        self._insert_comment_annotation(df.path, f'+{action[1]}')
+                        dl = next(add_iter)
+                        self._diff.insert('end', dl.text + '\n', 'added')
+                        self._minimap_lines.append(('added', dl.text))
+                        self._insert_comment_annotation(df.path, dl, dl.text)
             else:
-                for old in pending_rem:
-                    self._diff.insert('end', f'-{old}\n', 'removed')
-                    self._minimap_lines.append(('removed', f'-{old}'))
-                    self._insert_comment_annotation(df.path, f'-{old}')
-                for new in pending_add:
-                    self._diff.insert('end', f'+{new}\n', 'added')
-                    self._minimap_lines.append(('added', f'+{new}'))
-                    self._insert_comment_annotation(df.path, f'+{new}')
+                for dl in pending_rem:
+                    self._diff.insert('end', dl.text + '\n', 'removed')
+                    self._minimap_lines.append(('removed', dl.text))
+                    self._insert_comment_annotation(df.path, dl, dl.text)
+                for dl in pending_add:
+                    self._diff.insert('end', dl.text + '\n', 'added')
+                    self._minimap_lines.append(('added', dl.text))
+                    self._insert_comment_annotation(df.path, dl, dl.text)
             pending_rem.clear()
             pending_add.clear()
 
@@ -1374,14 +1568,14 @@ class App:
             elif dl.kind == 'removed':
                 if pending_add:
                     flush()
-                pending_rem.append(dl.text[1:])
+                pending_rem.append(dl)
             elif dl.kind == 'added':
-                pending_add.append(dl.text[1:])
+                pending_add.append(dl)
             else:
                 flush()
                 self._diff.insert('end', dl.text + '\n', dl.kind)
                 self._minimap_lines.append((dl.kind, dl.text))
-                self._insert_comment_annotation(df.path, dl.text)
+                self._insert_comment_annotation(df.path, dl, dl.text)
         flush()
         self._insert_orphan_comments_for_file(df.path)
 
@@ -1557,26 +1751,13 @@ class App:
             return None
         return int(self._diff.index(f'@{x},{y}').split('.')[0])
 
-    def _occurrence_for_line(self, line_no: int) -> int:
-        cached = self._line_occurrence.get(line_no)
-        if cached is not None:
-            return cached
-        path, _ = self._source_location(line_no)
-        if not path:
-            return 0
-        start_line = next((ln for ln, p in self._pos_order if p == path), None)
-        if start_line is None:
-            return 0
-        raw_line = self._diff.get(f'{line_no}.0', f'{line_no}.end')
-        if not raw_line:
-            return 0
-        return sum(1 for ln in range(start_line, line_no)
-                   if self._diff.get(f'{ln}.0', f'{ln}.end') == raw_line)
-
     @staticmethod
-    def _format_comment_block(comment: str) -> str:
+    def _format_comment_block(comment: str, moved: bool = False) -> str:
+        prefix       = '~ >> ' if moved else '  >> '
+        continuation = '~    ' if moved else '     '
         cmt_lines = comment.splitlines() or ['']
-        return '\n'.join(['  >> ' + cmt_lines[0]] + ['     ' + l for l in cmt_lines[1:]])
+        return '\n'.join([prefix + cmt_lines[0]]
+                         + [continuation + l for l in cmt_lines[1:]])
 
     def _loc_for_line(self, line_no: int) -> str | None:
         path, ln = self._source_location(line_no)
@@ -1584,19 +1765,13 @@ class App:
             return None
         return f'{path}:{ln}' if ln is not None else path
 
-    def _comment_for_line(self, line_no: int) -> str | None:
+    def _comment_for_line(self, line_no: int) -> '_ResolvedAnchor | None':
         if 'comment' not in self._diff.tag_names(f'{line_no}.0'):
             return None
         src_line = line_no - 1
         if src_line < 1:
             return None
-        src_text = self._diff.get(f'{src_line}.0', f'{src_line}.end')
-        if not src_text:
-            return None
-        path, _ = self._source_location(src_line)
-        if not path:
-            return None
-        return self._review.get(path, src_text, self._occurrence_for_line(src_line))
+        return self._line_to_anchor.get(src_line)
 
     def _copy_loc_and_lines(self, anchor_line: int | None = None) -> None:
         try:
@@ -1633,7 +1808,7 @@ class App:
                 continue
             cmt = self._comment_for_line(ln)
             if cmt is not None:
-                parts.append(self._format_comment_block(cmt))
+                parts.append(self._format_comment_block(cmt.comment, cmt.moved))
         text = '\n'.join(parts)
         self.root.clipboard_clear()
         self.root.clipboard_append(f'{loc}\n{text}\n')
@@ -1686,25 +1861,95 @@ class App:
 
         menu.tk_popup(event.x_root, event.y_root)
 
-    def _insert_comment_annotation(self, file_path: str, raw_line: str) -> None:
-        # end-2c steps past the implicit trailing \n that Tk Text always maintains,
-        # then past the \n we just inserted with the source line, landing on the source line.
-        src_line_no = int(self._diff.index('end-2c').split('.')[0])
-        per_file = self._render_occ.setdefault(file_path, {})
-        occurrence = per_file.get(raw_line, 0)
-        per_file[raw_line] = occurrence + 1
-        self._line_occurrence[src_line_no] = occurrence
-        self._line_index.setdefault(file_path, {}).setdefault(raw_line, {})[occurrence] = src_line_no
-        if self._review.is_empty():
-            return
-        comment = self._review.get(file_path, raw_line, occurrence)
-        if not comment:
-            return
-        self._render_comment_frame(src_line_no, file_path, raw_line, occurrence, comment)
+    @staticmethod
+    def _side_for_kind(kind: str) -> str:
+        if kind == 'added':   return '+'
+        if kind == 'removed': return '-'
+        return ' '
 
-    def _render_comment_frame(self, src_line_no: int, file_path: str, raw_line: str,
-                              occurrence: int, comment: str) -> None:
-        cmt_display = self._format_comment_block(comment)
+    def _read_current_file(self, file_path: str) -> 'str | None':
+        if not self._repo_root:
+            return None
+        return _read_text_safe(self._repo_root / file_path)
+
+    def _resolve_review_anchors(self) -> dict[str, list['_ResolvedAnchor']]:
+        """Map every stored comment through its snapshot to a target line in
+        the current working tree (via difflib). Unmatched anchors fall
+        through to orphan rendering at the end of each file's hunks."""
+        result: dict[str, list[_ResolvedAnchor]] = {}
+        current_cache: dict[str, str | None] = {}
+        map_cache: dict[tuple[str, str], dict[int, int]] = {}
+        for file, entry in self._review.all_entries():
+            snap_sha  = str(entry.get('snapshot') or '')
+            line_no   = int(entry.get('line_no') or 0)
+            side      = str(entry.get('side') or ' ')
+            line_text = str(entry.get('line_text') or '')
+            comment   = str(entry.get('comment') or '')
+            if not (snap_sha and line_no and comment):
+                continue
+            if file not in current_cache:
+                current_cache[file] = self._read_current_file(file)
+            current = current_cache[file]
+            snap    = self._review.read_snapshot(snap_sha)
+            if current is not None and snap is not None:
+                key = (snap_sha, file)
+                line_map = map_cache.get(key)
+                if line_map is None:
+                    line_map = _compute_line_map(snap, current)
+                    map_cache[key] = line_map
+                target = line_map.get(line_no, line_no)
+            else:
+                target = line_no
+            result.setdefault(file, []).append(_ResolvedAnchor(
+                file=file, snapshot=snap_sha, snap_line_no=line_no,
+                target_line_no=target, side=side, line_text=line_text,
+                comment=comment,
+            ))
+        return result
+
+    def _consume_anchor(self, file_path: str, new_line_no: int, side: str,
+                        rendered_text: str) -> '_ResolvedAnchor | None':
+        anchors = self._pending_anchors.get(file_path)
+        if not anchors:
+            return None
+        exact: '_ResolvedAnchor | None' = None
+        loose: '_ResolvedAnchor | None' = None
+        for a in anchors:
+            if a.matched or a.target_line_no != new_line_no or a.side != side:
+                continue
+            if a.line_text == rendered_text:
+                exact = a
+                break
+            loose = loose or a
+        a = exact or loose
+        if a is None:
+            return None
+        a.matched = True
+        a.moved   = (exact is None) or (a.snap_line_no != a.target_line_no)
+        return a
+
+    def _insert_comment_annotation(self, file_path: str, dl: DiffLine,
+                                   line_text: str) -> None:
+        # end-2c steps past Tk's implicit trailing \n and the \n we just
+        # inserted with the source line, landing on the source line itself.
+        src_line_no = int(self._diff.index('end-2c').split('.')[0])
+        if dl.new_line_no is not None:
+            self._line_post_image[src_line_no] = (
+                file_path, dl.new_line_no, self._side_for_kind(dl.kind), line_text,
+            )
+        if dl.new_line_no is None:
+            return
+        anchor = self._consume_anchor(
+            file_path, dl.new_line_no, self._side_for_kind(dl.kind), line_text,
+        )
+        if anchor is None:
+            return
+        anchor.src_line = src_line_no
+        self._line_to_anchor[src_line_no] = anchor
+        self._render_comment_frame(src_line_no, anchor)
+
+    def _render_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> None:
+        cmt_display = self._format_comment_block(anchor.comment, anchor.moved)
         frame = tk.Frame(self._diff, bg=self._comment_bg)
         label = tk.Label(
             frame, text=cmt_display,
@@ -1718,7 +1963,7 @@ class App:
             activebackground=self._comment_bg, activeforeground=C['removed_fg'],
             relief='flat', bd=0, highlightthickness=0, cursor='hand2',
             font=(CFG.font_family, int(CFG.menu_font_size * self._scale)),
-            command=lambda fp=file_path, rl=raw_line, oc=occurrence: self._delete_comment(fp, rl, oc),
+            command=lambda a=anchor: self._delete_comment(a),
         )
         btn.pack(side='right', padx=4)
         label.pack(side='left', fill='x', expand=True)
@@ -1744,19 +1989,25 @@ class App:
             self._minimap_lines.append(('comment', line))
 
     def _insert_orphan_comments_for_file(self, file_path: str) -> None:
-        seen = self._render_occ.get(file_path, {})
-        for line_text, occurrence, comment in self._comments_by_file.get(file_path, []):
-            if seen.get(line_text, 0) > occurrence:
+        anchors = self._pending_anchors.get(file_path) or []
+        for a in anchors:
+            if a.matched:
                 continue
-            self._diff.insert('end', line_text + '\n', 'orphan_src')
-            self._minimap_lines.append(('orphan', line_text))
+            self._diff.insert('end', a.line_text + '\n', 'orphan_src')
+            self._minimap_lines.append(('orphan', a.line_text))
             src_line_no = int(self._diff.index('end-2c').split('.')[0])
-            self._line_occurrence[src_line_no] = occurrence
-            self._line_index.setdefault(file_path, {}).setdefault(line_text, {})[occurrence] = src_line_no
-            self._render_comment_frame(src_line_no, file_path, line_text, occurrence, comment)
+            a.matched = True
+            a.moved = True
+            a.src_line = src_line_no
+            self._line_to_anchor[src_line_no] = a
+            self._line_post_image[src_line_no] = (
+                file_path, a.snap_line_no, a.side, a.line_text,
+            )
+            self._render_comment_frame(src_line_no, a)
 
-    def _delete_comment(self, file_path: str, raw_line: str, occurrence: int) -> None:
-        self._review.delete(file_path, raw_line, occurrence)
+    def _delete_comment(self, anchor: '_ResolvedAnchor') -> None:
+        self._review.delete(anchor.file, anchor.snapshot,
+                            anchor.snap_line_no, anchor.side)
         self._rerender_preserving_scroll()
 
     def _scroll_diff_to_line(self, line_no: int) -> None:
@@ -1908,12 +2159,17 @@ class App:
         raw_line = self._diff.get(f'{line_no}.0', f'{line_no}.end')
         if not raw_line:
             return
-        path, _ = self._source_location(line_no)
-        if not path:
+        post = self._line_post_image.get(line_no)
+        if post is None:
             return
-        occurrence = self._occurrence_for_line(line_no)
-        existing = self._review.get(path, raw_line, occurrence) or ''
-        self._comment_target = (path, raw_line, occurrence)
+        file, new_line_no, side, line_text = post
+        anchor = self._line_to_anchor.get(line_no)
+        existing = anchor.comment if anchor else ''
+        self._comment_target = _CommentEditTarget(
+            file=file, new_line_no=new_line_no, side=side, line_text=line_text,
+            existing_snapshot     = anchor.snapshot     if anchor else None,
+            existing_snap_line_no = anchor.snap_line_no if anchor else None,
+        )
         bar_font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
         frame = tk.Frame(self._diff, bg=C['topbar_bg'])
         prefix = tk.Label(frame, text='  >> ', bg=C['topbar_bg'], fg=C['comment_fg'],
@@ -1988,22 +2244,33 @@ class App:
     def _confirm_comment_edit(self) -> None:
         if not self._active_comment_entry or not self._comment_target:
             return
-        path, raw_line, occurrence = self._comment_target
+        target = self._comment_target
         comment = self._active_comment_entry.get('1.0', 'end-1c').strip()
         if self._active_comment_frame:
             self._active_comment_frame.destroy()
             self._active_comment_frame = None
         self._active_comment_entry = None
         self._comment_target = None
-        if comment:
-            self._review.set(path, raw_line, occurrence, comment)
-        else:
-            self._review.delete(path, raw_line, occurrence)
+        if target.existing_snapshot is not None and target.existing_snap_line_no is not None:
+            if comment:
+                self._review.add(target.file, target.existing_snapshot,
+                                 target.existing_snap_line_no,
+                                 target.side, target.line_text, comment)
+            else:
+                self._review.delete(target.file, target.existing_snapshot,
+                                    target.existing_snap_line_no, target.side)
+        elif comment:
+            snap_sha = self._session_snapshots.get(target.file)
+            if not snap_sha:
+                content = self._read_current_file(target.file)
+                if content is not None:
+                    snap_sha = self._review.write_snapshot(content)
+                    self._session_snapshots[target.file] = snap_sha
+            if snap_sha:
+                self._review.add(target.file, snap_sha, target.new_line_no,
+                                 target.side, target.line_text, comment)
         self._rerender_preserving_scroll()
         self._diff.focus_set()
-
-    def _find_source_line(self, file_path: str, line_text: str, occurrence: int) -> 'int | None':
-        return self._line_index.get(file_path, {}).get(line_text, {}).get(occurrence)
 
     @staticmethod
     def _row_from_event(widget: tk.Text, event: tk.Event) -> int:
@@ -2016,21 +2283,22 @@ class App:
         widget.bind('<Triple-Button-1>',  lambda e: 'break')
         widget.bind('<B1-Motion>',        lambda e: 'break')
 
-    def _iter_all_comments(self) -> 'Iterator[tuple[int | None, str, str, str, bool]]':
-        """Yield (src_line, loc, src_text, comment, is_orphan) for every stored comment.
-        is_orphan is True when the stored line no longer matches an actual diff line
-        (the file may still be in the diff, in which case src_line points at a
-        rendered orphan placeholder)."""
-        for file, line_text, occurrence, comment in self._review.all_comments():
-            src_line = self._find_source_line(file, line_text, occurrence)
-            is_orphan = src_line is None or 'orphan_src' in self._diff.tag_names(f'{src_line}.0')
-            if src_line is None:
-                loc = file
-            elif is_orphan:
-                loc = f'{file} (orphaned)'
-            else:
-                loc = self._loc_for_line(src_line) or file
-            yield src_line, loc, line_text, comment, is_orphan
+    def _iter_all_comments(self) -> 'Iterator[tuple[int | None, str, str, str, bool, bool]]':
+        """Yield (src_line, loc, src_text, comment, is_orphan, moved) for every
+        stored comment. ``is_orphan`` covers both files-not-in-diff and lines
+        rendered via the orphan placeholder."""
+        for file, anchors in self._pending_anchors.items():
+            for a in anchors:
+                src_line = a.src_line
+                is_orphan = (src_line is None
+                             or 'orphan_src' in self._diff.tag_names(f'{src_line}.0'))
+                if src_line is None:
+                    loc = file
+                elif is_orphan:
+                    loc = f'{file} (orphaned)'
+                else:
+                    loc = self._loc_for_line(src_line) or file
+                yield src_line, loc, a.line_text, a.comment, is_orphan, a.moved
 
     def _rebuild_review_menu(self) -> None:
         m = self._review_menu
@@ -2041,9 +2309,10 @@ class App:
         items = list(self._iter_all_comments())
         if items:
             m.add_separator()
-            for src_line, loc, _src_text, cmt, _is_orphan in items:
+            for src_line, loc, _src_text, cmt, _is_orphan, moved in items:
                 first_line = (cmt.splitlines() or [cmt])[0]
-                label = f'{loc} - {first_line[:CFG.menu_label_max_len]}'
+                marker = '~ ' if moved else ''
+                label = f'{marker}{loc} - {first_line[:CFG.menu_label_max_len]}'
                 m.add_command(label=label,
                               state='disabled' if src_line is None else 'normal',
                               command=lambda ln=src_line: self._jump_to_diff_line(ln) if ln else None)
@@ -2128,11 +2397,13 @@ class App:
         self._cmt_list.tag_configure('loc',      foreground=C['fileheader_fg'])
         self._cmt_list.tag_configure('cmt',      foreground=C['comment_fg'])
         self._cmt_list.tag_configure('orphan',   foreground=C['subdued'])
+        self._cmt_list.tag_configure('moved',    foreground=C['comment_fg'])
         self._cmt_list.configure(state='normal')
         self._cmt_list.delete('1.0', 'end')
         self._cmt_list_actions: list = []
-        for src_line, loc, _src_text, cmt, is_orphan in items:
+        for src_line, loc, _src_text, cmt, is_orphan, moved in items:
             first = (cmt.splitlines() or [cmt])[0]
+            self._cmt_list.insert('end', '~ ' if moved and not is_orphan else '  ', 'moved')
             self._cmt_list.insert('end', loc, 'orphan' if is_orphan else 'loc')
             self._cmt_list.insert('end', '  ' + first[:CFG.cmt_panel_label_max_len] + '\n', 'cmt')
             self._cmt_list_actions.append(src_line)
@@ -2195,8 +2466,8 @@ class App:
         if self._review.is_empty():
             print('gitr: no review comments')
             return
-        for _src_line, loc, src_text, cmt, _is_orphan in self._iter_all_comments():
-            print(f'{loc}\n{src_text}\n{self._format_comment_block(cmt)}\n')
+        for _src_line, loc, src_text, cmt, _is_orphan, moved in self._iter_all_comments():
+            print(f'{loc}\n{src_text}\n{self._format_comment_block(cmt, moved)}\n')
 
     def _jump_to(self, path: str) -> None:
         self._manual_scroll = False

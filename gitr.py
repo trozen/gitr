@@ -1965,10 +1965,19 @@ class App:
             font=(CFG.font_family, int(CFG.menu_font_size * self._scale)),
             command=lambda a=anchor: self._delete_comment(a),
         )
+        copy_btn = tk.Button(
+            frame, text='copy(c)',
+            bg=self._comment_bg, fg=C['fg'],
+            activebackground=self._comment_bg, activeforeground=C['fg'],
+            relief='flat', bd=0, highlightthickness=0, cursor='hand2',
+            font=(CFG.font_family, int(CFG.menu_font_size * self._scale)),
+            command=lambda sl=src_line_no: self._copy_loc_and_lines(sl + 1),
+        )
         btn.pack(side='right', padx=4)
+        copy_btn.pack(side='right', padx=4)
         label.pack(side='left', fill='x', expand=True)
         frame.update_idletasks()
-        h = max(label.winfo_reqheight(), btn.winfo_reqheight())
+        h = max(label.winfo_reqheight(), btn.winfo_reqheight(), copy_btn.winfo_reqheight())
         w = max(self._diff.winfo_width() - self._diff_row_pad(), 1)
         frame.configure(width=w, height=h)
         frame.pack_propagate(False)
@@ -1980,6 +1989,7 @@ class App:
         frame.bind('<Enter>', lambda e: self._do_hide_hover())
         label.bind('<Enter>', lambda e: self._do_hide_hover())
         btn.bind('<Enter>',   lambda e: self._do_hide_hover())
+        copy_btn.bind('<Enter>', lambda e: self._do_hide_hover())
         self._diff.window_create('end', window=frame)
         self._diff.insert('end', '\n')
         cmt_line_no = src_line_no + 1

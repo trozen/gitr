@@ -207,6 +207,36 @@ def _read_text_safe(path: Path) -> 'str | None':
         return None
 
 
+def _load_window_state() -> 'dict | None':
+    gitr_dir = _find_gitr_dir()
+    if not gitr_dir:
+        return None
+    p = gitr_dir / 'window.json'
+    if not p.exists():
+        return None
+    try:
+        obj = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _save_window_state(geometry: str, sash_ratio: float,
+                       scroll_frac: float) -> None:
+    gitr_dir = _find_gitr_dir()
+    if not gitr_dir:
+        return
+    try:
+        gitr_dir.mkdir(parents=True, exist_ok=True)
+        (gitr_dir / 'window.json').write_text(json.dumps({
+            'geometry':    geometry,
+            'sash_ratio':  sash_ratio,
+            'scroll_frac': scroll_frac,
+        }, indent=2))
+    except OSError:
+        pass
+
+
 def _compute_line_map(snapshot: str, current: str) -> dict[int, int]:
     """Return a mapping {snapshot_line_no -> current_line_no} (1-based).
 
@@ -840,9 +870,23 @@ class App:
                                     postcommand=self._rebuild_review_menu, **menu_kw)
         menubar.add_cascade(label='Review', menu=self._review_menu)
         self.root.configure(bg=C['bg'], menu=menubar)
-        sw, sh = _primary_monitor_size()
-        w, h = int(sw * CFG.window_scale), int(sh * CFG.window_scale)
-        self.root.geometry(f'{w}x{h}')
+        self._sash_ratio = CFG.sash_ratio
+        self._pending_scroll_frac: 'float | None' = None
+        saved_state = _load_window_state()
+        if saved_state and isinstance(saved_state.get('geometry'), str):
+            self.root.geometry(saved_state['geometry'])
+        else:
+            sw, sh = _primary_monitor_size()
+            w, h = int(sw * CFG.window_scale), int(sh * CFG.window_scale)
+            self.root.geometry(f'{w}x{h}')
+        if saved_state and isinstance(saved_state.get('sash_ratio'), (int, float)):
+            r = float(saved_state['sash_ratio'])
+            if 0.05 < r < 0.95:
+                self._sash_ratio = r
+        if saved_state and isinstance(saved_state.get('scroll_frac'), (int, float)):
+            f = float(saved_state['scroll_frac'])
+            if 0.0 <= f <= 1.0:
+                self._pending_scroll_frac = f
         font = (CFG.font_family, CFG.font_size)
 
         # top bar
@@ -1178,8 +1222,9 @@ class App:
     def _init_sash(self) -> None:
         w = self._sash.winfo_width()
         if w > 1:
-            self._sash.sash_place(0, int(w * CFG.sash_ratio), 0)
+            self._sash.sash_place(0, int(w * self._sash_ratio), 0)
             self.root.bind('<Configure>', self._on_window_configure)
+            self._sash.bind('<ButtonRelease-1>', self._on_sash_release, add='+')
         else:
             self.root.after(50, self._init_sash)
 
@@ -1190,7 +1235,17 @@ class App:
     def _place_sash(self) -> None:
         w = self._sash.winfo_width()
         if w > 1:
-            self._sash.sash_place(0, int(w * CFG.sash_ratio), 0)
+            self._sash.sash_place(0, int(w * self._sash_ratio), 0)
+
+    def _on_sash_release(self, _event: tk.Event) -> None:
+        w = self._sash.winfo_width()
+        if w <= 1:
+            return
+        try:
+            x = self._sash.sash_coord(0)[0]
+        except (tk.TclError, IndexError):
+            return
+        self._sash_ratio = max(0.05, min(0.95, x / w))
 
     # --smooth scroll ---------------------------------------------------------
 
@@ -1470,6 +1525,10 @@ class App:
         self.root.after_idle(self._render_minimap)
         self.root.after_idle(self._update_hunk_sep_widths)
         self.root.after_idle(self._update_comments_section)
+        if self._pending_scroll_frac is not None:
+            frac = self._pending_scroll_frac
+            self._pending_scroll_frac = None
+            self.root.after_idle(lambda f=frac: self._diff.yview_moveto(f))
 
     def _insert_word_diff(self, old_dl: DiffLine, new_dl: DiffLine, file_path: str) -> None:
         old_text = old_dl.text[1:]
@@ -2340,6 +2399,12 @@ class App:
     def _close_app(self) -> None:
         if not self._review.is_empty():
             self._dump_to_terminal()
+        try:
+            scroll_frac = self._diff.yview()[0]
+            _save_window_state(self.root.winfo_geometry(), self._sash_ratio,
+                               scroll_frac)
+        except tk.TclError:
+            pass
         self.root.destroy()
 
     def _show_commit(self, sha: str) -> None:

@@ -124,6 +124,9 @@ class PatchSource:
     def has_unstaged(self) -> bool:
         return False
 
+    def can_reload(self) -> bool:
+        return False
+
 class GitSource:
     """Diff text from a live git invocation. Can also fetch full file contents."""
     def __init__(self, refs: list[str], merge_base: bool = False) -> None:
@@ -162,6 +165,9 @@ class GitSource:
 
     def has_unstaged(self) -> bool:
         return self._has_changes(['git', 'diff', '--quiet'])
+
+    def can_reload(self) -> bool:
+        return True
 
     def commits(self) -> list[tuple[str, str]]:
         try:
@@ -752,7 +758,8 @@ def _pair_lines_for_word_diff(
 class App:
     def __init__(self, root: tk.Tk, diff_text: str,
                  commits: 'list[tuple[str, str]] | None' = None,
-                 has_staged: bool = False, has_unstaged: bool = False) -> None:
+                 has_staged: bool = False, has_unstaged: bool = False,
+                 source: 'PatchSource | GitSource | None' = None) -> None:
         self.root = root
         # Override Text/Entry class bindings so Ctrl+W/Q always close the window
         # (default Text binding for Ctrl+W is "delete previous word", which would
@@ -792,6 +799,9 @@ class App:
         self._commits = commits or []
         self._has_staged = has_staged
         self._has_unstaged = has_unstaged
+        self._source = source
+        self._can_reload = bool(source and source.can_reload())
+        self._clist_actions: list = []
         self._active_comment_frame: tk.Frame | None = None
         self._active_comment_entry: tk.Text | None = None
         self._comment_target: '_CommentEditTarget | None' = None
@@ -839,6 +849,10 @@ class App:
                        relief='flat', bd=0, font=menu_font)
         menubar = tk.Menu(self.root, **menu_kw)
         file_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
+        if self._can_reload:
+            file_menu.add_command(label='Reload', accelerator='F5',
+                                  command=self._reload)
+            file_menu.add_separator()
         file_menu.add_command(label='Quit', accelerator='Ctrl+Q',
                               command=self._close_app)
         menubar.add_cascade(label='File', menu=file_menu)
@@ -887,6 +901,7 @@ class App:
             if 0.0 <= f <= 1.0:
                 self._pending_scroll_frac = f
         font = (CFG.font_family, CFG.font_size)
+        bar_font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
 
         # top bar
         bar = tk.Frame(self.root, bg=C['topbar_bg'], pady=5)
@@ -897,6 +912,16 @@ class App:
 
         self._lbl_stat = tk.Label(bar, bg=C['topbar_bg'], fg=C['subdued'], font=font)
         self._lbl_stat.pack(side='left')
+
+        if self._can_reload:
+            self._reload_btn = tk.Button(
+                bar, text='reload',
+                bg=C['topbar_bg'], fg=C['fg'],
+                activebackground=C['selected_bg'], activeforeground=C['fg'],
+                relief='groove', bd=1, highlightthickness=0,
+                font=bar_font, padx=8, pady=0, cursor='hand2',
+                command=self._reload)
+            self._reload_btn.pack(side='right', padx=10)
 
 
         # two-panel split
@@ -967,6 +992,9 @@ class App:
         self._diff.bind('w',              lambda e: self._toggle_wrap() or 'break')
         self._diff.bind('c',              lambda e: self._copy_loc_and_lines() or 'break')
         self._diff.bind('a',              lambda e: self._add_comment_at_cursor() or 'break')
+        self._diff.bind('r',          lambda e: self._reload() or 'break')
+        self._diff.bind('<F5>',       lambda e: self._reload() or 'break')
+        self._diff.bind('<Control-r>', lambda e: self._reload() or 'break')
         self._diff.bind('<Tab>',          lambda e: self._jump_to_adjacent_file( 1) or 'break')
         self._diff.bind('<Shift-Tab>',      lambda e: self._jump_to_adjacent_file(-1) or 'break')
         self._diff.bind('<ISO_Left_Tab>',   lambda e: self._jump_to_adjacent_file(-1) or 'break')
@@ -1036,18 +1064,13 @@ class App:
         # commits list keeps the default wrap='none' from _make_list_text.
         self._cmt_list.configure(wrap='word')
 
-        # Commits section — only when there are commits or staged/unstaged changes
+        # Commits section — created always; visibility/content updated per render
+        # (mirrors how the Comments section is built).
         self._commits_expanded = False
-        self._has_commits_section = bool(self._commits or self._has_staged or self._has_unstaged)
-        if self._has_commits_section:
-            self._commits_header = tk.Frame(rf, bg=C['topbar_bg'])
-            n = len(self._commits) + (1 if self._has_staged else 0) + (1 if self._has_unstaged else 0)
-            self._commits_toggle = _make_section_toggle(self._commits_header, self._toggle_commits_pane)
-            self._commits_toggle.configure(text=f'{CFG.section_collapsed_arrow} Commits ({n})')
-            self._commits_toggle.pack(fill='x')
-            self._commits_pane, self._clist = _make_list_text(rf)
-            self._clist.configure(height=min(n + 1, CFG.list_pane_max_lines))
-            self._render_clist()
+        self._commits_header = tk.Frame(rf, bg=C['topbar_bg'])
+        self._commits_toggle = _make_section_toggle(self._commits_header, self._toggle_commits_pane)
+        self._commits_toggle.pack(fill='x')
+        self._commits_pane, self._clist = _make_list_text(rf)
 
         flist_bar = tk.Frame(rf, bg=C['topbar_bg'])
         self._flist_btn = tk.Menubutton(flist_bar, bg=C['topbar_bg'], fg=C['fg'],
@@ -1076,8 +1099,6 @@ class App:
         # Pack the persistent rows in final top-to-bottom order. The
         # comments/commits headers and panes get pack()ed in via _update_*
         # / toggle methods using before=self._flist_bar (or _commits_header).
-        if self._has_commits_section:
-            self._commits_header.pack(fill='x')
         flist_bar.pack(fill='x')
         self._files_pane.pack(fill='both', expand=True)
 
@@ -1459,6 +1480,25 @@ class App:
 
     # --data ------------------------------------------------------------
 
+    def _reload(self) -> None:
+        if not self._can_reload or self._source is None:
+            return
+        try:
+            new_diff = self._source.diff_text()
+        except SystemExit:
+            # GitSource.diff_text calls sys.exit on git failure; suppress so the
+            # running app keeps working — surface the issue in the stat label
+            # rather than tearing down the window.
+            self._lbl_stat.configure(text='  reload failed (git error)')
+            return
+        self._pending_scroll_frac = self._diff.yview()[0]
+        self.diff_text = new_diff
+        self._commits = self._source.commits()
+        self._has_staged = self._source.has_staged()
+        self._has_unstaged = self._source.has_unstaged()
+        self._session_snapshots.clear()
+        self._load()
+
     def _load(self) -> None:
         diff_files = parse_diff(self.diff_text)
         entries = entries_from_diff(diff_files)
@@ -1526,6 +1566,7 @@ class App:
         self.root.after_idle(self._update_sticky_header)
         self.root.after_idle(self._render_minimap)
         self.root.after_idle(self._update_hunk_sep_widths)
+        self.root.after_idle(self._update_commits_section)
         self.root.after_idle(self._update_comments_section)
         if self._pending_scroll_frac is not None:
             frac = self._pending_scroll_frac
@@ -2436,15 +2477,37 @@ class App:
         setattr(self, expanded_attr, new_state)
         toggle_btn.configure(text=f'{self._section_arrow(new_state)} {title} ({count})')
 
+    def _has_commits_section(self) -> bool:
+        return bool(self._commits or self._has_staged or self._has_unstaged)
+
+    def _commits_count(self) -> int:
+        return len(self._commits) + (1 if self._has_staged else 0) + (1 if self._has_unstaged else 0)
+
     def _toggle_commits_pane(self) -> None:
-        if not self._has_commits_section:
+        if not self._has_commits_section():
             return
-        n = len(self._commits) + (1 if self._has_staged else 0) + (1 if self._has_unstaged else 0)
         self._toggle_pane('_commits_expanded', self._commits_pane, self._commits_toggle,
-                          'Commits', n, self._flist_bar)
+                          'Commits', self._commits_count(), self._flist_bar)
+
+    def _update_commits_section(self) -> None:
+        if not self._has_commits_section():
+            self._commits_pane.pack_forget()
+            self._commits_header.pack_forget()
+            self._commits_expanded = False
+            return
+        self._commits_header.pack_forget()
+        self._commits_header.pack(fill='x', before=self._flist_bar)
+        n = self._commits_count()
+        self._commits_toggle.configure(
+            text=f'{self._section_arrow(self._commits_expanded)} Commits ({n})')
+        self._clist.configure(height=min(n + 1, CFG.list_pane_max_lines))
+        self._render_clist()
+        if self._commits_expanded:
+            self._commits_pane.pack_forget()
+            self._commits_pane.pack(fill='x', before=self._flist_bar)
 
     def _comments_anchor(self) -> tk.Widget:
-        return self._commits_header if self._has_commits_section else self._flist_bar
+        return self._commits_header if self._has_commits_section() else self._flist_bar
 
     def _toggle_comments_pane(self) -> None:
         n = len(list(self._iter_all_comments()))
@@ -2615,7 +2678,8 @@ def main() -> None:
     App(root, diff_text,
         commits=source.commits(),
         has_staged=source.has_staged(),
-        has_unstaged=source.has_unstaged())
+        has_unstaged=source.has_unstaged(),
+        source=source)
     root.mainloop()
 
 

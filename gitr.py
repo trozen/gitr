@@ -580,7 +580,6 @@ class CFG:
     edit_focus_out_delay_ms = 50
     list_pane_max_lines      = 10
     menu_label_max_len       = 80
-    cmt_panel_label_max_len  = 120
     section_collapsed_arrow  = '▶'
     section_expanded_arrow   = '▼'
 
@@ -1033,6 +1032,9 @@ class App:
         self._comments_toggle = _make_section_toggle(self._comments_header, self._toggle_comments_pane)
         self._comments_toggle.pack(fill='x')
         self._comments_pane, self._cmt_list = _make_list_text(rf)
+        # Comments can wrap so long/multi-line comments stay readable. The
+        # commits list keeps the default wrap='none' from _make_list_text.
+        self._cmt_list.configure(wrap='word')
 
         # Commits section — only when there are commits or staged/unstaged changes
         self._commits_expanded = False
@@ -2463,7 +2465,8 @@ class App:
         self._comments_toggle.configure(
             text=f'{self._section_arrow(self._comments_expanded)} Comments ({n})')
         self._render_cmt_list(items)
-        self._cmt_list.configure(height=min(n + 1, CFG.list_pane_max_lines))
+        total_rows = len(self._cmt_list_actions)
+        self._cmt_list.configure(height=min(total_rows + 1, CFG.list_pane_max_lines))
         if self._comments_expanded:
             self._comments_pane.pack_forget()
             self._comments_pane.pack(fill='x', before=anchor)
@@ -2475,13 +2478,20 @@ class App:
         self._cmt_list.tag_configure('moved',    foreground=C['comment_fg'])
         self._cmt_list.configure(state='normal')
         self._cmt_list.delete('1.0', 'end')
+        # One entry per logical line so _row_from_event maps clicks (including
+        # clicks on wrapped continuations of the same line) back to a source
+        # line. Continuation lines of a multi-line comment repeat the same
+        # source line so clicking any of them still jumps correctly.
         self._cmt_list_actions: list = []
         for src_line, loc, _src_text, cmt, is_orphan, moved in items:
-            first = (cmt.splitlines() or [cmt])[0]
+            lines = cmt.splitlines() or ['']
             self._cmt_list.insert('end', '~ ' if moved and not is_orphan else '  ', 'moved')
             self._cmt_list.insert('end', loc, 'orphan' if is_orphan else 'loc')
-            self._cmt_list.insert('end', '  ' + first[:CFG.cmt_panel_label_max_len] + '\n', 'cmt')
+            self._cmt_list.insert('end', '  ' + lines[0] + '\n', 'cmt')
             self._cmt_list_actions.append(src_line)
+            for cont in lines[1:]:
+                self._cmt_list.insert('end', '    ' + cont + '\n', 'cmt')
+                self._cmt_list_actions.append(src_line)
         self._cmt_list.configure(state='disabled')
         self._bind_list_mouse_events(self._cmt_list, self._on_cmt_list_click)
 

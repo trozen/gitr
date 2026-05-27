@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tkinter as tk
+from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -817,9 +818,17 @@ class App:
         cfg = self._load_config()
         self._wrap_var = tk.BooleanVar(value=cfg.get('wrap_lines', True))
         self._tree_var = tk.BooleanVar(value=cfg.get('tree_view', False))
+        _ln_default = 1 if cfg.get('line_numbers', True) else 0  # migrate old bool config
+        self._lineno_var = tk.IntVar(value=cfg.get('line_numbers_mode', _ln_default))  # 0 off, 1 new, 2 old/new
         _wd_default = 2 if cfg.get('word_diff', True) else 0  # migrate old bool config
         self._word_diff_var = tk.IntVar(value=cfg.get('word_diff_mode', _wd_default))
+        # Per rendered-Text-line (old_line_no, new_line_no) for the gutter; only
+        # content lines have an entry, so .get() returns None for headers/blanks.
+        self._gutter_nums: dict[int, tuple[Optional[int], Optional[int]]] = {}
         self._scale = _detect_scale(root)
+        # Single source of truth for the hover-ruler colour: the 'hover' tag and
+        # the copy/comment buttons that sit on the ruler row must match.
+        self._ruler_bg = _mix(C['topbar_bg'], C['subdued'], 0.45)
 
         self._build_ui()
         self._load()
@@ -863,6 +872,12 @@ class App:
                                   command=self._on_wrap_toggle)
         view_menu.add_checkbutton(label='Tree view', variable=self._tree_var,
                                   command=self._on_tree_toggle)
+        lineno_view_menu = tk.Menu(view_menu, tearoff=0, **menu_kw)
+        for _val, _label in ((0, 'Off'), (1, 'New'), (2, 'Old + new')):
+            lineno_view_menu.add_radiobutton(label=_label, value=_val,
+                                             variable=self._lineno_var,
+                                             command=self._on_lineno_toggle)
+        view_menu.add_cascade(label='Line numbers', menu=lineno_view_menu, accelerator='l')
         word_diff_menu = tk.Menu(view_menu, tearoff=0, **menu_kw)
         word_diff_menu.add_radiobutton(label='Off',                      value=0,
                                        variable=self._word_diff_var,
@@ -934,11 +949,11 @@ class App:
         # left: diff (grid so the scrollbar corner square fits neatly)
         lf = tk.Frame(self._sash, bg=C['bg'])
         lf.grid_rowconfigure(2, weight=1)
-        lf.grid_columnconfigure(0, weight=1)
+        lf.grid_columnconfigure(1, weight=1)  # diff text column expands; col 0 is the gutter
 
         bar_font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
         diff_bar = tk.Frame(lf, bg=C['topbar_bg'])
-        diff_bar.grid(row=0, column=0, columnspan=3, sticky='ew')
+        diff_bar.grid(row=0, column=0, columnspan=4, sticky='ew')
         menu_kw_bar = dict(bg=C['topbar_bg'], fg=C['fg'],
                            activebackground=C['selected_bg'], activeforeground=C['fg'],
                            relief='flat', bd=0, font=bar_font, tearoff=0)
@@ -965,9 +980,21 @@ class App:
         self._wrap_btn.pack(side='left', padx=(4, 0))
         self._update_wrap_bar()
 
+        self._lineno_btn = tk.Menubutton(diff_bar, bg=C['topbar_bg'], fg=C['fg'],
+                                          activebackground=C['selected_bg'], activeforeground=C['fg'],
+                                          relief='groove', bd=1, highlightthickness=0,
+                                          font=bar_font, padx=8, pady=2)
+        lineno_menu = tk.Menu(self._lineno_btn, **menu_kw_bar)
+        self._lineno_btn['menu'] = lineno_menu
+        for val, label in ((0, 'off'), (1, 'new'), (2, 'old/new')):
+            lineno_menu.add_command(label=label,
+                                    command=lambda v=val: self._set_lineno_mode(v))
+        self._lineno_btn.pack(side='left', padx=(4, 0))
+        self._update_lineno_bar()
+
         self._sticky = tk.Label(lf, bg=C['topbar_bg'], fg=C['fg'],
                                  font=font, anchor='w', padx=10, pady=3, text='')
-        self._sticky.grid(row=1, column=0, columnspan=3, sticky='ew')
+        self._sticky.grid(row=1, column=0, columnspan=4, sticky='ew')
 
         self._diff = tk.Text(lf, bg=C['bg'], fg=C['fg'],
                               font=font, wrap='char',
@@ -992,6 +1019,7 @@ class App:
         self._diff.bind('d',              lambda e: self._toggle_word_diff() or 'break')
         self._diff.bind('t',              lambda e: self._toggle_tree() or 'break')
         self._diff.bind('w',              lambda e: self._toggle_wrap() or 'break')
+        self._diff.bind('l',              lambda e: self._toggle_lineno() or 'break')
         self._diff.bind('c',              lambda e: self._copy_loc_and_lines() or 'break')
         self._diff.bind('a',              lambda e: self._add_comment_at_cursor() or 'break')
         self._diff.bind('r',          lambda e: self._reload() or 'break')
@@ -1011,20 +1039,34 @@ class App:
         self._diff_vs.bind('<ButtonPress-1>', lambda e: setattr(self, '_manual_scroll', True))
         hs = self._make_scrollbar(lf, orient='horizontal', command=self._diff.xview)
         self._diff.configure(yscrollcommand=self._on_diff_yscroll, xscrollcommand=hs.set)
-        self._diff.grid(row=2, column=0, sticky='nsew')
+
+        # Line-number gutter: a Canvas drawn to the left of the diff and synced
+        # to it via dlineinfo on scroll/resize (same approach as the minimap).
+        # Kept out of the diff text so copy/selection and source-location stay
+        # clean. Lives in column 0; the diff text expands in column 1.
+        self._gutter_font = tkfont.Font(root=self.root, family=CFG.font_family, size=CFG.font_size)
+        self._gutter = tk.Canvas(lf, bg=C['bg'], highlightthickness=0, width=1)
+        self._gutter.grid(row=2, column=0, sticky='ns')
+        self._gutter.bind('<Configure>', lambda e: self._render_gutter())
+        self._gutter.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
+        self._gutter.bind('<Button-5>',   lambda e: self._on_wheel( 1) or 'break')
+        self._gutter.bind('<MouseWheel>', lambda e: self._on_wheel(-e.delta // 120) or 'break')
+        if not self._lineno_var.get():
+            self._gutter.grid_remove()
+        self._diff.grid(row=2, column=1, sticky='nsew')
 
         self._minimap = tk.Canvas(lf, width=int(CFG.minimap_w * self._scale),
                                   bg=C['bg'], highlightthickness=0)
-        self._minimap.grid(row=2, column=1, rowspan=2, sticky='ns')
+        self._minimap.grid(row=2, column=2, rowspan=2, sticky='ns')
         self._minimap.bind('<Configure>',  lambda e: self._render_minimap())
         self._minimap.bind('<Button-1>',   self._on_minimap_click)
         self._minimap.bind('<B1-Motion>',  self._on_minimap_click)
 
-        self._diff_vs.grid(row=2, column=2, sticky='ns')
-        hs.grid(row=3, column=0, sticky='ew')
+        self._diff_vs.grid(row=2, column=3, sticky='ns')
+        hs.grid(row=3, column=1, sticky='ew')
         _sw = int(CFG.scrollbar_w * self._scale)
         corner = tk.Frame(lf, bg=C['topbar_bg'], width=_sw, height=_sw)
-        corner.grid(row=3, column=2)
+        corner.grid(row=3, column=3)
         self._diff_hs = hs
         self._diff_hs_corner = corner
         # wrap on by default — horizontal scrollbar not needed
@@ -1123,7 +1165,7 @@ class App:
         self._diff.tag_configure('status_M',    foreground=C['status_M'])
         self._diff.tag_configure('status_D',    foreground=C['status_D'])
         self._diff.tag_configure('status_R',    foreground=C['status_R'])
-        self._diff.tag_configure('hover',       background=_mix(C['topbar_bg'], C['subdued'], 0.45))
+        self._diff.tag_configure('hover',       background=self._ruler_bg)
         self._diff.tag_configure('hover_line',  background=_blend(C['topbar_bg'], 0.72))
 
         # file list tags
@@ -1167,6 +1209,7 @@ class App:
         self._flist.bind('d',            lambda e: self._toggle_word_diff() or 'break')
         self._flist.bind('t',            lambda e: self._toggle_tree() or 'break')
         self._flist.bind('w',            lambda e: self._toggle_wrap() or 'break')
+        self._flist.bind('l',            lambda e: self._toggle_lineno() or 'break')
         self._flist.bind('c',            lambda e: self._copy_loc_and_lines() or 'break')
         # The bare 'w' binding above shadows Ctrl+W on this widget: Tk fires the
         # most specific per-widget binding, so without an explicit Ctrl+W here
@@ -1200,6 +1243,29 @@ class App:
             self._diff_hs_corner.grid()
         self._update_wrap_bar()
         self._save_config({'wrap_lines': wrap})
+        self.root.after_idle(self._render_gutter)
+
+    def _update_lineno_bar(self) -> None:
+        name = ('off', 'new', 'old/new')[self._lineno_var.get()]
+        self._lineno_btn.configure(text=f'Lines (l): {name}')
+
+    def _set_lineno_mode(self, mode: int) -> None:
+        self._lineno_var.set(mode)
+        self._on_lineno_toggle()
+
+    def _toggle_lineno(self) -> None:
+        self._lineno_var.set((self._lineno_var.get() + 1) % 3)
+        self._on_lineno_toggle()
+
+    def _on_lineno_toggle(self) -> None:
+        mode = self._lineno_var.get()
+        if mode:
+            self._gutter.grid()
+        else:
+            self._gutter.grid_remove()
+        self._update_lineno_bar()
+        self._save_config({'line_numbers_mode': mode})
+        self._render_gutter()
 
     def _update_flist_bar(self) -> None:
         name = 'tree' if self._tree_var.get() else 'list'
@@ -1329,7 +1395,7 @@ class App:
         # tk.Label (rather than tk.Button) avoids the platform theme shadow.
         btn = tk.Label(
             self._diff, text=text,
-            bg=C['topbar_bg'], fg=fg,
+            bg=self._ruler_bg, fg=fg,
             bd=0, highlightthickness=0, cursor='hand2',
             padx=4, pady=0,
             font=(CFG.font_family, CFG.font_size),
@@ -1361,6 +1427,7 @@ class App:
                     f.configure(width=row_w)
             if self._active_comment_frame and self._active_comment_frame.winfo_exists():
                 self._active_comment_frame.configure(width=row_w)
+            self._render_gutter()  # width change reflows wrapped lines
 
     def _update_hunk_sep_widths(self) -> None:
         w = self._diff.winfo_width()
@@ -1449,6 +1516,49 @@ class App:
         frac = max(0.0, min(1.0 - span, event.y / h - span / 2))
         self._diff.yview_moveto(frac)
 
+    # --line-number gutter ----------------------------------------------------
+
+    def _render_gutter(self) -> None:
+        c = self._gutter
+        c.delete('all')
+        mode = self._lineno_var.get()  # 0 off, 1 new, 2 old/new
+        if not mode or not self._gutter_nums:
+            return
+        show_old = mode == 2
+        maxnum = 0
+        for old, new in self._gutter_nums.values():
+            maxnum = max(maxnum, new or 0, (old or 0) if show_old else 0)
+        digits = max(1, len(str(maxnum)))
+        charw = max(1, self._gutter_font.measure('0'))
+        left_pad, right_pad = int(6 * self._scale), int(8 * self._scale)
+        old_right = left_pad + digits * charw
+        new_right = (old_right + charw + digits * charw) if show_old else old_right
+        width = new_right + right_pad
+        if c.winfo_width() != width:
+            c.configure(width=width)  # re-fires <Configure>, but width is now stable
+        height = c.winfo_height()
+        if height <= 1:
+            return
+        top    = int(self._diff.index('@0,0').split('.')[0])
+        bottom = int(self._diff.index(f'@0,{height - 1}').split('.')[0])
+        color = C['subdued']
+        for ln in range(top, bottom + 1):
+            nums = self._gutter_nums.get(ln)
+            if not nums:
+                continue
+            info = self._diff.dlineinfo(f'{ln}.0')
+            if not info:
+                continue
+            y = info[1]
+            old, new = nums
+            if show_old and old is not None:
+                c.create_text(old_right, y, anchor='ne', text=str(old),
+                              fill=color, font=self._gutter_font)
+            if new is not None:
+                c.create_text(new_right, y, anchor='ne', text=str(new),
+                              fill=color, font=self._gutter_font)
+        c.create_line(width - 1, 0, width - 1, height, fill=_blend(C['subdued'], 0.45))
+
     @staticmethod
     def _file_label(df: DiffFile) -> tuple[str, str]:
         """Return (name_line, index_line) for both the sticky label and the diff header."""
@@ -1462,6 +1572,7 @@ class App:
             self._scroll_target = float(first)
         self._update_sticky_header()
         self._update_minimap_viewport()
+        self._render_gutter()
         if self._hover_line >= 0 or self._hover_btn_line >= 0:
             self._do_hide_hover(force=True)
 
@@ -1555,6 +1666,7 @@ class App:
         self._diff.delete('1.0', 'end')
         self._positions.clear()
         self._minimap_lines = []
+        self._gutter_nums = {}
 
         if self._diff_files:
             for i, df in enumerate(self._diff_files):
@@ -1578,6 +1690,7 @@ class App:
         )
         self.root.after_idle(self._update_sticky_header)
         self.root.after_idle(self._render_minimap)
+        self.root.after_idle(self._render_gutter)
         self.root.after_idle(self._update_hunk_sep_widths)
         self.root.after_idle(self._update_commits_section)
         self.root.after_idle(self._update_comments_section)
@@ -1585,6 +1698,12 @@ class App:
             frac = self._pending_scroll_frac
             self._pending_scroll_frac = None
             self.root.after_idle(lambda f=frac: self._diff.yview_moveto(f))
+
+    def _record_gutter(self, old_no: Optional[int], new_no: Optional[int]) -> None:
+        # Tag the just-inserted content line (the one ending at 'end-2c', before
+        # any comment annotation that follows it) with its old/new line numbers.
+        ln = int(self._diff.index('end-2c').split('.')[0])
+        self._gutter_nums[ln] = (old_no, new_no)
 
     def _insert_word_diff(self, old_dl: DiffLine, new_dl: DiffLine, file_path: str) -> None:
         old_text = old_dl.text[1:]
@@ -1596,14 +1715,17 @@ class App:
         if difflib.SequenceMatcher(None, nws_old, nws_new, autojunk=False).ratio() < CFG.word_diff_min_ratio:
             self._diff.insert('end', f'-{old_text}\n', 'removed')
             self._minimap_lines.append(('removed', '-' + old_text))
+            self._record_gutter(old_dl.old_line_no, None)
             self._insert_comment_annotation(file_path, old_dl, old_dl.text)
             self._diff.insert('end', f'+{new_text}\n', 'added')
             self._minimap_lines.append(('added', '+' + new_text))
+            self._record_gutter(None, new_dl.new_line_no)
             self._insert_comment_annotation(file_path, new_dl, new_dl.text)
             return
         if nws_old == nws_new and self._word_diff_var.get() == 2:
             self._diff.insert('end', f'~{new_text}\n', 'reindent')
             self._minimap_lines.append(('reindent', new_text))
+            self._record_gutter(old_dl.old_line_no, new_dl.new_line_no)
             # The single rendered line stands in for both the - and + sides;
             # offer both as anchor candidates.
             self._insert_comment_annotation(file_path, old_dl, old_dl.text)
@@ -1618,6 +1740,7 @@ class App:
             self._diff.insert('end', text, tag)
         self._diff.insert('end', '\n')
         self._minimap_lines.append(('removed', '-' + old_text))
+        self._record_gutter(old_dl.old_line_no, None)
         self._insert_comment_annotation(file_path, old_dl, old_dl.text)
 
         self._diff.insert('end', '+', 'added')
@@ -1627,6 +1750,7 @@ class App:
             self._diff.insert('end', text, tag)
         self._diff.insert('end', '\n')
         self._minimap_lines.append(('added', '+' + new_text))
+        self._record_gutter(None, new_dl.new_line_no)
         self._insert_comment_annotation(file_path, new_dl, new_dl.text)
 
     def _render_file_diff(self, df: DiffFile) -> None:
@@ -1650,20 +1774,24 @@ class App:
                         dl = next(rem_iter)
                         self._diff.insert('end', dl.text + '\n', 'removed')
                         self._minimap_lines.append(('removed', dl.text))
+                        self._record_gutter(dl.old_line_no, None)
                         self._insert_comment_annotation(df.path, dl, dl.text)
                     else:
                         dl = next(add_iter)
                         self._diff.insert('end', dl.text + '\n', 'added')
                         self._minimap_lines.append(('added', dl.text))
+                        self._record_gutter(None, dl.new_line_no)
                         self._insert_comment_annotation(df.path, dl, dl.text)
             else:
                 for dl in pending_rem:
                     self._diff.insert('end', dl.text + '\n', 'removed')
                     self._minimap_lines.append(('removed', dl.text))
+                    self._record_gutter(dl.old_line_no, None)
                     self._insert_comment_annotation(df.path, dl, dl.text)
                 for dl in pending_add:
                     self._diff.insert('end', dl.text + '\n', 'added')
                     self._minimap_lines.append(('added', dl.text))
+                    self._record_gutter(None, dl.new_line_no)
                     self._insert_comment_annotation(df.path, dl, dl.text)
             pending_rem.clear()
             pending_add.clear()
@@ -1690,6 +1818,7 @@ class App:
                 flush()
                 self._diff.insert('end', dl.text + '\n', dl.kind)
                 self._minimap_lines.append((dl.kind, dl.text))
+                self._record_gutter(dl.old_line_no, dl.new_line_no)
                 self._insert_comment_annotation(df.path, dl, dl.text)
         flush()
         self._insert_orphan_comments_for_file(df.path)

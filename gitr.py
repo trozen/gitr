@@ -806,7 +806,9 @@ class App:
         self._active_comment_entry: tk.Text | None = None
         self._comment_target: '_CommentEditTarget | None' = None
         self._hover_line: int = -1
-        self._hover_range: tuple[str, str] | None = None
+        self._hover_range: tuple[str, str] | None = None      # whole line ('hover_line' tag)
+        self._hover_row: str | None = None                    # cursor display-row start (cache key)
+        self._hover_row_range: tuple[str, str] | None = None  # cursor row ('hover' tag)
         self._hover_btn_line: int = -1
         self._hide_after_id: str | None = None
         self._over_hover_btn: bool = False
@@ -1121,7 +1123,8 @@ class App:
         self._diff.tag_configure('status_M',    foreground=C['status_M'])
         self._diff.tag_configure('status_D',    foreground=C['status_D'])
         self._diff.tag_configure('status_R',    foreground=C['status_R'])
-        self._diff.tag_configure('hover',       background=C['topbar_bg'])
+        self._diff.tag_configure('hover',       background=_mix(C['topbar_bg'], C['subdued'], 0.45))
+        self._diff.tag_configure('hover_line',  background=_blend(C['topbar_bg'], 0.72))
 
         # file list tags
         self._flist.tag_configure('status_A',  foreground=C['status_A'])
@@ -1147,6 +1150,7 @@ class App:
         # Word diff: changed words — same "change highlight" bg as the full-line removed/added tags
         self._diff.tag_configure('removed_hi',   foreground=C['removed_fg'], background=_rem_hi)
         self._diff.tag_configure('added_hi',     foreground=C['added_fg'],   background=_add_hi)
+        self._diff.tag_raise('hover_line')
         self._diff.tag_raise('hover')
         self._diff.tag_raise('sel')
 
@@ -1164,6 +1168,12 @@ class App:
         self._flist.bind('t',            lambda e: self._toggle_tree() or 'break')
         self._flist.bind('w',            lambda e: self._toggle_wrap() or 'break')
         self._flist.bind('c',            lambda e: self._copy_loc_and_lines() or 'break')
+        # The bare 'w' binding above shadows Ctrl+W on this widget: Tk fires the
+        # most specific per-widget binding, so without an explicit Ctrl+W here
+        # the close combo is swallowed by "toggle wrap". Re-assert it (and Q for
+        # symmetry), mirroring _make_read_only on the diff pane.
+        self._flist.bind('<Control-w>', lambda e: self._close_app())
+        self._flist.bind('<Control-q>', lambda e: self._close_app())
         self._on_wrap_toggle()
 
     def _update_wrap_bar(self) -> None:
@@ -1526,6 +1536,9 @@ class App:
         self._comment_hover_btn.place_forget()
         self._copy_hover_btn.place_forget()
         self._hover_line = -1
+        self._hover_row = None
+        self._hover_range = None
+        self._hover_row_range = None
         self._hover_btn_line = -1
         if self._active_comment_frame:
             self._active_comment_frame.destroy()
@@ -2174,10 +2187,13 @@ class App:
         self._hide_after_id = None
         if not force and self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
             return
+        if self._hover_row_range is not None:
+            self._diff.tag_remove('hover', *self._hover_row_range)
+            self._hover_row_range = None
         if self._hover_range is not None:
-            start, end = self._hover_range
-            self._diff.tag_remove('hover', start, end)
+            self._diff.tag_remove('hover_line', *self._hover_range)
             self._hover_range = None
+        self._hover_row = None
         self._hover_line = -1
         self._comment_hover_btn.place_forget()
         self._copy_hover_btn.place_forget()
@@ -2191,30 +2207,38 @@ class App:
             return
         self._cancel_hide_schedule()
         idx = self._diff.index(f'@{event.x},{event.y}')
-        line_no = int(idx.split('.')[0])
-        if line_no == self._hover_line:
+        disp_start = self._diff.index(f'{idx} display linestart')
+        if disp_start == self._hover_row:
             return
+        line_no = int(idx.split('.')[0])
         tags = set(self._diff.tag_names(f'{line_no}.0'))
         if not tags & {'added', 'removed', 'context'}:
             self._do_hide_hover()
             return
+        if self._hover_row_range is not None:
+            self._diff.tag_remove('hover', *self._hover_row_range)
         if self._hover_range is not None:
-            start, end = self._hover_range
-            self._diff.tag_remove('hover', start, end)
-        # Highlight a single display row under the cursor. For unwrapped lines
-        # we extend past the newline so Tk fills the tag bg to the row's right
-        # edge; for wrapped lines we stop at display lineend (no newline to
-        # latch onto, and we don't want to highlight the other wrap rows).
-        disp_start = self._diff.index(f'{idx} display linestart')
+            self._diff.tag_remove('hover_line', *self._hover_range)
+        # Two highlights: 'hover' is the strong ruler on the single display row
+        # under the cursor; 'hover_line' is a lighter wash over the whole logical
+        # line so you can see what copy/comment will act on (both operate on the
+        # whole line, not the row). For unwrapped lines and the last wrap row we
+        # extend past the newline so Tk fills the bg to the right edge; other
+        # wrap rows stop at display lineend.
         disp_end   = self._diff.index(f'{idx} display lineend')
         line_end   = self._diff.index(f'{disp_start} lineend')
         if self._diff.compare(disp_end, '>=', line_end):
-            tag_end = self._diff.index(f'{line_end}+1c')
+            row_end = self._diff.index(f'{line_end}+1c')
         else:
-            tag_end = disp_end
-        self._hover_range = (disp_start, tag_end)
-        self._hover_line  = line_no
-        self._diff.tag_add('hover', disp_start, tag_end)
+            row_end = disp_end
+        line_start    = f'{line_no}.0'
+        line_full_end = self._diff.index(f'{line_end}+1c')
+        self._hover_row       = disp_start
+        self._hover_row_range = (disp_start, row_end)
+        self._hover_range     = (line_start, line_full_end)
+        self._hover_line      = line_no
+        self._diff.tag_add('hover_line', line_start, line_full_end)
+        self._diff.tag_add('hover', disp_start, row_end)
         info = self._diff.dlineinfo(disp_start)
         if info:
             _, y, _, h, _ = info

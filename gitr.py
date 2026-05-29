@@ -575,6 +575,7 @@ class CFG:
     menu_font_size     = 8
     window_scale       = 0.75    # fraction of screen size on startup
     sash_ratio         = 0.70
+    pane_min_w         = 180     # px; neither sash pane collapses below this
     scrollbar_w        = 16
     minimap_w          = 160
     scroll_speed       = 8   # lines per mouse-wheel tick
@@ -1148,6 +1149,8 @@ class App:
 
         self._sash.add(lf, stretch='always')
         self._sash.add(rf, stretch='never')
+        self._sash.paneconfigure(lf, minsize=CFG.pane_min_w)
+        self._sash.paneconfigure(rf, minsize=CFG.pane_min_w)
         self.root.after(50, self._init_sash)
 
         # diff tags — line highlight is a little more visible than the raw added_bg/removed_bg
@@ -1318,10 +1321,16 @@ class App:
         except Exception:
             pass
 
+    def _clamped_sash_x(self, w: int) -> int:
+        # Cap the sash position so neither pane drops below pane_min_w, even if
+        # a saved ratio + a narrow window would otherwise collapse one side.
+        x = int(w * self._sash_ratio)
+        return max(CFG.pane_min_w, min(w - CFG.pane_min_w, x))
+
     def _init_sash(self) -> None:
         w = self._sash.winfo_width()
         if w > 1:
-            self._sash.sash_place(0, int(w * self._sash_ratio), 0)
+            self._sash.sash_place(0, self._clamped_sash_x(w), 0)
             self.root.bind('<Configure>', self._on_window_configure)
             self._sash.bind('<ButtonRelease-1>', self._on_sash_release, add='+')
         else:
@@ -1334,7 +1343,7 @@ class App:
     def _place_sash(self) -> None:
         w = self._sash.winfo_width()
         if w > 1:
-            self._sash.sash_place(0, int(w * self._sash_ratio), 0)
+            self._sash.sash_place(0, self._clamped_sash_x(w), 0)
 
     def _on_sash_release(self, _event: tk.Event) -> None:
         w = self._sash.winfo_width()

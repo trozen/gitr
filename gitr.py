@@ -2,6 +2,7 @@
 """gitr - lightweight Git diff viewer"""
 
 import argparse
+import bisect
 import difflib
 import hashlib
 import json
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+from collections import deque
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +95,7 @@ class _ResolvedAnchor:
     moved: bool = False
     matched: bool = False
     src_line: Optional[int] = None  # diff Text line number once rendered
+    frame: Optional[tk.Frame] = None  # the rendered comment widget, once embedded
 
 
 # --git helpers ------------------------------------------------------------
@@ -229,19 +232,11 @@ def _load_window_state() -> 'dict | None':
     return obj if isinstance(obj, dict) else None
 
 
-def _save_window_state(geometry: str, sash_ratio: float,
-                       top_line: 'int | None') -> None:
-    """Persist window state; top_line=None keeps the previously saved position
-    (the diff was still rendering, so the current one is meaningless)."""
+def _save_window_state(geometry: str, sash_ratio: float, top_line: int) -> None:
     gitr_dir = _find_gitr_dir()
     if not gitr_dir:
         return
-    state = {'geometry': geometry, 'sash_ratio': sash_ratio}
-    if top_line is None:
-        prev = _load_window_state() or {}
-        state.update({k: prev[k] for k in ('top_line', 'scroll_frac') if k in prev})
-    else:
-        state['top_line'] = top_line
+    state = {'geometry': geometry, 'sash_ratio': sash_ratio, 'top_line': top_line}
     try:
         gitr_dir.mkdir(parents=True, exist_ok=True)
         (gitr_dir / 'window.json').write_text(json.dumps(state, indent=2))
@@ -589,8 +584,7 @@ class CFG:
     diff_dim_fg        = 0.50   # fg intensity for word-diff unchanged words
     word_diff_min_ratio = 0.35  # below this similarity, fall back to plain line diff
     word_diff_autojunk_tokens = 300  # longer lines use difflib's junk heuristic (much faster)
-    render_chunk_ms    = 30   # diff panel renders in chunks of about this long
-    render_restore_margin = 200  # lines rendered past a restore target before scrolling to it
+    render_chunk_ms    = 30   # word-diff highlighting is applied in chunks of about this long
     hover_hide_delay_ms     = 150
     hover_btn_leave_delay_ms = 80
     edit_focus_out_delay_ms = 50
@@ -758,7 +752,8 @@ def _pair_lines_for_word_diff(
 ) -> list[tuple]:
     """Order-preserving optimal matching between removed and added lines.
 
-    Returns a list of ('pair', old, new), ('rem', old), or ('add', new).
+    Returns a list of ('pair', old, new, same_tokens), ('rem', old), or
+    ('add', new); same_tokens is True when the lines differ only in whitespace.
     Uses DP to maximise total similarity, so a re-indented block mixed with
     inserted/deleted lines gets correctly paired rather than sequentially
     mis-matched.  Lines with similarity below CFG.word_diff_min_ratio are
@@ -823,7 +818,8 @@ def _pair_lines_for_word_diff(
             result.append(('rem', rem_lines[i - 1]))
             i -= 1
         elif choice[i][j] == 'pair':
-            result.append(('pair', rem_lines[i - 1], add_lines[j - 1]))
+            result.append(('pair', rem_lines[i - 1], add_lines[j - 1],
+                           tok_rem[i - 1] == tok_add[j - 1]))
             i -= 1
             j -= 1
         elif choice[i][j] == 'rem':
@@ -856,14 +852,20 @@ class App:
         self._diff_files: list[DiffFile] = []
         self._positions: dict[str, str] = {}
         self._pos_order: list[tuple[int, str]] = []
-        self._minimap_lines: list[tuple[str, str]] = []  # (kind, text)
-        self._scroll_pos: tuple[float, float] = (0.0, 1.0)
+        # One (kind, text) per diff Text line, so row i is text line i+1.
+        self._minimap_lines: list[tuple[str, str]] = []
         # Rasterised pixel row per minimap line, keyed by line index. Lines are
         # only ever appended during a render, so a row never goes stale until
         # the next render clears the cache.
         self._mm_rows: dict[int, bytes] = {}
         self._mm_rows_w: int = 0
-        self._mm_painted: 'tuple[int, int, int] | None' = None  # (offset, band_h, n_lines)
+        self._mm_painted: 'tuple[int, int] | None' = None  # (offset, band_h)
+        # With wrapping on, a line spans ceil(len / cols) minimap rows so the
+        # minimap matches what the screen shows; _mm_row_start[i] is the row
+        # of line i (None when rows and lines coincide).
+        self._mm_cols: 'int | None' = None
+        self._mm_row_start: 'list[int] | None' = None
+        self._mm_relayout_id: 'str | None' = None
         self._mm_img: 'tk.PhotoImage | None' = None
         self._mm_item: int = 0
         self._mm_drag: 'tuple[int, float] | None' = None
@@ -873,9 +875,20 @@ class App:
         # Hunk separators are embedded after the flush that creates their
         # line, so a hunk boundary does not force an extra insert call.
         self._pending_seps: list[tuple[int, tk.Canvas]] = []
-        self._render_gen: int = 0
-        self._render_units: 'Iterator[None] | None' = None
+        # Word-diff pairs rendered plain by the skeleton and highlighted
+        # later: (removed line, added line, old text, new text).
+        self._wd_pending: list[tuple[int, int, str, str]] = []
+        self._wd_down: 'deque[tuple[int, int, str, str]]' = deque()
+        self._wd_up: 'deque[tuple[int, int, str, str]]' = deque()
+        self._wd_after_id: 'str | None' = None
+        # Inline comment editor: the widget line it occupies, and whether
+        # that line was inserted for it (a new comment) or belongs to an
+        # existing comment being edited.
+        self._editor_line: 'int | None' = None
+        self._editor_is_new: bool = False
         self._render_after_id: 'str | None' = None
+        self._scroll_after_id: 'str | None' = None
+        self._scroll_edge: int = 0  # +1/-1 while a Home/End run is heading for that edge
         self._pending_scroll_line: 'int | None' = None
         self._hunk_seps: list[tk.Canvas] = []
         self._comment_frames: list[tk.Frame] = []
@@ -888,7 +901,7 @@ class App:
         # Avoid re-reading and re-hashing a file for each new comment in a burst.
         self._session_snapshots: dict[str, str] = {}
         self._repo_root = _find_repo_root()
-        self._scroll_target: float = 0.0
+        self._scroll_remaining: float = 0.0  # pixels the smooth scroll still has to cover
         self._scroll_animating: bool = False
         self._flist_selected_row: int = -1
         self._last_top: str = ''  # top index at the last scroll callback
@@ -1350,6 +1363,7 @@ class App:
         self._update_wrap_bar()
         self._save_config({'wrap_lines': wrap})
         self.root.after_idle(self._render_gutter)
+        self.root.after_idle(self._mm_relayout)
 
     def _update_lineno_bar(self) -> None:
         name = ('off', 'new', 'old/new')[self._lineno_var.get()]
@@ -1459,44 +1473,82 @@ class App:
         self._sash_ratio = max(0.05, min(0.95, x / w))
 
     # --smooth scroll ---------------------------------------------------------
+    #
+    # Everything scrolls by pixels relative to the current view, never by
+    # document fraction: Tk's fractions are pixel estimates that keep changing
+    # for a second after a wrap toggle (it recomputes every line's height),
+    # so a fraction target would land hundreds of lines away.
 
-    def _scroll_by(self, frac: float) -> None:
-        first, last = self._diff.yview()
-        max_pos = 1.0 - (last - first)
+    def _line_px(self) -> int:
+        return max(1, self._gutter_font.metrics('linespace'))
+
+    def _scroll_by_pixels(self, px: float) -> None:
         self._manual_scroll = True
-        self._scroll_target = max(0.0, min(max_pos, self._scroll_target + frac))
+        if self._scroll_edge:
+            # A wheel tick during a Home/End run means "stop here": drop the
+            # rest of the run and apply the tick from the current position.
+            self._scroll_edge = 0
+            self._scroll_remaining = 0.0
+        self._scroll_remaining += px
         if not self._scroll_animating:
             self._scroll_animating = True
             self._animate_scroll()
+
+    def _stop_scroll_animation(self) -> None:
+        self._scroll_remaining = 0.0
+        self._scroll_animating = False
+        self._scroll_edge = 0
+        if self._scroll_after_id is not None:
+            self.root.after_cancel(self._scroll_after_id)
+            self._scroll_after_id = None
 
     def _on_wheel(self, ticks: int) -> None:
-        total = int(self._diff.index('end').split('.')[0])
-        if total < 2:
-            return
-        self._scroll_by((CFG.scroll_speed * ticks) / total)
+        self._scroll_by_pixels(CFG.scroll_speed * ticks * self._line_px())
+
+    def _edge_distance(self, edge: int) -> float:
+        """Pixels from the current view to the top (-1) or bottom (+1).
+
+        Tk's pixel counts are estimates until every line height is known, so
+        a run re-measures when it runs out and keeps going to the real edge.
+        """
+        d = self._diff
+        above = d.count('1.0', '@0,0', 'ypixels')[0]
+        if edge < 0:
+            return -above
+        total = d.count('1.0', 'end', 'ypixels')[0]
+        return max(0, total - d.winfo_height()) - above
+
+    def _at_edge(self, edge: int) -> bool:
+        first, last = self._diff.yview()
+        return last >= 1.0 if edge > 0 else first <= 0.0
 
     def _scroll_to(self, pos: float) -> None:
-        first, last = self._diff.yview()
-        max_pos = 1.0 - (last - first)
-        self._manual_scroll = True
-        self._scroll_target = max_pos if pos >= 1.0 else 0.0
-        if not self._scroll_animating:
-            self._scroll_animating = True
-            self._animate_scroll()
+        """Animate to the top (pos < 1) or the bottom of the document."""
+        edge = 1 if pos >= 1.0 else -1
+        self._scroll_remaining = 0.0
+        self._scroll_by_pixels(self._edge_distance(edge))
+        self._scroll_edge = edge
 
     def _on_page_scroll(self, direction: int) -> None:
-        first, last = self._diff.yview()
-        self._scroll_by(direction * (last - first) * 2 / 3)
+        self._scroll_by_pixels(direction * self._diff.winfo_height() * 2 / 3)
 
     def _animate_scroll(self) -> None:
-        current = self._diff.yview()[0]
-        remaining = self._scroll_target - current
-        if abs(remaining) < 0.0003:
-            self._diff.yview_moveto(self._scroll_target)
-            self._scroll_animating = False
+        self._scroll_after_id = None
+        remaining = self._scroll_remaining
+        if abs(remaining) < 1 and self._scroll_edge and not self._at_edge(self._scroll_edge):
+            remaining = self._scroll_remaining = self._edge_distance(self._scroll_edge)
+        if abs(remaining) < 1:
+            self._stop_scroll_animation()
             return
-        self._diff.yview_moveto(current + remaining * 0.35)
-        self.root.after(16, self._animate_scroll)
+        step = remaining * 0.35
+        step_i = int(step) if abs(step) >= 1 else (1 if step > 0 else -1)
+        before = self._diff.yview()
+        self._diff.yview_scroll(step_i, 'pixels')
+        self._scroll_remaining = remaining - step_i
+        if self._diff.yview() == before:
+            self._stop_scroll_animation()  # at the top or bottom already
+            return
+        self._scroll_after_id = self.root.after(16, self._animate_scroll)
 
     # --hunk separators -------------------------------------------------------
 
@@ -1540,6 +1592,8 @@ class App:
             if self._active_comment_frame and self._active_comment_frame.winfo_exists():
                 self._active_comment_frame.configure(width=row_w)
             self._render_gutter()  # width change reflows wrapped lines
+            if self._wrap_var.get() and self._mm_wrap_cols() != self._mm_cols:
+                self._schedule_mm_relayout()
 
     def _update_hunk_sep_widths(self) -> None:
         w = self._diff.winfo_width()
@@ -1563,15 +1617,94 @@ class App:
     # only the visible band is rasterised.  It is handed to Tk as a binary PPM,
     # which loads in a few ms where per-pixel colour names took ~20x longer.
 
-    def _mm_layout(self) -> 'tuple[int, int, int, int, int] | None':
-        """Return (canvas_h, img_w, char_w, line_h, content_h), or None if empty."""
+    def _mm_wrap_cols(self) -> 'int | None':
+        """Characters per display row when wrapping, else None."""
+        if not self._wrap_var.get():
+            return None
+        w = self._diff.winfo_width() - self._diff_row_pad()
+        charw = max(1, self._gutter_font.measure('0'))
+        return w // charw if w >= charw else None
+
+    def _mm_relayout(self) -> None:
+        """Recompute rows per line for the current wrap width, then repaint."""
+        self._mm_relayout_id = None
+        cols = self._mm_wrap_cols()
+        self._mm_cols = cols
+        if cols is None:
+            self._mm_row_start = None
+        else:
+            starts = [0] * (len(self._minimap_lines) + 1)
+            r = 0
+            for i, (_kind, text) in enumerate(self._minimap_lines):
+                starts[i] = r
+                r += max(1, -(-len(text.expandtabs(8)) // cols))
+            starts[-1] = r
+            self._mm_row_start = starts
+        self._mm_rows.clear()
+        self._render_minimap()
+
+    def _schedule_mm_relayout(self) -> None:
+        # Coalesces the burst of <Configure> events from a resize drag.
+        if self._mm_relayout_id is None:
+            self._mm_relayout_id = self.root.after(100, self._mm_relayout)
+
+    def _mm_starts(self) -> 'list[int] | None':
+        """The row table, or None while rows and lines coincide (also when the
+        table is stale: lines changed and the relayout has not run yet)."""
+        starts = self._mm_row_start
+        if starts is None or len(starts) != len(self._minimap_lines) + 1:
+            return None
+        return starts
+
+    def _mm_nrows(self) -> int:
+        starts = self._mm_starts()
+        return starts[-1] if starts is not None else len(self._minimap_lines)
+
+    def _mm_row_of(self, line: int, char: int) -> int:
+        """Minimap row for text line `line` (1-based) at character `char`."""
+        i = line - 1
+        starts = self._mm_starts()
+        if starts is None or self._mm_cols is None:
+            return i
+        if i >= len(self._minimap_lines):
+            return starts[-1]  # Tk's implicit final line
+        col = char
+        if char:
+            # Rows were counted on tab-expanded text; map the raw offset
+            # into the same coordinate space.
+            col = len(self._diff.get(f'{line}.0', f'{line}.{char}').expandtabs(8))
+        return starts[i] + min(col // self._mm_cols, starts[i + 1] - starts[i] - 1)
+
+    def _mm_char_at_col(self, line: int, col: int) -> int:
+        """Raw character offset in text line `line` at display column `col`."""
+        if col <= 0:
+            return 0
+        text = self._diff.get(f'{line}.0', f'{line}.end')
+        c = 0
+        for k, ch in enumerate(text):
+            if c >= col:
+                return k
+            c = (c // 8 + 1) * 8 if ch == '\t' else c + 1
+        return len(text)
+
+    def _mm_line_of_row(self, row: int) -> tuple[int, int]:
+        """(line index, segment) for a minimap row."""
+        starts = self._mm_starts()
+        if starts is None:
+            return row, 0
+        i = bisect.bisect_right(starts, row) - 1
+        return i, row - starts[i]
+
+    def _mm_layout(self) -> 'tuple[int, int, int, int, int, int] | None':
+        """Return (canvas_h, img_w, char_w, line_h, content_h, n_rows), or None."""
         c = self._minimap
         cw, ch = c.winfo_width(), c.winfo_height()
-        if cw <= 1 or ch <= 1 or not self._minimap_lines:
+        n = self._mm_nrows()
+        if cw <= 1 or ch <= 1 or n == 0:
             return None
         chw = max(1, int(round(self._scale)))
         lh = _MM_LINE_H * chw
-        return ch, (cw // chw) * chw, chw, lh, len(self._minimap_lines) * lh
+        return ch, (cw // chw) * chw, chw, lh, n * lh, n
 
     def _mm_offset_for(self, first: float, last: float, ch: int, content_h: int) -> int:
         """Minimap scroll offset: top of document -> 0, bottom -> content_h - ch."""
@@ -1580,11 +1713,16 @@ class App:
             return 0
         return max(0, min(content_h - ch, int(first / max_first * (content_h - ch))))
 
-    def _mm_line_row(self, i: int, iw: int, chw: int) -> bytes:
-        row = self._mm_rows.get(i)
+    def _mm_line_row(self, r: int, iw: int, chw: int) -> bytes:
+        row = self._mm_rows.get(r)
         if row is not None:
             return row
+        i, seg = self._mm_line_of_row(r)
         kind, text = self._minimap_lines[i]
+        if seg:
+            text = text.expandtabs(8)[seg * (self._mm_cols or 1):]
+        elif '\t' in text:
+            text = text.expandtabs(8)
         cols = iw // chw
         tables = _MM_CHANNELS.get(kind)
         if tables is None:
@@ -1600,16 +1738,15 @@ class App:
         px = bytearray(iw * 3)
         for k in range(3):
             chan = levels.translate(tables[k])
-            for r in range(chw):
-                px[k + 3 * r::3 * chw] = chan
+            for rep_ in range(chw):
+                px[k + 3 * rep_::3 * chw] = chan
         row = bytes(px)
-        self._mm_rows[i] = row
+        self._mm_rows[r] = row
         return row
 
     def _mm_paint_band(self, iw: int, chw: int, lh: int, offset: int, band_h: int) -> None:
-        n = len(self._minimap_lines)
         i0 = offset // lh
-        i1 = min(n, (offset + band_h + lh - 1) // lh)
+        i1 = min(self._mm_nrows(), (offset + band_h + lh - 1) // lh)
         stride = iw * 3
         start = (offset - i0 * lh) * stride
         data = b''.join(self._mm_line_row(i, iw, chw) * lh for i in range(i0, i1))
@@ -1625,7 +1762,7 @@ class App:
             self._mm_item = self._minimap.create_image(0, 0, anchor='nw', image=self._mm_img)
         else:
             self._mm_img.configure(data=ppm)
-        self._mm_painted = (offset, h, n)
+        self._mm_painted = (offset, h)
 
     def _render_minimap(self) -> None:
         """Full redraw: geometry changed, so the band is stale."""
@@ -1636,6 +1773,21 @@ class App:
             self._mm_rows_w = cw
         self._update_minimap_viewport()
 
+    def _mm_view_rows(self) -> tuple[int, int]:
+        """Minimap rows [top, bottom) currently visible in the diff widget.
+
+        Derived from the visible line numbers rather than Tk's scroll
+        fractions: those are pixel-based, and wrapped lines, comment frames
+        and 1px separators make them drift from the line-based minimap.
+        """
+        n = self._mm_nrows()
+        l0, c0 = (int(v) for v in self._diff.index('@0,0').split('.'))
+        h = max(self._diff.winfo_height() - 1, 0)
+        l1, c1 = (int(v) for v in self._diff.index(f'@0,{h}').split('.'))
+        top = max(0, min(n, self._mm_row_of(l0, c0)))
+        bottom = self._mm_row_of(l1, c1) + 1
+        return top, max(top + 1, min(n, bottom))
+
     def _update_minimap_viewport(self) -> None:
         c = self._minimap
         layout = self._mm_layout()
@@ -1645,49 +1797,50 @@ class App:
             self._mm_item = 0
             self._mm_painted = None
             return
-        ch, iw, chw, lh, content_h = layout
-        first, last = self._scroll_pos
-        offset = self._mm_offset_for(first, last, ch, content_h)
-        painted = self._mm_painted
-        # While the diff streams in, new lines only change the band if it
-        # has not filled the canvas yet; repainting on every chunk otherwise
-        # costs a PPM load (~8ms) for identical pixels.
-        stale = (painted is None or painted[0] != offset
-                 or (painted[2] != len(self._minimap_lines) and painted[1] < ch))
-        if stale:
+        ch, iw, chw, lh, content_h, n = layout
+        top, bottom = self._mm_view_rows()
+        offset = self._mm_offset_for(top / n, bottom / n, ch, content_h)
+        if self._mm_painted is None or self._mm_painted[0] != offset:
             self._mm_paint_band(iw, chw, lh, offset, min(ch, content_h - offset))
         c.delete('viewport')
-        y0, y1 = int(first * content_h) - offset, int(last * content_h) - offset
+        y0, y1 = top * lh - offset, bottom * lh - offset
         c.create_rectangle(0, y0, c.winfo_width(), y1,
                            fill=C['fg'], stipple='gray12',
                            outline=C['fg'], width=1, tags='viewport')
+
+    def _mm_scroll_to_row(self, row: float, span: int) -> int:
+        """Put minimap row `row` at the top of the diff; returns the row used."""
+        row_i = max(0, min(self._mm_nrows() - span, int(round(row))))
+        i, seg = self._mm_line_of_row(row_i)
+        self._manual_scroll = True
+        self._stop_scroll_animation()
+        self._diff.yview(f'{i + 1}.{self._mm_char_at_col(i + 1, seg * (self._mm_cols or 0))}')
+        return row_i
 
     def _on_minimap_press(self, event: tk.Event) -> None:
         layout = self._mm_layout()
         if layout is None:
             return
-        ch, _iw, _chw, _lh, content_h = layout
-        first, last = self._scroll_pos
-        span = last - first
-        offset = self._mm_offset_for(first, last, ch, content_h)
-        y0, y1 = int(first * content_h) - offset, int(last * content_h) - offset
-        self._manual_scroll = True
+        ch, _iw, _chw, lh, content_h, n = layout
+        top, bottom = self._mm_view_rows()
+        offset = self._mm_offset_for(top / n, bottom / n, ch, content_h)
+        y0, y1 = top * lh - offset, bottom * lh - offset
         if not (y0 <= event.y <= y1):
             # Outside the slider: centre the viewport on the clicked spot.
-            first = max(0.0, min(1.0 - span, (offset + event.y) / content_h - span / 2))
-            self._diff.yview_moveto(first)
-            self._scroll_target = first
-        self._mm_drag = (event.y, first)
+            span = bottom - top
+            top = self._mm_scroll_to_row((offset + event.y) / lh - span / 2, span)
+        self._mm_drag = (event.y, top)
 
     def _on_minimap_drag(self, event: tk.Event) -> None:
         layout = self._mm_layout()
         if layout is None or self._mm_drag is None:
             return
-        ch, _iw, _chw, _lh, content_h = layout
-        y_press, first0 = self._mm_drag
-        first, last = self._scroll_pos
-        max_first = 1.0 - (last - first)
-        # The slider's top edge is linear in the scroll fraction (y = first * k),
+        ch, _iw, _chw, _lh, content_h, n = layout
+        y_press, row0 = self._mm_drag
+        top, bottom = self._mm_view_rows()
+        span = bottom - top
+        max_first = 1.0 - span / n
+        # The slider's top edge is linear in the scroll position (y = first * k),
         # so dragging moves it by exactly the mouse delta -- mapping the
         # absolute pointer position instead would feed back through the
         # scrolling minimap and make the drag over-sensitive.
@@ -1697,10 +1850,7 @@ class App:
             k = content_h - (content_h - ch) / max_first
         if k <= 0:
             return
-        first = max(0.0, min(max_first, first0 + (event.y - y_press) / k))
-        self._manual_scroll = True
-        self._diff.yview_moveto(first)
-        self._scroll_target = first
+        self._mm_scroll_to_row(row0 + (event.y - y_press) * n / k, span)
 
     # --line-number gutter ----------------------------------------------------
 
@@ -1752,9 +1902,6 @@ class App:
 
     def _on_diff_yscroll(self, first: str, last: str) -> None:
         self._diff_vs.set(first, last)
-        self._scroll_pos = (float(first), float(last))
-        if not self._scroll_animating:
-            self._scroll_target = float(first)
         self._update_sticky_header()
         self._update_minimap_viewport()
         self._render_gutter()
@@ -1828,10 +1975,38 @@ class App:
         self._lbl_branch.configure(text=f'branch:  {branch}' if branch else '')
         self._lbl_stat.configure(text=f'  {stat}' if stat else '')
         self._diff_files = diff_files
-        self._render_diff_panel()
         self._render_flist(entries)
+        # The diff panel takes a second or more on a very large diff, so let
+        # the window show up first: render once the widget is mapped (and,
+        # via after_idle, painted), or right away if it already is.
+        if self._diff.winfo_ismapped():
+            self._schedule_render()
+        else:
+            self._diff.bind('<Map>', self._on_diff_first_map, add='+')
+
+    def _on_diff_first_map(self, _event: tk.Event) -> None:
+        self._diff.unbind('<Map>')
+        self._schedule_render()
+
+    def _schedule_render(self) -> None:
+        # Two reloads queued before the idle callback must not render twice:
+        # the second would run without the restore line and land at the top.
+        if self._render_after_id is None:
+            self._render_after_id = self.root.after_idle(self._deferred_render)
+
+    def _deferred_render(self) -> None:
+        self._render_after_id = None
+        self._render_diff_panel()
 
     def _render_diff_panel(self, restore_line: 'int | None' = None) -> None:
+        """Rebuild the diff widget from self._diff_files.
+
+        The whole document is emitted synchronously as plain lines, so its
+        size, file positions, gutter numbers and minimap are final before the
+        first paint and every jump works immediately.  Word-diff highlighting,
+        the expensive part, is applied in place afterwards in timed chunks
+        (_word_diff_step); it never changes the line structure.
+        """
         self._cancel_hide_schedule()
         self._comment_hover_btn.place_forget()
         self._copy_hover_btn.place_forget()
@@ -1845,6 +2020,7 @@ class App:
             self._active_comment_frame = None
             self._active_comment_entry = None
             self._comment_target = None
+        self._editor_line = None
         for sep in self._hunk_seps:
             sep.destroy()
         self._hunk_seps.clear()
@@ -1857,29 +2033,22 @@ class App:
         self._minimap_lines = []
         self._gutter_nums = {}
         self._gutter_max = (0, 0)
-        self._render_gen += 1
-        self._cancel_render_step()
         self._buf = []
         self._pending_seps = []
         self._cur_line = 0
         self._mm_rows.clear()
         self._mm_painted = None
+        self._mm_row_start = None
+        self._cancel_word_diff_pass()
+        self._wd_pending = []
+        self._cmt_list_actions = []  # stale line targets until the pane is rebuilt
 
         if restore_line is None:
             restore_line = self._pending_scroll_line
         self._pending_scroll_line = None
-        self._cmt_list_actions = []  # stale line targets until _finish_render rebuilds them
 
         if not self._diff_files:
             self._emit('Empty diff.\n', 'subdued')
-            self._flush_buf()
-            self._finish_render()
-            return
-        self._render_units = self._iter_render_units()
-        self._render_step(self._render_gen, self._render_units, restore_line)
-
-    def _iter_render_units(self) -> 'Iterator[None]':
-        """Emit the whole diff, yielding at every file and hunk boundary."""
         for i, df in enumerate(self._diff_files):
             if i > 0:
                 self._emit('\n', 'context')
@@ -1891,129 +2060,34 @@ class App:
             if idx:
                 self._emit(f' {idx}\n', 'fileidx')
                 self._minimap_lines.append(('fileidx', f' {idx}'))
-            yield from self._render_file_diff(df)
-            yield
-
-    def _render_step(self, gen: int, units: 'Iterator[None]',
-                     restore_line: 'int | None') -> None:
-        """Render units until the time budget is spent, then yield to Tk.
-
-        Keeps the window responsive on large diffs: it paints after the first
-        chunk while the rest streams in.  Content up to a restore target is
-        rendered synchronously so the old scroll position comes back without
-        a visible jump; a margin past it keeps Tk from clamping the view to
-        a still-growing end of document.
-        """
-        if gen != self._render_gen:
-            return  # superseded by a newer render
-        t0 = time.perf_counter()
-        budget = CFG.render_chunk_ms / 1000
-        margin = self._restore_margin()
-        for _ in units:
-            if restore_line is not None:
-                if self._cur_line < restore_line + margin:
-                    continue
-                self._flush_buf()
-                self._scroll_diff_to_line(restore_line)
-                restore_line = None
-            if time.perf_counter() - t0 > budget:
-                self._flush_buf()
-                self._update_pos_order()
-                self._update_minimap_viewport()
-                # A timer, not after_idle: back-to-back idle callbacks starve
-                # Tk's own idle work, so the window would not even map
-                # until the whole diff was rendered.
-                self._render_after_id = self.root.after(1, self._render_step, gen, units, None)
-                return
+            self._render_file_diff(df)
+            self._flush_buf()
         self._flush_buf()
+        self._update_pos_order()
+
         if restore_line is not None:
             self._scroll_diff_to_line(restore_line)
-        self._render_units = None
-        self._finish_render()
-
-    def _restore_margin(self) -> int:
-        """Lines to render past a scroll target before scrolling to it.
-
-        Tk pulls the top line up whenever fewer rows than fit the viewport
-        exist below it, and later appends do not re-anchor the view, so the
-        margin must cover the viewport however tall it is.
-        """
-        h = self._diff.winfo_height()
-        if h <= 1:
-            h = self.root.winfo_screenheight()  # not mapped yet
-        rows = h // max(1, self._gutter_font.metrics('linespace'))
-        return max(CFG.render_restore_margin, 2 * rows)
-
-    def _render_catch_up(self, line: int) -> None:
-        """Render synchronously until `line` plus a margin is in the widget.
-
-        Lets the user jump while the diff is still streaming in.  The
-        scheduled step shares the generator, so it carries on from wherever
-        this left off.
-        """
-        units = self._render_units
-        if units is None:
-            return
-        target = line + self._restore_margin()
-        for _ in units:
-            if self._cur_line >= target:
-                break
-        else:
-            self._render_drain()
-            return
-        self._flush_buf()
-        self._update_pos_order()
-
-    def _render_catch_up_path(self, path: str) -> None:
-        units = self._render_units
-        if units is None:
-            return
-        while path not in self._positions:
-            try:
-                next(units)
-            except StopIteration:
-                self._render_drain()
-                return
-        self._render_catch_up(int(self._positions[path].split('.')[0]))
-
-    def _cancel_render_step(self) -> None:
-        self._render_gen += 1  # a step that already fired bails out on the stale gen
-        if self._render_after_id is not None:
-            self.root.after_cancel(self._render_after_id)
-            self._render_after_id = None
-
-    def _render_drain(self, finish: bool = True) -> None:
-        """Finish an in-progress render synchronously."""
-        units = self._render_units
-        if units is None:
-            return
-        for _ in units:
-            pass
-        self._cancel_render_step()
-        self._flush_buf()
-        self._render_units = None
-        self._update_pos_order()
-        if finish:
-            self._finish_render()
+        elif self._pending_scroll_frac is not None:
+            # Legacy window state: a fraction only means something once the
+            # widget has laid the document out, hence after idle.
+            frac, self._pending_scroll_frac = self._pending_scroll_frac, None
+            self.root.after_idle(lambda: self._diff.yview_moveto(frac))
+        self.root.after_idle(self._update_sticky_header)
+        self.root.after_idle(self._mm_relayout)
+        self.root.after_idle(self._render_gutter)
+        self.root.after_idle(self._update_hunk_sep_widths)
+        self.root.after_idle(self._update_commits_section)
+        self.root.after_idle(self._update_comments_section)
+        if self._wd_pending:
+            # A timer rather than after_idle: the window must map and paint
+            # before the highlighting pass starts competing for idle time.
+            self._wd_after_id = self.root.after(1, self._start_word_diff_pass)
 
     def _update_pos_order(self) -> None:
         self._pos_order = sorted(
             (int(pos.split('.')[0]), path)
             for path, pos in self._positions.items()
         )
-
-    def _finish_render(self) -> None:
-        self._update_pos_order()
-        if self._pending_scroll_frac is not None:
-            frac = self._pending_scroll_frac
-            self._pending_scroll_frac = None
-            self.root.after_idle(lambda: self._diff.yview_moveto(frac))
-        self.root.after_idle(self._update_sticky_header)
-        self.root.after_idle(self._render_minimap)
-        self.root.after_idle(self._render_gutter)
-        self.root.after_idle(self._update_hunk_sep_widths)
-        self.root.after_idle(self._update_commits_section)
-        self.root.after_idle(self._update_comments_section)
 
     def _emit(self, chars: str, tag: str = '') -> None:
         """Queue text for the diff widget; _flush_buf inserts it in one call.
@@ -2036,14 +2110,8 @@ class App:
             for tag, parts in self._buf:
                 args.append(''.join(parts))
                 args.append(tag)
-            before = self._diff.index('end') if self._scroll_animating else None
             self._diff.insert('end', *args)
             self._buf = []
-            if before is not None:
-                # The animation target is a document fraction; keep it on the
-                # same line now that the document grew.
-                grown = int(self._diff.index('end').split('.')[0])
-                self._scroll_target *= int(before.split('.')[0]) / grown
         for ln, sep in self._pending_seps:
             self._diff.window_create(f'{ln}.0', window=sep)
         self._pending_seps = []
@@ -2053,52 +2121,47 @@ class App:
         mo, mn = self._gutter_max
         self._gutter_max = (max(mo, old_no or 0), max(mn, new_no or 0))
 
-    def _insert_word_diff(self, old_dl: DiffLine, new_dl: DiffLine, file_path: str) -> None:
-        # Callers only pair lines whose similarity already passed
-        # CFG.word_diff_min_ratio, so no need to measure it again here.
+    def _insert_word_diff(self, old_dl: DiffLine, new_dl: DiffLine, file_path: str,
+                          same_tokens: bool) -> None:
         old_text = old_dl.text[1:]
         new_text = new_dl.text[1:]
-        tok_old = re.findall(r'\w+|[^\w\s]|\s+', old_text) or ['']
-        tok_new = re.findall(r'\w+|[^\w\s]|\s+', new_text) or ['']
-        if self._word_diff_var.get() == 2:
-            nws_old = [t for t in tok_old if not t.isspace()]
-            nws_new = [t for t in tok_new if not t.isspace()]
-            if nws_old == nws_new:
-                self._emit(f'~{new_text}\n', 'reindent')
-                self._minimap_lines.append(('reindent', new_text))
-                self._record_gutter(old_dl.old_line_no, new_dl.new_line_no)
-                # The single rendered line stands in for both the - and + sides;
-                # offer both as anchor candidates.
-                self._insert_comment_annotation(file_path, old_dl, old_dl.text)
-                self._insert_comment_annotation(file_path, new_dl, new_dl.text)
-                return
-        opcodes = _word_matcher(tok_old, tok_new).get_opcodes()
-
-        self._emit('-', 'removed')
-        for op, i1, i2, j1, j2 in opcodes:
-            text = ''.join(tok_old[i1:i2])
-            self._emit(text, 'removed_word' if (op == 'equal' or text.isspace()) else 'removed_hi')
-        self._emit('\n')
+        if same_tokens and self._word_diff_var.get() == 2:
+            self._emit(f'~{new_text}\n', 'reindent')
+            self._minimap_lines.append(('reindent', '~' + new_text))
+            self._record_gutter(old_dl.old_line_no, new_dl.new_line_no)
+            # The single rendered line stands in for both the - and + sides;
+            # offer both as anchor candidates.
+            self._insert_comment_annotation(file_path, old_dl, old_dl.text)
+            self._insert_comment_annotation(file_path, new_dl, new_dl.text)
+            return
+        # Plain for now; _apply_word_diff rewrites both lines with word tags.
+        line_old = self._cur_line + 1
+        self._emit(f'-{old_text}\n', 'removed')
         self._minimap_lines.append(('removed', '-' + old_text))
         self._record_gutter(old_dl.old_line_no, None)
         self._insert_comment_annotation(file_path, old_dl, old_dl.text)
-
-        self._emit('+', 'added')
-        for op, i1, i2, j1, j2 in opcodes:
-            text = ''.join(tok_new[j1:j2])
-            self._emit(text, 'added_word' if (op == 'equal' or text.isspace()) else 'added_hi')
-        self._emit('\n')
+        line_new = self._cur_line + 1
+        self._emit(f'+{new_text}\n', 'added')
         self._minimap_lines.append(('added', '+' + new_text))
         self._record_gutter(None, new_dl.new_line_no)
         self._insert_comment_annotation(file_path, new_dl, new_dl.text)
+        self._wd_pending.append((line_old, line_new, old_text, new_text))
 
-    def _render_file_diff(self, df: DiffFile) -> 'Iterator[None]':
-        """Emit one file's hunks; yields at each hunk so callers can pause."""
+    def _render_file_diff(self, df: DiffFile) -> None:
         word_diff = self._word_diff_var.get()
         pending_rem: list[DiffLine] = []
         pending_add: list[DiffLine] = []
 
-        def flush():
+        def plain(dl: DiffLine, tag: str) -> None:
+            self._emit(dl.text + '\n', tag)
+            self._minimap_lines.append((tag, dl.text))
+            if tag == 'removed':
+                self._record_gutter(dl.old_line_no, None)
+            else:
+                self._record_gutter(None, dl.new_line_no)
+            self._insert_comment_annotation(df.path, dl, dl.text)
+
+        def flush() -> None:
             if word_diff and pending_rem and pending_add:
                 actions = _pair_lines_for_word_diff(
                     [d.text[1:] for d in pending_rem],
@@ -2107,32 +2170,16 @@ class App:
                 add_iter = iter(pending_add)
                 for action in actions:
                     if action[0] == 'pair':
-                        old_dl = next(rem_iter)
-                        new_dl = next(add_iter)
-                        self._insert_word_diff(old_dl, new_dl, df.path)
+                        self._insert_word_diff(next(rem_iter), next(add_iter), df.path, action[3])
                     elif action[0] == 'rem':
-                        dl = next(rem_iter)
-                        self._emit(dl.text + '\n', 'removed')
-                        self._minimap_lines.append(('removed', dl.text))
-                        self._record_gutter(dl.old_line_no, None)
-                        self._insert_comment_annotation(df.path, dl, dl.text)
+                        plain(next(rem_iter), 'removed')
                     else:
-                        dl = next(add_iter)
-                        self._emit(dl.text + '\n', 'added')
-                        self._minimap_lines.append(('added', dl.text))
-                        self._record_gutter(None, dl.new_line_no)
-                        self._insert_comment_annotation(df.path, dl, dl.text)
+                        plain(next(add_iter), 'added')
             else:
                 for dl in pending_rem:
-                    self._emit(dl.text + '\n', 'removed')
-                    self._minimap_lines.append(('removed', dl.text))
-                    self._record_gutter(dl.old_line_no, None)
-                    self._insert_comment_annotation(df.path, dl, dl.text)
+                    plain(dl, 'removed')
                 for dl in pending_add:
-                    self._emit(dl.text + '\n', 'added')
-                    self._minimap_lines.append(('added', dl.text))
-                    self._record_gutter(None, dl.new_line_no)
-                    self._insert_comment_annotation(df.path, dl, dl.text)
+                    plain(dl, 'added')
             pending_rem.clear()
             pending_add.clear()
 
@@ -2141,11 +2188,11 @@ class App:
                 continue
             if dl.kind == 'hunk':
                 flush()
-                yield
                 sep = tk.Canvas(self._diff, height=1, bg=C['subdued'],
                                 highlightthickness=0, bd=0,
                                 width=max(self._diff.winfo_width(), 1))
                 self._emit('\n')  # the separator's own line; embedded at flush
+                self._minimap_lines.append(('hunksep', ''))
                 self._pending_seps.append((self._cur_line, sep))
                 self._hunk_seps.append(sep)
                 self._emit(dl.text + '\n', dl.kind)
@@ -2164,6 +2211,137 @@ class App:
                 self._insert_comment_annotation(df.path, dl, dl.text)
         flush()
         self._insert_orphan_comments_for_file(df.path)
+
+    # --word-diff highlighting pass ------------------------------------------
+
+    def _cancel_word_diff_pass(self) -> None:
+        if self._wd_after_id is not None:
+            self.root.after_cancel(self._wd_after_id)
+            self._wd_after_id = None
+        self._wd_down.clear()
+        self._wd_up.clear()
+
+    def _start_word_diff_pass(self) -> None:
+        self._wd_after_id = None
+        pend, self._wd_pending = self._wd_pending, []
+        if not pend:
+            return
+        # Outward from the visible region, alternating below and above it,
+        # so what is on screen is highlighted in the first chunk.
+        top = int(self._diff.index('@0,0').split('.')[0])
+        k = bisect.bisect_left(pend, (top,))
+        self._wd_down = deque(pend[k:])
+        self._wd_up = deque(reversed(pend[:k]))
+        self._word_diff_step()
+
+    def _word_diff_step(self) -> None:
+        self._wd_after_id = None
+        t0 = time.perf_counter()
+        budget = CFG.render_chunk_ms / 1000
+        down, up = self._wd_down, self._wd_up
+        while (down or up) and time.perf_counter() - t0 < budget:
+            for q in (down, up):
+                if q:
+                    self._apply_word_diff(*q.popleft())
+        if down or up:
+            self._wd_after_id = self.root.after(1, self._word_diff_step)
+
+    def _apply_word_diff(self, line_old: int, line_new: int, old_text: str, new_text: str) -> None:
+        d = self._diff
+        if (d.get(f'{line_old}.0', f'{line_old}.end') != '-' + old_text
+                or d.get(f'{line_new}.0', f'{line_new}.end') != '+' + new_text):
+            return  # not the lines we expected; leave them plain
+        tok_old = re.findall(r'\w+|[^\w\s]|\s+', old_text) or ['']
+        tok_new = re.findall(r'\w+|[^\w\s]|\s+', new_text) or ['']
+        opcodes = _word_matcher(tok_old, tok_new).get_opcodes()
+        segs_old: list[str] = ['-', 'removed']
+        segs_new: list[str] = ['+', 'added']
+        for op, i1, i2, j1, j2 in opcodes:
+            text = ''.join(tok_old[i1:i2])
+            if text:
+                unchanged = op == 'equal' or text.isspace()
+                segs_old += (text, 'removed_word' if unchanged else 'removed_hi')
+            text = ''.join(tok_new[j1:j2])
+            if text:
+                unchanged = op == 'equal' or text.isspace()
+                segs_new += (text, 'added_word' if unchanged else 'added_hi')
+        # replace (rather than delete + insert) keeps the view still even
+        # when the rewritten line is the one at the top of the window.
+        for line, segs in ((line_old, segs_old), (line_new, segs_new)):
+            foreign = self._foreign_tag_ranges(line)
+            d.replace(f'{line}.0', f'{line + 1}.0', *segs, '\n', '')
+            for tag, start, end in foreign:
+                d.tag_add(tag, start, end)
+
+    _OWN_LINE_TAGS = frozenset(('removed', 'added', 'removed_word', 'removed_hi',
+                                'added_word', 'added_hi'))
+
+    def _foreign_tag_ranges(self, line: int) -> list[tuple[str, str, str]]:
+        """Tags on `line` that the skeleton did not put there (selection,
+        hover), as (tag, start, end) so a rewrite can restore them."""
+        out: list[tuple[str, str, str]] = []
+        open_at: dict[str, str] = {}
+        first, last = f'{line}.0', f'{line + 1}.0'
+        for key, tag, index in self._diff.dump(first, last, tag=True):
+            if tag in self._OWN_LINE_TAGS:
+                continue
+            if key == 'tagon':
+                open_at[tag] = index
+            elif key == 'tagoff':
+                out.append((tag, open_at.pop(tag, first), index))
+        out.extend((tag, start, last) for tag, start in open_at.items())
+        return out
+
+    # --incremental line edits ------------------------------------------------
+
+    def _shift_lines(self, from_line: int, delta: int) -> None:
+        """Keep every line-keyed record consistent after inserting (delta > 0)
+        or deleting (delta < 0) lines in front of `from_line`.
+
+        Callers adjust self._minimap_lines themselves, since the new rows
+        depend on what was inserted.
+        """
+        def sh(ln: int) -> int:
+            return ln + delta if ln >= from_line else ln
+        self._gutter_nums = {sh(k): v for k, v in self._gutter_nums.items()}
+        self._line_to_anchor = {sh(k): v for k, v in self._line_to_anchor.items()}
+        self._line_post_image = {sh(k): v for k, v in self._line_post_image.items()}
+        for anchors in self._pending_anchors.values():
+            for a in anchors:
+                if a.src_line is not None:
+                    a.src_line = sh(a.src_line)
+        self._positions = {path: f'{sh(int(pos.split(".")[0]))}.0'
+                           for path, pos in self._positions.items()}
+        self._update_pos_order()
+        self._wd_pending = [(sh(a), sh(b), o, n) for a, b, o, n in self._wd_pending]
+        self._wd_down = deque((sh(a), sh(b), o, n) for a, b, o, n in self._wd_down)
+        self._wd_up = deque((sh(a), sh(b), o, n) for a, b, o, n in self._wd_up)
+        if self._editor_line is not None:
+            self._editor_line = sh(self._editor_line)
+        self._cur_line += delta
+        self._mm_rows.clear()
+        self._do_hide_hover(force=True)
+
+    def _after_line_edit(self) -> None:
+        self._mm_relayout()
+        self._render_gutter()
+        self._update_sticky_header()
+        self._update_comments_section()  # its click targets are line numbers
+
+    def _insert_blank_line(self, line: int) -> None:
+        """Open an empty line at `line`, pushing the current one down."""
+        self._diff.insert(f'{line - 1}.end', '\n')
+        # Tk gives the new newline the tags of the line it splits; a comment
+        # row must not look or hover like a removed/added line.
+        for tag in self._diff.tag_names(f'{line}.0'):
+            self._diff.tag_remove(tag, f'{line}.0', f'{line + 1}.0')
+        self._shift_lines(line, 1)
+        self._minimap_lines.insert(line - 1, ('comment', ''))
+
+    def _delete_lines(self, first: int, count: int) -> None:
+        self._diff.delete(f'{first}.0', f'{first + count}.0')
+        del self._minimap_lines[first - 1:first - 1 + count]
+        self._shift_lines(first + count, -count)
 
     def _render_flist(self, entries: list[FileEntry]) -> None:
         self._flist_selected_row = -1
@@ -2532,7 +2710,7 @@ class App:
         self._line_to_anchor[src_line_no] = anchor
         self._render_comment_frame(src_line_no, anchor)
 
-    def _render_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> None:
+    def _build_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> tk.Frame:
         cmt_display = self._format_comment_block(anchor.comment, anchor.moved)
         frame = tk.Frame(self._diff, bg=self._comment_bg)
         label = tk.Label(
@@ -2555,18 +2733,20 @@ class App:
             activebackground=self._comment_bg, activeforeground=C['fg'],
             relief='flat', bd=0, highlightthickness=0, cursor='hand2',
             font=(CFG.font_family, int(CFG.menu_font_size * self._scale)),
-            command=lambda sl=src_line_no: self._copy_loc_and_lines(sl + 1),
+            command=lambda a=anchor: self._copy_loc_and_lines((a.src_line or 0) + 1),
         )
         btn.pack(side='right', padx=4)
         copy_btn.pack(side='right', padx=4)
         label.pack(side='left', fill='x', expand=True)
-        frame.update_idletasks()
+        # Requested sizes are valid without update_idletasks, and calling it
+        # here would let Tk paint the half-built document mid-render.
         h = max(label.winfo_reqheight(), btn.winfo_reqheight(), copy_btn.winfo_reqheight())
         w = max(self._diff.winfo_width() - self._diff_row_pad(), 1)
         frame.configure(width=w, height=h)
         frame.pack_propagate(False)
         def _on_click(e: tk.Event) -> str:
-            self._open_comment_editor(src_line_no)
+            if anchor.src_line is not None:
+                self._open_comment_editor(anchor.src_line)
             return 'break'
         label.bind('<Button-1>', _on_click)
         frame.bind('<Button-1>', _on_click)
@@ -2574,15 +2754,58 @@ class App:
         label.bind('<Enter>', lambda e: self._do_hide_hover())
         btn.bind('<Enter>',   lambda e: self._do_hide_hover())
         copy_btn.bind('<Enter>', lambda e: self._do_hide_hover())
+        self._discard_frame(anchor)
+        anchor.frame = frame
+        self._comment_frames.append(frame)
+        return frame
+
+    def _discard_frame(self, anchor: '_ResolvedAnchor') -> None:
+        frame, anchor.frame = anchor.frame, None
+        if frame is None:
+            return
+        if frame in self._comment_frames:
+            self._comment_frames.remove(frame)
+        if frame.winfo_exists():
+            frame.destroy()
+
+    def _embed_comment_frame(self, line: int, frame: tk.Frame) -> None:
+        """Put a comment frame on an existing empty line."""
+        self._diff.window_create(f'{line}.0', window=frame)
+        self._diff.tag_add('comment', f'{line}.0', f'{line}.end')
+        self.root.after_idle(self._render_gutter)  # the row grew; no yscroll fires
+
+    def _render_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> None:
+        """Append the comment for the line just emitted (skeleton render)."""
+        frame = self._build_comment_frame(src_line_no, anchor)
         self._flush_buf()  # embedded windows bypass the text buffer
         self._diff.window_create('end', window=frame)
         self._emit('\n')
         self._flush_buf()
         cmt_line_no = src_line_no + 1
         self._diff.tag_add('comment', f'{cmt_line_no}.0', f'{cmt_line_no}.end')
-        self._comment_frames.append(frame)
-        for line in cmt_display.splitlines() or ['']:
-            self._minimap_lines.append(('comment', line))
+        self._minimap_lines.append(('comment', ''))
+
+    def _remove_comment(self, anchor: '_ResolvedAnchor') -> None:
+        """Take a rendered comment out of the widget without re-rendering.
+
+        An orphan placeholder line goes with its comment; a real source line
+        stays.
+        """
+        src = anchor.src_line
+        if src is None:
+            return
+        self._discard_frame(anchor)
+        orphan = 'orphan_src' in self._diff.tag_names(f'{src}.0')
+        first, count = (src, 2) if orphan else (src + 1, 1)
+        self._line_to_anchor.pop(src, None)
+        if orphan:
+            self._line_post_image.pop(src, None)
+        anchors = self._pending_anchors.get(anchor.file, [])
+        if anchor in anchors:
+            anchors.remove(anchor)
+        anchor.src_line = None
+        self._delete_lines(first, count)
+        self._after_line_edit()
 
     def _insert_orphan_comments_for_file(self, file_path: str) -> None:
         anchors = self._pending_anchors.get(file_path) or []
@@ -2604,11 +2827,12 @@ class App:
     def _delete_comment(self, anchor: '_ResolvedAnchor') -> None:
         self._review.delete(anchor.file, anchor.snapshot,
                             anchor.snap_line_no, anchor.side)
-        self._rerender_preserving_scroll()
+        self._remove_comment(anchor)
+        self._update_comments_section()
 
     def _scroll_diff_to_line(self, line_no: int) -> None:
+        self._stop_scroll_animation()
         self._diff.yview(f'{line_no}.0')
-        self._scroll_target = self._diff.yview()[0]
 
     def _rerender_preserving_scroll(self) -> None:
         top_line = int(self._diff.index('@0,0').split('.')[0])
@@ -2755,7 +2979,6 @@ class App:
         return 'break'
 
     def _open_comment_editor(self, line_no: int) -> None:
-        self._render_drain()  # edits the widget directly, bypassing _cur_line
         if self._active_comment_frame:
             self._cancel_comment_edit()
             return
@@ -2815,9 +3038,17 @@ class App:
         self._active_comment_frame = frame
         self._active_comment_entry = entry
         if 'comment' in self._diff.tag_names(f'{line_no + 1}.0'):
+            # Editing: the editor takes over the comment's line.  Tk destroys
+            # the frame with its character, so it is rebuilt afterwards.
+            self._editor_is_new = False
             self._diff.delete(f'{line_no + 1}.0', f'{line_no + 1}.end')
+            if anchor is not None:
+                self._discard_frame(anchor)
         else:
-            self._diff.insert(f'{line_no}.end', '\n')
+            self._editor_is_new = True
+            self._insert_blank_line(line_no + 1)
+            self._after_line_edit()
+        self._editor_line = line_no + 1  # after the insert: _shift_lines moves it too
         self._diff.window_create(f'{line_no + 1}.0', window=frame)
         self._resize_editor_frame(frame, prefix, entry)
         entry.focus_set()
@@ -2830,6 +3061,7 @@ class App:
         w = max(self._diff.winfo_width() - self._diff_row_pad(), 1)
         frame.configure(width=w, height=h)
         frame.pack_propagate(False)
+        self.root.after_idle(self._render_gutter)
 
     def _cancel_if_still_active(self) -> None:
         if self._active_comment_frame:
@@ -2839,33 +3071,48 @@ class App:
             else:
                 self._cancel_comment_edit()
 
-    def _cancel_comment_edit(self) -> None:
+    def _close_editor(self) -> 'tuple[int, _CommentEditTarget | None, str]':
+        """Tear the editor widget down; returns (editor line, target, text)."""
+        text = self._active_comment_entry.get('1.0', 'end-1c') if self._active_comment_entry else ''
         if self._active_comment_frame:
             self._active_comment_frame.destroy()
             self._active_comment_frame = None
         self._active_comment_entry = None
-        self._comment_target = None
-        self._rerender_preserving_scroll()
+        target, self._comment_target = self._comment_target, None
+        line, self._editor_line = self._editor_line, None
+        return line or 0, target, text.strip()
+
+    def _cancel_comment_edit(self) -> None:
+        line, _target, _text = self._close_editor()
+        if line:
+            if self._editor_is_new:
+                self._delete_lines(line, 1)
+                self._after_line_edit()
+            else:
+                anchor = self._line_to_anchor.get(line - 1)
+                if anchor is not None:
+                    self._embed_comment_frame(line, self._build_comment_frame(line - 1, anchor))
         self._diff.focus_set()
 
     def _confirm_comment_edit(self) -> None:
         if not self._active_comment_entry or not self._comment_target:
             return
-        target = self._comment_target
-        comment = self._active_comment_entry.get('1.0', 'end-1c').strip()
-        if self._active_comment_frame:
-            self._active_comment_frame.destroy()
-            self._active_comment_frame = None
-        self._active_comment_entry = None
-        self._comment_target = None
+        line, target, comment = self._close_editor()
+        src_line = line - 1
+        anchor = self._line_to_anchor.get(src_line)
         if target.existing_snapshot is not None and target.existing_snap_line_no is not None:
             if comment:
                 self._review.add(target.file, target.existing_snapshot,
                                  target.existing_snap_line_no,
                                  target.side, target.line_text, comment)
+                if anchor is not None:
+                    anchor.comment = comment
+                    self._embed_comment_frame(line, self._build_comment_frame(src_line, anchor))
             else:
                 self._review.delete(target.file, target.existing_snapshot,
                                     target.existing_snap_line_no, target.side)
+                if anchor is not None:
+                    self._remove_comment(anchor)
         elif comment:
             snap_sha = self._session_snapshots.get(target.file)
             if not snap_sha:
@@ -2876,7 +3123,22 @@ class App:
             if snap_sha:
                 self._review.add(target.file, snap_sha, target.new_line_no,
                                  target.side, target.line_text, comment)
-        self._rerender_preserving_scroll()
+                anchor = _ResolvedAnchor(
+                    file=target.file, snapshot=snap_sha, snap_line_no=target.new_line_no,
+                    target_line_no=target.new_line_no, side=target.side,
+                    line_text=target.line_text, comment=comment,
+                    matched=True, src_line=src_line,
+                )
+                self._pending_anchors.setdefault(target.file, []).append(anchor)
+                self._line_to_anchor[src_line] = anchor
+                self._embed_comment_frame(line, self._build_comment_frame(src_line, anchor))
+            else:
+                self._delete_lines(line, 1)
+                self._after_line_edit()
+        elif self._editor_is_new:
+            self._delete_lines(line, 1)
+            self._after_line_edit()
+        self._update_comments_section()
         self._diff.focus_set()
 
     @staticmethod
@@ -2932,17 +3194,13 @@ class App:
 
     def _jump_to_diff_line(self, line_no: int) -> None:
         self._manual_scroll = False
-        self._render_catch_up(line_no)
         self._scroll_diff_to_line(line_no)
 
     def _close_app(self) -> None:
         if not self._review.is_empty():
-            self._render_drain(finish=False)  # comment locations need the full document
             self._dump_to_terminal()
         try:
-            top_line = None
-            if self._render_units is None:
-                top_line = int(self._diff.index('@0,0').split('.')[0])
+            top_line = int(self._diff.index('@0,0').split('.')[0])
             _save_window_state(self.root.winfo_geometry(), self._sash_ratio, top_line)
         except tk.TclError:
             pass
@@ -3112,13 +3370,11 @@ class App:
         if self._review.is_empty():
             print('gitr: no review comments')
             return
-        self._render_drain()  # anchors get their lines as they are rendered
         for _src_line, loc, src_text, cmt, _is_orphan, moved in self._iter_all_comments():
             print(f'{loc}\n{src_text}\n{self._format_comment_block(cmt, moved)}\n')
 
     def _jump_to(self, path: str) -> None:
         self._manual_scroll = False
-        self._render_catch_up_path(path)
         pos = self._positions.get(path)
         if not pos:
             return

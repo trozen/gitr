@@ -584,6 +584,8 @@ class CFG:
     diff_dim_fg        = 0.50   # fg intensity for word-diff unchanged words
     word_diff_min_ratio = 0.35  # below this similarity, fall back to plain line diff
     word_diff_autojunk_tokens = 300  # longer lines use difflib's junk heuristic (much faster)
+    word_diff_max_block = 40000  # removed x added lines above which pairing is sequential
+    progress_interval_ms = 100  # how often the render progress label is refreshed
     render_chunk_ms    = 30   # word-diff highlighting is applied in chunks of about this long
     hover_hide_delay_ms     = 150
     hover_btn_leave_delay_ms = 80
@@ -768,6 +770,22 @@ def _pair_lines_for_word_diff(
     tok_add = [nws_tokens(line) for line in add_lines]
 
     thr = CFG.word_diff_min_ratio
+    if m * n > CFG.word_diff_max_block:
+        # The optimal matching is quadratic (a 500x500 block takes seconds);
+        # pair lines in order instead, as git's word diff does, and only
+        # check each pair's similarity.
+        result: list[tuple] = []
+        k = min(m, n)
+        for i in range(k):
+            sm = _word_matcher(tok_rem[i], tok_add[i])
+            if sm.real_quick_ratio() >= thr and sm.quick_ratio() >= thr and sm.ratio() >= thr:
+                result.append(('pair', rem_lines[i], add_lines[i], tok_rem[i] == tok_add[i]))
+            else:
+                result.append(('rem', rem_lines[i]))
+                result.append(('add', add_lines[i]))
+        result.extend(('rem', line) for line in rem_lines[k:])
+        result.extend(('add', line) for line in add_lines[k:])
+        return result
     sims = [[0.0] * n for _ in range(m)]
     for j, b in enumerate(tok_add):
         # One matcher per added line: set_seq2 builds the b-side index that
@@ -886,7 +904,7 @@ class App:
         # existing comment being edited.
         self._editor_line: 'int | None' = None
         self._editor_is_new: bool = False
-        self._render_after_id: 'str | None' = None
+        self._loaded: bool = False  # the deferred first _load has run
         self._scroll_after_id: 'str | None' = None
         self._scroll_edge: int = 0  # +1/-1 while a Home/End run is heading for that edge
         self._pending_scroll_line: 'int | None' = None
@@ -944,7 +962,13 @@ class App:
         self._ruler_bg = _mix(C['topbar_bg'], C['subdued'], 0.45)
 
         self._build_ui()
-        self._load()
+        # Parsing and rendering a large diff take a while; do them once the
+        # window is up so the progress label is visible meanwhile.
+        self._progress.bind('<Map>', self._on_first_map, add='+')
+
+    def _on_first_map(self, _event: tk.Event) -> None:
+        self._progress.unbind('<Map>')
+        self.root.after_idle(self._load)
 
     # --UI ------------------------------------------------------------
 
@@ -1171,6 +1195,15 @@ class App:
         if not self._lineno_var.get():
             self._gutter.grid_remove()
         self._diff.grid(row=2, column=1, sticky='nsew')
+        # Shown in the diff's place while it is being (re)built; keeping the
+        # diff unmapped meanwhile also rules out painting it half-built.
+        self._progress = tk.Label(lf, text='loading...', bg=C['bg'], fg=C['subdued'],
+                                  font=font, anchor='nw', justify='left', padx=12, pady=8)
+        # Gridded directly rather than via _show_progress: that runs idle
+        # tasks, and the scroll callback they fire needs widgets built later.
+        self._diff.grid_remove()
+        self._progress.grid(row=2, column=1, sticky='nsew')
+        self._progress_shown = True
 
         self._minimap = tk.Canvas(lf, width=int(CFG.minimap_w * self._scale),
                                   bg=C['bg'], highlightthickness=0)
@@ -1940,6 +1973,7 @@ class App:
     def _reload(self) -> None:
         if not self._can_reload or self._source is None:
             return
+        self._show_progress('reloading...')
         try:
             new_diff = self._source.diff_text()
         except SystemExit:
@@ -1956,7 +1990,23 @@ class App:
         self._session_snapshots.clear()
         self._load()
 
+    def _show_progress(self, text: str) -> None:
+        """Swap the diff out for the progress label (if not already) and paint it."""
+        self._progress.configure(text=text)
+        if not self._progress_shown:
+            self._diff.grid_remove()
+            self._progress.grid(row=2, column=1, sticky='nsew')
+            self._progress_shown = True
+        self._progress.update_idletasks()
+
+    def _show_diff(self) -> None:
+        if self._progress_shown:
+            self._progress.grid_remove()
+            self._diff.grid()
+            self._progress_shown = False
+
     def _load(self) -> None:
+        self._show_progress('parsing diff...')
         diff_files = parse_diff(self.diff_text)
         entries = entries_from_diff(diff_files)
         branch = try_current_branch()
@@ -1968,6 +2018,7 @@ class App:
 
         self._entries = entries
         self._render(branch, stat, diff_files, entries)
+        self._loaded = True
         self._diff.focus_set()
 
     def _render(self, branch: str, stat: str,
@@ -1976,37 +2027,19 @@ class App:
         self._lbl_stat.configure(text=f'  {stat}' if stat else '')
         self._diff_files = diff_files
         self._render_flist(entries)
-        # The diff panel takes a second or more on a very large diff, so let
-        # the window show up first: render once the widget is mapped (and,
-        # via after_idle, painted), or right away if it already is.
-        if self._diff.winfo_ismapped():
-            self._schedule_render()
-        else:
-            self._diff.bind('<Map>', self._on_diff_first_map, add='+')
-
-    def _on_diff_first_map(self, _event: tk.Event) -> None:
-        self._diff.unbind('<Map>')
-        self._schedule_render()
-
-    def _schedule_render(self) -> None:
-        # Two reloads queued before the idle callback must not render twice:
-        # the second would run without the restore line and land at the top.
-        if self._render_after_id is None:
-            self._render_after_id = self.root.after_idle(self._deferred_render)
-
-    def _deferred_render(self) -> None:
-        self._render_after_id = None
         self._render_diff_panel()
 
     def _render_diff_panel(self, restore_line: 'int | None' = None) -> None:
         """Rebuild the diff widget from self._diff_files.
 
-        The whole document is emitted synchronously as plain lines, so its
-        size, file positions, gutter numbers and minimap are final before the
-        first paint and every jump works immediately.  Word-diff highlighting,
-        the expensive part, is applied in place afterwards in timed chunks
-        (_word_diff_step); it never changes the line structure.
+        The whole document is emitted synchronously as plain lines, behind a
+        progress label, so its size, file positions, gutter numbers and
+        minimap are final before the first paint and every jump works
+        immediately.  Word-diff highlighting, the expensive part, is applied
+        in place afterwards in timed chunks (_word_diff_step); it never
+        changes the line structure.
         """
+        self._show_progress('rendering...')
         self._cancel_hide_schedule()
         self._comment_hover_btn.place_forget()
         self._copy_hover_btn.place_forget()
@@ -2049,7 +2082,12 @@ class App:
 
         if not self._diff_files:
             self._emit('Empty diff.\n', 'subdued')
+        n_files = len(self._diff_files)
+        next_progress = time.perf_counter() + CFG.progress_interval_ms / 1000
         for i, df in enumerate(self._diff_files):
+            if time.perf_counter() >= next_progress:
+                self._show_progress(f'rendering {i} / {n_files} files...')
+                next_progress = time.perf_counter() + CFG.progress_interval_ms / 1000
             if i > 0:
                 self._emit('\n', 'context')
                 self._minimap_lines.append(('context', ''))
@@ -2064,6 +2102,7 @@ class App:
             self._flush_buf()
         self._flush_buf()
         self._update_pos_order()
+        self._show_diff()
 
         if restore_line is not None:
             self._scroll_diff_to_line(restore_line)
@@ -3197,13 +3236,14 @@ class App:
         self._scroll_diff_to_line(line_no)
 
     def _close_app(self) -> None:
-        if not self._review.is_empty():
+        if self._loaded and not self._review.is_empty():
             self._dump_to_terminal()
-        try:
-            top_line = int(self._diff.index('@0,0').split('.')[0])
-            _save_window_state(self.root.winfo_geometry(), self._sash_ratio, top_line)
-        except tk.TclError:
-            pass
+        if self._loaded:  # closed before the diff was loaded: keep the saved position
+            try:
+                top_line = int(self._diff.index('@0,0').split('.')[0])
+                _save_window_state(self.root.winfo_geometry(), self._sash_ratio, top_line)
+            except tk.TclError:
+                pass
         self.root.destroy()
 
     def _show_commit(self, sha: str) -> None:

@@ -633,6 +633,16 @@ def _blend(color: str, factor: float = 0.5) -> str:
     return f'#{r:02x}{g:02x}{b:02x}'
 
 
+def _wheel_ticks(delta: int) -> int:
+    """Scroll ticks for a <MouseWheel> delta (positive delta = wheel up).
+
+    Windows reports multiples of 120, macOS and precision touchpads report
+    small values; floor division by 120 would turn those into zero ticks on
+    one direction and a full tick on the other.
+    """
+    return (-1 if delta > 0 else 1) * max(1, abs(delta) // 120)
+
+
 def _mix(c1: str, c2: str, t: float) -> str:
     """Linear interpolation between two hex colors (t=0 → c1, t=1 → c2)."""
     def _p(h: str) -> tuple[int, int, int]:
@@ -921,6 +931,8 @@ class App:
         self._repo_root = _find_repo_root()
         self._scroll_remaining: float = 0.0  # pixels the smooth scroll still has to cover
         self._scroll_animating: bool = False
+        self._scroll_moved: bool = False       # this animation changed the view
+        self._settle_after_id: 'str | None' = None
         self._flist_selected_row: int = -1
         self._last_top: str = ''  # top index at the last scroll callback
         self._flist_row_to_entry: list[FileEntry | None] = []
@@ -1146,9 +1158,7 @@ class App:
                               insertwidth=0)
         self._make_read_only(self._diff)
         self._diff.bind('<Configure>', self._on_diff_configure)
-        self._diff.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
-        self._diff.bind('<Button-5>',   lambda e: self._on_wheel( 1) or 'break')
-        self._diff.bind('<MouseWheel>', lambda e: self._on_wheel(-e.delta // 120) or 'break')
+        self._bind_wheel(self._diff)
         self._diff.bind('<Up>',    lambda e: self._on_wheel(-1) or 'break')
         self._diff.bind('<Down>',  lambda e: self._on_wheel( 1) or 'break')
         self._diff.bind('<Prior>', lambda e: self._on_page_scroll(-1) or 'break')
@@ -1176,7 +1186,7 @@ class App:
         self.root.bind('<FocusIn>',  self._on_root_focus_in,  add='+')
         self._comment_hover_btn = self._make_hover_button('+comment(a)', C['comment_fg'], self._on_comment_btn_click)
         self._copy_hover_btn    = self._make_hover_button('copy(c)',      C['fg'],          self._on_copy_btn_click)
-        self._diff_vs = self._make_scrollbar(lf, orient='vertical', command=self._diff.yview)
+        self._diff_vs = self._make_scrollbar(lf, orient='vertical', command=self._on_scrollbar_move)
         self._diff_vs.bind('<ButtonPress-1>', lambda e: setattr(self, '_manual_scroll', True))
         hs = self._make_scrollbar(lf, orient='horizontal', command=self._diff.xview)
         self._diff.configure(yscrollcommand=self._on_diff_yscroll, xscrollcommand=hs.set)
@@ -1189,9 +1199,7 @@ class App:
         self._gutter = tk.Canvas(lf, bg=C['bg'], highlightthickness=0, width=1)
         self._gutter.grid(row=2, column=0, sticky='ns')
         self._gutter.bind('<Configure>', lambda e: self._render_gutter())
-        self._gutter.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
-        self._gutter.bind('<Button-5>',   lambda e: self._on_wheel( 1) or 'break')
-        self._gutter.bind('<MouseWheel>', lambda e: self._on_wheel(-e.delta // 120) or 'break')
+        self._bind_wheel(self._gutter)
         if not self._lineno_var.get():
             self._gutter.grid_remove()
         self._diff.grid(row=2, column=1, sticky='nsew')
@@ -1209,6 +1217,8 @@ class App:
                                   bg=C['bg'], highlightthickness=0)
         self._minimap.grid(row=2, column=2, rowspan=2, sticky='ns')
         self._minimap.bind('<Configure>',  lambda e: self._render_minimap())
+        self._bind_wheel(self._minimap)
+        self._bind_wheel(self._sticky)
         self._minimap.bind('<Button-1>',   self._on_minimap_press)
         self._minimap.bind('<B1-Motion>',  self._on_minimap_drag)
 
@@ -1319,6 +1329,10 @@ class App:
         self._diff.tag_configure('status_R',    foreground=C['status_R'])
         self._diff.tag_configure('hover',       background=self._ruler_bg)
         self._diff.tag_configure('hover_line',  background=_blend(C['topbar_bg'], 0.72))
+        self._diff.tag_configure('repaint',     background=C['bg'])
+        # Tk paints only the top tag's background, so the ruler would vanish
+        # under 'sel' (or hide it). A blend on the overlap keeps both visible.
+        self._diff.tag_configure('hover_sel',   background=_mix(C['selected_bg'], self._ruler_bg, 0.5))
 
         # file list tags
         self._flist.tag_configure('status_A',  foreground=C['status_A'])
@@ -1344,9 +1358,12 @@ class App:
         # Word diff: changed words — same "change highlight" bg as the full-line removed/added tags
         self._diff.tag_configure('removed_hi',   foreground=C['removed_fg'], background=_rem_hi)
         self._diff.tag_configure('added_hi',     foreground=C['added_fg'],   background=_add_hi)
+        self._diff.tag_lower('repaint')
         self._diff.tag_raise('hover_line')
         self._diff.tag_raise('hover')
         self._diff.tag_raise('sel')
+        self._diff.tag_raise('hover_sel')
+        self._diff.bind('<<Selection>>', lambda e: self._sync_hover_sel(), add='+')
 
         self._flist.bind('<Button-1>', self._on_file_click)
         self._flist.bind('<B1-Motion>', lambda e: 'break')
@@ -1354,7 +1371,7 @@ class App:
         self._flist.bind('<Triple-Button-1>', lambda e: 'break')
         self._flist.bind('<Button-4>',   lambda e: self._flist.yview_scroll(-4, 'units') or 'break')
         self._flist.bind('<Button-5>',   lambda e: self._flist.yview_scroll( 4, 'units') or 'break')
-        self._flist.bind('<MouseWheel>', lambda e: self._flist.yview_scroll(-e.delta // 30, 'units') or 'break')
+        self._flist.bind('<MouseWheel>', lambda e: self._flist.yview_scroll(4 * _wheel_ticks(e.delta), 'units') or 'break')
         self._flist.bind('<Up>',         lambda e: self._flist_nav(-1) or 'break')
         self._flist.bind('<Down>',       lambda e: self._flist_nav( 1) or 'break')
         self._flist.bind('<Return>',     lambda e: self._flist_activate() or 'break')
@@ -1525,15 +1542,92 @@ class App:
         self._scroll_remaining += px
         if not self._scroll_animating:
             self._scroll_animating = True
+            self._scroll_moved = False
             self._animate_scroll()
 
     def _stop_scroll_animation(self) -> None:
         self._scroll_remaining = 0.0
+        was_animating = self._scroll_animating
         self._scroll_animating = False
         self._scroll_edge = 0
         if self._scroll_after_id is not None:
             self.root.after_cancel(self._scroll_after_id)
             self._scroll_after_id = None
+        if was_animating and self._scroll_moved:
+            self._schedule_settle()
+
+    def _hide_for_scroll(self) -> None:
+        """Hide the ruler before the view moves (see _after_scroll_settled)."""
+        if self._hover_line >= 0 or self._hover_btn_line >= 0:
+            self._do_hide_hover(force=True)
+
+    def _move_view(self, *yview_args: str) -> None:
+        """A non-animated move of the diff view: jump, scrollbar, minimap."""
+        self._hide_for_scroll()
+        self._diff.yview(*yview_args)
+        self._schedule_settle()
+
+    def _schedule_settle(self) -> None:
+        if self._settle_after_id is None:
+            self._settle_after_id = self.root.after_idle(self._after_scroll_settled)
+
+    def _after_scroll_settled(self) -> None:
+        """Repair and re-hover after the view moved.
+
+        Tk scrolls by copying pixels, and a child window that was mapped over
+        the copied area leaves a hole that X repairs only when its (Graphics)
+        Expose event arrives. A later copy can move that hole first, leaving
+        garbage that nothing repaints. The ruler buttons are therefore hidden
+        before every move (_hide_for_scroll) and not shown while an animation
+        runs, but the window_create-embedded children (hunk separators,
+        comment frames, the editor) stay mapped through every copy. Dirtying
+        every visible row once the view is still repaints whatever was left;
+        the tag sits below all others and matches the widget bg, so it is
+        invisible.
+        """
+        self._settle_after_id = None
+        if self._scroll_animating:
+            return
+        d = self._diff
+        # Flush the redisplay that the move queued behind this callback, so
+        # its yscroll callback cannot hide the ruler placed below.
+        d.update_idletasks()
+        top, bottom = d.index('@0,0 linestart'), d.index(f'@0,{d.winfo_height()} lineend')
+        d.tag_add('repaint', top, bottom)
+        d.tag_remove('repaint', top, bottom)
+        # The ruler is suppressed while scrolling; bring it back for wherever
+        # the pointer ended up without waiting for the next motion event.
+        self._rehover_under_pointer()
+
+    def _rehover_under_pointer(self, under: 'tk.Widget | None' = None) -> bool:
+        """Re-run the hover handler for the pointer's current position.
+
+        `under` is the widget already known to be under the pointer, if any.
+        Returns False when the pointer is not over the diff text. This checks
+        the containing widget rather than the diff's bounds on purpose: over
+        a placed button or an embedded comment frame the two differ.
+        """
+        d = self._diff
+        if under is None:
+            under = self._widget_under_pointer()
+        if under is not d:
+            return False
+        try:
+            px, py = self.root.winfo_pointerxy()
+            ev = tk.Event()
+            ev.x, ev.y = px - d.winfo_rootx(), py - d.winfo_rooty()
+        except tk.TclError:
+            return False
+        self._on_diff_hover(ev)
+        return True
+
+    def _bind_wheel(self, widget: tk.Widget) -> None:
+        # Widgets layered over the diff (hover buttons, comment frames, the
+        # sticky header) receive the wheel event themselves and would swallow
+        # it, so each one has to forward it to the diff explicitly.
+        widget.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
+        widget.bind('<Button-5>',   lambda e: self._on_wheel( 1) or 'break')
+        widget.bind('<MouseWheel>', lambda e: self._on_wheel(_wheel_ticks(e.delta)) or 'break')
 
     def _on_wheel(self, ticks: int) -> None:
         self._scroll_by_pixels(CFG.scroll_speed * ticks * self._line_px())
@@ -1575,12 +1669,19 @@ class App:
             return
         step = remaining * 0.35
         step_i = int(step) if abs(step) >= 1 else (1 if step > 0 else -1)
+        if self._at_edge(1 if step_i > 0 else -1):
+            # Nothing can move, so leave the ruler alone: hiding it here would
+            # make every tick at the top or bottom blink.
+            self._stop_scroll_animation()
+            return
+        self._hide_for_scroll()  # before the copy, see _after_scroll_settled
         before = self._diff.yview()
         self._diff.yview_scroll(step_i, 'pixels')
         self._scroll_remaining = remaining - step_i
         if self._diff.yview() == before:
             self._stop_scroll_animation()  # at the top or bottom already
             return
+        self._scroll_moved = True
         self._scroll_after_id = self.root.after(16, self._animate_scroll)
 
     # --hunk separators -------------------------------------------------------
@@ -1598,6 +1699,7 @@ class App:
             font=(CFG.font_family, CFG.font_size),
         )
         btn.bind('<Button-1>', lambda e: command())
+        self._bind_wheel(btn)
         btn.bind('<Enter>', lambda e: self._on_btn_enter())
         btn.bind('<Leave>', lambda e: self._on_btn_leave())
         return btn
@@ -1847,7 +1949,7 @@ class App:
         i, seg = self._mm_line_of_row(row_i)
         self._manual_scroll = True
         self._stop_scroll_animation()
-        self._diff.yview(f'{i + 1}.{self._mm_char_at_col(i + 1, seg * (self._mm_cols or 0))}')
+        self._move_view(f'{i + 1}.{self._mm_char_at_col(i + 1, seg * (self._mm_cols or 0))}')
         return row_i
 
     def _on_minimap_press(self, event: tk.Event) -> None:
@@ -2230,6 +2332,7 @@ class App:
                 sep = tk.Canvas(self._diff, height=1, bg=C['subdued'],
                                 highlightthickness=0, bd=0,
                                 width=max(self._diff.winfo_width(), 1))
+                self._bind_wheel(sep)
                 self._emit('\n')  # the separator's own line; embedded at flush
                 self._minimap_lines.append(('hunksep', ''))
                 self._pending_seps.append((self._cur_line, sep))
@@ -2793,6 +2896,8 @@ class App:
         label.bind('<Enter>', lambda e: self._do_hide_hover())
         btn.bind('<Enter>',   lambda e: self._do_hide_hover())
         copy_btn.bind('<Enter>', lambda e: self._do_hide_hover())
+        for w in (frame, label, btn, copy_btn):
+            self._bind_wheel(w)
         self._discard_frame(anchor)
         anchor.frame = frame
         self._comment_frames.append(frame)
@@ -2871,7 +2976,10 @@ class App:
 
     def _scroll_diff_to_line(self, line_no: int) -> None:
         self._stop_scroll_animation()
-        self._diff.yview(f'{line_no}.0')
+        self._move_view(f'{line_no}.0')
+
+    def _on_scrollbar_move(self, *args: str) -> None:
+        self._move_view(*args)
 
     def _rerender_preserving_scroll(self) -> None:
         top_line = int(self._diff.index('@0,0').split('.')[0])
@@ -2900,10 +3008,16 @@ class App:
 
     def _finalize_btn_leave(self) -> None:
         self._btn_leave_after_id = None
-        if self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
+        under = self._widget_under_pointer()
+        if under in (self._comment_hover_btn, self._copy_hover_btn):
             return
         self._over_hover_btn = False
-        self._schedule_hide()
+        # Unmapping the buttons for a scroll also fires Leave. A hide scheduled
+        # from here could then land after the post-scroll re-hover and wipe it,
+        # so a pointer still over the diff re-hovers instead of hiding. With an
+        # editor open the hover handler does nothing, so hide explicitly.
+        if self._active_comment_frame or not self._rehover_under_pointer(under):
+            self._schedule_hide()
 
     def _on_root_focus_out(self, event: tk.Event) -> None:
         # FocusOut fires for child widgets too; only act when the toplevel
@@ -2916,16 +3030,37 @@ class App:
         if event.widget is self.root:
             self._has_focus = True
 
-    def _do_hide_hover(self, force: bool = False) -> None:
-        self._hide_after_id = None
-        if not force and self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
+    def _sync_hover_sel(self) -> None:
+        """Tag the overlap of the hovered row with the selection."""
+        d = self._diff
+        if self._hover_row_range is None:
             return
+        start, end = self._hover_row_range
+        d.tag_remove('hover_sel', start, end)
+        ranges = d.tag_ranges('sel')
+        for s, e in zip(ranges[::2], ranges[1::2]):
+            if d.compare(e, '<=', start) or d.compare(s, '>=', end):
+                continue
+            d.tag_add('hover_sel',
+                      s if d.compare(s, '>', start) else start,
+                      e if d.compare(e, '<', end) else end)
+
+    def _clear_hover_tags(self) -> None:
         if self._hover_row_range is not None:
+            self._diff.tag_remove('hover_sel', *self._hover_row_range)
             self._diff.tag_remove('hover', *self._hover_row_range)
             self._hover_row_range = None
         if self._hover_range is not None:
             self._diff.tag_remove('hover_line', *self._hover_range)
             self._hover_range = None
+
+    def _do_hide_hover(self, force: bool = False) -> None:
+        # Cancel rather than just forget a pending scheduled hide: a live timer
+        # would otherwise fire later and wipe a ruler placed in the meantime.
+        self._cancel_hide_schedule()
+        if not force and self._widget_under_pointer() in (self._comment_hover_btn, self._copy_hover_btn):
+            return
+        self._clear_hover_tags()
         self._hover_row = None
         self._hover_line = -1
         self._comment_hover_btn.place_forget()
@@ -2938,6 +3073,10 @@ class App:
             return
         if self._active_comment_frame or self._over_hover_btn:
             return
+        # Mapping a button over a view that is laid out but not yet painted
+        # makes the next pixel copy smear it; _after_scroll_settled re-hovers.
+        if self._scroll_animating:
+            return
         self._cancel_hide_schedule()
         idx = self._diff.index(f'@{event.x},{event.y}')
         disp_start = self._diff.index(f'{idx} display linestart')
@@ -2948,10 +3087,7 @@ class App:
         if not tags & {'added', 'removed', 'context'}:
             self._do_hide_hover()
             return
-        if self._hover_row_range is not None:
-            self._diff.tag_remove('hover', *self._hover_row_range)
-        if self._hover_range is not None:
-            self._diff.tag_remove('hover_line', *self._hover_range)
+        self._clear_hover_tags()
         # Two highlights: 'hover' is the strong ruler on the single display row
         # under the cursor; 'hover_line' is a lighter wash over the whole logical
         # line so you can see what copy/comment will act on (both operate on the
@@ -2972,6 +3108,7 @@ class App:
         self._hover_line      = line_no
         self._diff.tag_add('hover_line', line_start, line_full_end)
         self._diff.tag_add('hover', disp_start, row_end)
+        self._sync_hover_sel()
         info = self._diff.dlineinfo(disp_start)
         if info:
             _, y, _, h, _ = info
@@ -3034,6 +3171,9 @@ class App:
         file, new_line_no, side, line_text = post
         anchor = self._line_to_anchor.get(line_no)
         existing = anchor.comment if anchor else ''
+        # The ruler must not stay up next to the editor; the button click's
+        # own hide is not forced and yields while the pointer is on the button.
+        self._do_hide_hover(force=True)
         self._comment_target = _CommentEditTarget(
             file=file, new_line_no=new_line_no, side=side, line_text=line_text,
             existing_snapshot     = anchor.snapshot     if anchor else None,
@@ -3044,6 +3184,8 @@ class App:
         prefix = tk.Label(frame, text='  >> ', bg=C['topbar_bg'], fg=C['comment_fg'],
                           font=bar_font)
         prefix.pack(side='left', padx=(4, 0), pady=2, anchor='nw')
+        self._bind_wheel(frame)
+        self._bind_wheel(prefix)
         line_count = max(1, existing.count('\n') + 1)
         entry = tk.Text(frame, bg=C['bg'], fg=C['comment_fg'],
                         insertbackground=C['comment_fg'],

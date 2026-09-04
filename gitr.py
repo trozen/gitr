@@ -8,11 +8,14 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import textwrap
 import time
 import tkinter as tk
 from collections import deque
+from itertools import accumulate
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +99,7 @@ class _ResolvedAnchor:
     matched: bool = False
     src_line: Optional[int] = None  # diff Text line number once rendered
     frame: Optional[tk.Frame] = None  # the rendered comment widget, once embedded
+    label: Optional[tk.Label] = None  # its text, re-wrapped when the width changes
 
 
 # --git helpers ------------------------------------------------------------
@@ -586,6 +590,8 @@ class CFG:
     word_diff_autojunk_tokens = 300  # longer lines use difflib's junk heuristic (much faster)
     word_diff_max_block = 40000  # removed x added lines above which pairing is sequential
     progress_interval_ms = 100  # how often the render progress label is refreshed
+    sigint_poll_ms       = 200  # how often the event loop wakes to notice Ctrl+C
+    comment_wrap_min_cols = 20  # narrower than this: do not wrap comment text
     render_chunk_ms    = 30   # word-diff highlighting is applied in chunks of about this long
     hover_hide_delay_ms     = 150
     hover_btn_leave_delay_ms = 80
@@ -658,11 +664,11 @@ _MINIMAP_COLORS: dict[str, str | None] = {
     'added':    _blend(C['added_fg'],      0.45),
     'removed':  _blend(C['removed_fg'],    0.45),
     'hunk':     _blend(C['hunk_fg'],       0.35),
-    'filehdr':  _blend(C['fileheader_fg'], 0.35),
-    'fileidx':  _blend(C['fileheader_fg'], 0.35),
+    'filehdr':  C['topbar_bg'],  # same bar colour as the diff's header rows
+    'fileidx':  C['topbar_bg'],
     'context':  _blend(C['fg'], 0.18),
     'reindent': _blend(C['fg'], 0.18),
-    'comment':  _blend(C['comment_fg'], 0.80),
+    'comment':  C['bg'],  # ink; the row base is the comment bar colour
     'orphan':   _blend(C['subdued'], 0.40),
 }
 
@@ -731,12 +737,16 @@ def _mm_density_table() -> bytes:
     return bytes(lvl)
 
 
-def _mm_channel_tables(color: str) -> tuple[bytes, bytes, bytes]:
-    """Per-channel translate tables: density level byte -> colour channel byte."""
+def _mm_channel_tables(color: str, base: str = C['bg']) -> tuple[bytes, bytes, bytes]:
+    """Per-channel translate tables: density level byte -> colour channel byte.
+
+    Level 0 (no ink) is `base`; comment rows use a tinted base so the row
+    reads as a comment even where its text is short.
+    """
     levels = bytes(range(len(_MM_LEVELS)))
     chans: tuple[list[int], list[int], list[int]] = ([], [], [])
     for f in _MM_LEVELS:
-        h = _mix(C['bg'], color, f).lstrip('#')
+        h = _mix(base, color, f).lstrip('#')
         for k in range(3):
             chans[k].append(int(h[2 * k:2 * k + 2], 16))
     r, g, b = (bytes.maketrans(levels, bytes(ch)) for ch in chans)
@@ -744,7 +754,12 @@ def _mm_channel_tables(color: str) -> tuple[bytes, bytes, bytes]:
 
 
 _MM_DENSITY = _mm_density_table()
-_MM_CHANNELS = {kind: _mm_channel_tables(col)
+# Drawn as full-width bars rather than text density: a one-line label is
+# invisible at 1 px per character, and these rows mark boundaries.
+_MM_SOLID_KINDS = frozenset(('filehdr', 'fileidx'))
+# Comment rows mirror the diff's comment bar: dark text on a yellow band.
+_MM_ROW_BASE = {'comment': _blend(C['comment_fg'], 0.55)}
+_MM_CHANNELS = {kind: _mm_channel_tables(col, _MM_ROW_BASE.get(kind, C['bg']))
                 for kind, col in _MINIMAP_COLORS.items() if col is not None}
 
 
@@ -887,6 +902,7 @@ class App:
         # the next render clears the cache.
         self._mm_rows: dict[int, bytes] = {}
         self._mm_rows_w: int = 0
+        self._mm_base_rows: dict[tuple[str, int], bytes] = {}
         self._mm_painted: 'tuple[int, int] | None' = None  # (offset, band_h)
         # With wrapping on, a line spans ceil(len / cols) minimap rows so the
         # minimap matches what the screen shows; _mm_row_start[i] is the row
@@ -915,11 +931,14 @@ class App:
         self._editor_line: 'int | None' = None
         self._editor_is_new: bool = False
         self._loaded: bool = False  # the deferred first _load has run
+        self._rendering: bool = False  # inside a synchronous parse/render
+        self._interrupted: bool = False  # closed by Ctrl+C: exit status 130
         self._scroll_after_id: 'str | None' = None
         self._scroll_edge: int = 0  # +1/-1 while a Home/End run is heading for that edge
         self._pending_scroll_line: 'int | None' = None
         self._hunk_seps: list[tk.Canvas] = []
         self._comment_frames: list[tk.Frame] = []
+        self._rewrap_id: 'str | None' = None
         # Rebuilt every render from the review store + working-tree files.
         self._pending_anchors: dict[str, list['_ResolvedAnchor']] = {}
         self._line_to_anchor: dict[int, '_ResolvedAnchor'] = {}
@@ -1352,6 +1371,7 @@ class App:
         self._comment_bg = _comment_bg
         self._diff.tag_configure('comment', foreground=C['bg'], background=_comment_bg,
                                  spacing1=6, spacing3=6)
+        self._comment_spacing1 = 6  # pixels between a comment line's top and its frame
         self._diff.tag_bind('comment', '<Button-1>', self._on_comment_click)
         self._diff.tag_bind('comment', '<Enter>', lambda e: self._diff.config(cursor='hand2'))
         self._diff.tag_bind('comment', '<Leave>', lambda e: self._diff.config(cursor=''))
@@ -1561,11 +1581,52 @@ class App:
         if self._hover_line >= 0 or self._hover_btn_line >= 0:
             self._do_hide_hover(force=True)
 
-    def _move_view(self, *yview_args: str) -> None:
-        """A non-animated move of the diff view: jump, scrollbar, minimap."""
+    def _move_view(self, *yview_args: str, px: int = 0) -> None:
+        """A non-animated move of the diff view: jump, scrollbar, minimap.
+
+        `px` scrolls further by that many pixels after the yview call.
+        """
         self._hide_for_scroll()
+        rects = self._embedded_rects()
         self._diff.yview(*yview_args)
+        if px:
+            self._diff.yview_scroll(px, 'pixels')
+        self._repaint_rects(rects)
         self._schedule_settle()
+
+    def _embedded_rects(self) -> list[tuple[int, int]]:
+        """(y0, y1) of every embedded window (comment frame, hunk separator,
+        editor) currently on screen, in diff widget pixels."""
+        d = self._diff
+        rects: list[tuple[int, int]] = []
+        for _key, _name, idx in d.dump('@0,0', f'@0,{d.winfo_height()} lineend', window=True):
+            info = d.dlineinfo(idx)
+            if not info or info[3] < 4:
+                continue  # 1 px hunk separators leave no visible hole
+            y0, y1 = info[1], info[1] + info[3]
+            if rects and y0 <= rects[-1][1]:
+                rects[-1] = (rects[-1][0], max(rects[-1][1], y1))  # dump lists in order
+            elif not rects or (y0, y1) != rects[-1]:
+                rects.append((y0, y1))
+        return rects
+
+    def _repaint_rects(self, rects: list[tuple[int, int]]) -> None:
+        """Dirty the lines now under `rects`, taken before a pixel scroll.
+
+        Tk copies pixels to scroll and then moves embedded windows; the area
+        a window vacated is repainted only when X's Expose arrives, a frame
+        later, which shows as a flicker band trailing every comment frame.
+        Dirtied here, those lines are drawn in the same redisplay.
+        """
+        d = self._diff
+        h = d.winfo_height()
+        for y0, y1 in rects:
+            if y1 <= 0 or y0 >= h:
+                continue
+            a = d.index(f'@0,{max(y0, 0)} linestart')
+            b = d.index(f'@0,{min(y1, h) - 1} lineend')
+            d.tag_add('repaint', a, b)
+            d.tag_remove('repaint', a, b)
 
     def _schedule_settle(self) -> None:
         if self._settle_after_id is None:
@@ -1639,11 +1700,22 @@ class App:
         a run re-measures when it runs out and keeps going to the real edge.
         """
         d = self._diff
-        above = d.count('1.0', '@0,0', 'ypixels')[0]
+        above = self._ypixels('1.0', '@0,0')
         if edge < 0:
             return -above
-        total = d.count('1.0', 'end', 'ypixels')[0]
+        total = self._ypixels('1.0', 'end')
         return max(0, total - d.winfo_height()) - above
+
+    def _ypixels(self, a: str, b: str) -> int:
+        """Pixel height between two indices.
+
+        Text.count returns None for zero (until 3.13), and an int or a
+        one-tuple depending on the Python version.
+        """
+        res = self._diff.count(a, b, 'ypixels')
+        if res is None:
+            return 0
+        return int(res[0]) if isinstance(res, tuple) else int(res)
 
     def _at_edge(self, edge: int) -> bool:
         first, last = self._diff.yview()
@@ -1675,6 +1747,7 @@ class App:
             self._stop_scroll_animation()
             return
         self._hide_for_scroll()  # before the copy, see _after_scroll_settled
+        rects = self._embedded_rects()
         before = self._diff.yview()
         self._diff.yview_scroll(step_i, 'pixels')
         self._scroll_remaining = remaining - step_i
@@ -1682,6 +1755,7 @@ class App:
             self._stop_scroll_animation()  # at the top or bottom already
             return
         self._scroll_moved = True
+        self._repaint_rects(rects)
         self._scroll_after_id = self.root.after(16, self._animate_scroll)
 
     # --hunk separators -------------------------------------------------------
@@ -1729,6 +1803,7 @@ class App:
             self._render_gutter()  # width change reflows wrapped lines
             if self._wrap_var.get() and self._mm_wrap_cols() != self._mm_cols:
                 self._schedule_mm_relayout()
+            self._schedule_rewrap()
 
     def _update_hunk_sep_widths(self) -> None:
         w = self._diff.winfo_width()
@@ -1760,19 +1835,42 @@ class App:
         charw = max(1, self._gutter_font.measure('0'))
         return w // charw if w >= charw else None
 
+    @staticmethod
+    def _mm_line_rows(kind: str, text: str, cols: 'int | None') -> int:
+        """Minimap rows for one text line: a comment frame is as tall as its
+        block (it never wraps); other lines wrap at `cols` characters."""
+        if kind == 'comment':
+            return text.count('\n') + 1
+        if cols is None:
+            return 1
+        return max(1, -(-len(text.expandtabs(8)) // cols))
+
     def _mm_relayout(self) -> None:
         """Recompute rows per line for the current wrap width, then repaint."""
-        self._mm_relayout_id = None
+        if self._mm_relayout_id is not None:
+            self.root.after_cancel(self._mm_relayout_id)  # a sync call supersedes it
+            self._mm_relayout_id = None
         cols = self._mm_wrap_cols()
         self._mm_cols = cols
+        lines = self._minimap_lines
         if cols is None:
-            self._mm_row_start = None
+            # Without wrapping only multi-line comments take more than one
+            # row, so the table is skipped entirely when there are none.
+            tall = [(i, text.count('\n')) for i, (kind, text) in enumerate(lines)
+                    if kind == 'comment' and '\n' in text]
+            if not tall:
+                self._mm_row_start = None
+            else:
+                rows = [1] * len(lines)
+                for i, extra in tall:
+                    rows[i] += extra
+                self._mm_row_start = [0, *accumulate(rows)]
         else:
-            starts = [0] * (len(self._minimap_lines) + 1)
+            starts = [0] * (len(lines) + 1)
             r = 0
-            for i, (_kind, text) in enumerate(self._minimap_lines):
+            for i, (kind, text) in enumerate(lines):
                 starts[i] = r
-                r += max(1, -(-len(text.expandtabs(8)) // cols))
+                r += self._mm_line_rows(kind, text, cols)
             starts[-1] = r
             self._mm_row_start = starts
         self._mm_rows.clear()
@@ -1799,10 +1897,12 @@ class App:
         """Minimap row for text line `line` (1-based) at character `char`."""
         i = line - 1
         starts = self._mm_starts()
-        if starts is None or self._mm_cols is None:
+        if starts is None:
             return i
         if i >= len(self._minimap_lines):
             return starts[-1]  # Tk's implicit final line
+        if self._mm_cols is None or not char:
+            return starts[i]
         col = char
         if char:
             # Rows were counted on tab-expanded text; map the raw offset
@@ -1854,7 +1954,12 @@ class App:
             return row
         i, seg = self._mm_line_of_row(r)
         kind, text = self._minimap_lines[i]
-        if seg:
+        if kind == 'comment':
+            # One block line per row, pre-wrapped; a stale row table could
+            # ask for a row past a shortened block.
+            block = text.split('\n')
+            text = block[seg] if seg < len(block) else ''
+        elif seg:
             text = text.expandtabs(8)[seg * (self._mm_cols or 1):]
         elif '\t' in text:
             text = text.expandtabs(8)
@@ -1863,7 +1968,7 @@ class App:
         if tables is None:
             levels = bytes(cols)
             tables = _MM_CHANNELS['context']  # level 0 is the bg colour for every kind
-        elif kind == 'comment':
+        elif kind in _MM_SOLID_KINDS:
             levels = bytes([len(_MM_LEVELS) - 1]) * cols
         else:
             enc = text[:cols].encode('latin-1', 'replace')
@@ -1879,12 +1984,34 @@ class App:
         self._mm_rows[r] = row
         return row
 
+    def _mm_row_block(self, r: int, iw: int, chw: int, lh: int) -> bytes:
+        """The `lh` pixel rows for minimap row `r`.
+
+        Comment rows keep their bottom pixel row free of ink: prose fills a
+        row edge to edge, and without a gap consecutive rows merge into one
+        blob, unlike code rows, which are mostly indentation and spaces.
+        """
+        row = self._mm_line_row(r, iw, chw)
+        if lh < 2 or self._minimap_lines[self._mm_line_of_row(r)[0]][0] != 'comment':
+            return row * lh
+        return row * (lh - 1) + self._mm_base_row('comment', iw)
+
+    def _mm_base_row(self, kind: str, iw: int) -> bytes:
+        """One pixel row of `kind`'s no-ink colour."""
+        key = (kind, iw)
+        row = self._mm_base_rows.get(key)
+        if row is None:
+            tables = _MM_CHANNELS[kind]
+            row = bytes((tables[0][0], tables[1][0], tables[2][0])) * iw
+            self._mm_base_rows[key] = row
+        return row
+
     def _mm_paint_band(self, iw: int, chw: int, lh: int, offset: int, band_h: int) -> None:
         i0 = offset // lh
         i1 = min(self._mm_nrows(), (offset + band_h + lh - 1) // lh)
         stride = iw * 3
         start = (offset - i0 * lh) * stride
-        data = b''.join(self._mm_line_row(i, iw, chw) * lh for i in range(i0, i1))
+        data = b''.join(self._mm_row_block(i, iw, chw, lh) for i in range(i0, i1))
         data = data[start:start + band_h * stride]
         h = len(data) // stride
         if h <= 0:
@@ -1916,12 +2043,47 @@ class App:
         and 1px separators make them drift from the line-based minimap.
         """
         n = self._mm_nrows()
-        l0, c0 = (int(v) for v in self._diff.index('@0,0').split('.'))
         h = max(self._diff.winfo_height() - 1, 0)
-        l1, c1 = (int(v) for v in self._diff.index(f'@0,{h}').split('.'))
-        top = max(0, min(n, self._mm_row_of(l0, c0)))
-        bottom = self._mm_row_of(l1, c1) + 1
+        top = max(0, min(n, self._mm_row_at_y(0)))
+        bottom = self._mm_row_at_y(h) + 1
         return top, max(top + 1, min(n, bottom))
+
+    def _mm_row_at_y(self, y: int) -> int:
+        """Minimap row shown at widget pixel `y`.
+
+        A comment frame is one text line spanning several minimap rows, so
+        the line index alone would pin the band to the block's first row
+        while the view moves through it; the pixel offset into the frame
+        picks the row instead.
+        """
+        d = self._diff
+        idx = d.index(f'@0,{y}')
+        l, c = (int(v) for v in idx.split('.'))
+        row = self._mm_row_of(l, c)
+        if l - 1 < len(self._minimap_lines) and self._minimap_lines[l - 1][0] == 'comment':
+            starts = self._mm_starts()
+            span = starts[l] - starts[l - 1] if starts is not None else 1
+            info = d.dlineinfo(idx)
+            full_h = self._comment_frame_height(l)
+            if span > 1 and info and full_h > 0:
+                # Rounded so a row half scrolled off counts as gone.
+                into = int((y - info[1] - self._comment_spacing1) * span / full_h + 0.5)
+                row += max(0, min(span - 1, into))
+        return row
+
+    def _comment_frame_height(self, line: int) -> int:
+        """Full height of the frame embedded on text line `line`.
+
+        dlineinfo reports only the visible part of a line cut off at the
+        bottom edge, so the frame's requested height is used instead.
+        """
+        anchor = self._line_to_anchor.get(line - 1)
+        frame = anchor.frame if anchor is not None else None
+        if frame is None and self._editor_line == line:
+            frame = self._active_comment_frame
+        if frame is None or not frame.winfo_exists():
+            return 0
+        return frame.winfo_reqheight()
 
     def _update_minimap_viewport(self) -> None:
         c = self._minimap
@@ -1949,7 +2111,12 @@ class App:
         i, seg = self._mm_line_of_row(row_i)
         self._manual_scroll = True
         self._stop_scroll_animation()
-        self._move_view(f'{i + 1}.{self._mm_char_at_col(i + 1, seg * (self._mm_cols or 0))}')
+        if self._minimap_lines[i][0] == 'comment':
+            starts = self._mm_starts()
+            span = starts[i + 1] - starts[i] if starts is not None else 1
+            self._move_view(f'{i + 1}.0', px=int(seg * self._comment_frame_height(i + 1) / span + 0.5))
+        else:
+            self._move_view(f'{i + 1}.{self._mm_char_at_col(i + 1, seg * (self._mm_cols or 0))}')
         return row_i
 
     def _on_minimap_press(self, event: tk.Event) -> None:
@@ -2108,6 +2275,7 @@ class App:
             self._progress_shown = False
 
     def _load(self) -> None:
+        self._rendering = True
         self._show_progress('parsing diff...')
         diff_files = parse_diff(self.diff_text)
         entries = entries_from_diff(diff_files)
@@ -2141,6 +2309,7 @@ class App:
         in place afterwards in timed chunks (_word_diff_step); it never
         changes the line structure.
         """
+        self._rendering = True
         self._show_progress('rendering...')
         self._cancel_hide_schedule()
         self._comment_hover_btn.place_forget()
@@ -2205,6 +2374,7 @@ class App:
         self._flush_buf()
         self._update_pos_order()
         self._show_diff()
+        self._rendering = False
 
         if restore_line is not None:
             self._scroll_diff_to_line(restore_line)
@@ -2658,12 +2828,80 @@ class App:
         return int(self._diff.index(f'@{x},{y}').split('.')[0])
 
     @staticmethod
-    def _format_comment_block(comment: str, moved: bool = False) -> str:
+    def _format_comment_block(comment: str, moved: bool = False,
+                              width: 'int | None' = None) -> str:
+        """The comment as shown in the diff: a marker on the first line and
+        indented continuation lines, wrapped to `width` columns if given."""
         prefix       = '~ >> ' if moved else '  >> '
         continuation = '~    ' if moved else '     '
         cmt_lines = comment.splitlines() or ['']
+        if width is not None:
+            wrapped: list[str] = []
+            for l in cmt_lines:
+                wrapped.extend(textwrap.wrap(
+                    l, max(1, width - len(prefix)),
+                    break_long_words=True, break_on_hyphens=False,
+                    expand_tabs=False, replace_whitespace=False,
+                    drop_whitespace=False) or [''])
+            cmt_lines = wrapped
         return '\n'.join([prefix + cmt_lines[0]]
                          + [continuation + l for l in cmt_lines[1:]])
+
+    def _comment_button_metrics(self) -> tuple[int, int]:
+        """(width, height) taken by a comment row's two buttons and their
+        padding; measured once from throwaway buttons."""
+        cached = getattr(self, '_comment_btn_metrics', None)
+        if cached is not None:
+            return cached
+        font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
+        w = h = 0
+        for text in ('remove', 'copy(c)'):
+            b = tk.Button(self._diff, text=text, relief='flat', bd=0,
+                          highlightthickness=0, font=font)
+            w += b.winfo_reqwidth() + 8  # pack padx=4 on both sides
+            h = max(h, b.winfo_reqheight())
+            b.destroy()
+        self._comment_btn_metrics = (w, h)
+        return self._comment_btn_metrics
+
+    def _comment_wrap_cols(self) -> 'int | None':
+        """Columns available for comment text at the diff's current width,
+        or None when the widget has no usable width yet (before first map)."""
+        w = self._diff.winfo_width() - self._diff_row_pad() - self._comment_button_metrics()[0]
+        charw = max(1, self._gutter_font.measure('0'))
+        cols = w // charw - 1  # the label's own padding
+        return cols if cols >= CFG.comment_wrap_min_cols else None
+
+    def _comment_block_for(self, anchor: '_ResolvedAnchor') -> str:
+        return self._format_comment_block(anchor.comment, anchor.moved, self._comment_wrap_cols())
+
+    def _schedule_rewrap(self) -> None:
+        # Coalesces the burst of <Configure> events from a resize drag.
+        if self._rewrap_id is None:
+            self._rewrap_id = self.root.after(100, self._rewrap_comments)
+
+    def _rewrap_comments(self) -> None:
+        """Re-wrap every rendered comment for the current width."""
+        self._rewrap_id = None
+        cols = self._comment_wrap_cols()
+        # Compared per label rather than against the last rewrap width: a
+        # frame built during the debounce window may have used another.
+        changed = False
+        btn_h = self._comment_button_metrics()[1]
+        for src, anchor in self._line_to_anchor.items():
+            label, frame = anchor.label, anchor.frame
+            if label is None or frame is None or not frame.winfo_exists():
+                continue
+            block = self._format_comment_block(anchor.comment, anchor.moved, cols)
+            if label.cget('text') == block:
+                continue
+            label.configure(text=block)
+            frame.configure(height=max(label.winfo_reqheight(), btn_h))
+            self._minimap_lines[src] = ('comment', block)  # the comment line is src + 1
+            changed = True
+        if changed:
+            self._mm_relayout()
+            self._render_gutter()
 
     def _loc_for_line(self, line_no: int) -> str | None:
         path, ln = self._source_location(line_no)
@@ -2853,7 +3091,7 @@ class App:
         self._render_comment_frame(src_line_no, anchor)
 
     def _build_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> tk.Frame:
-        cmt_display = self._format_comment_block(anchor.comment, anchor.moved)
+        cmt_display = self._comment_block_for(anchor)
         frame = tk.Frame(self._diff, bg=self._comment_bg)
         label = tk.Label(
             frame, text=cmt_display,
@@ -2900,11 +3138,12 @@ class App:
             self._bind_wheel(w)
         self._discard_frame(anchor)
         anchor.frame = frame
+        anchor.label = label
         self._comment_frames.append(frame)
         return frame
 
     def _discard_frame(self, anchor: '_ResolvedAnchor') -> None:
-        frame, anchor.frame = anchor.frame, None
+        frame, anchor.frame, anchor.label = anchor.frame, None, None
         if frame is None:
             return
         if frame in self._comment_frames:
@@ -2912,10 +3151,13 @@ class App:
         if frame.winfo_exists():
             frame.destroy()
 
-    def _embed_comment_frame(self, line: int, frame: tk.Frame) -> None:
-        """Put a comment frame on an existing empty line."""
+    def _embed_comment_frame(self, line: int, anchor: '_ResolvedAnchor') -> None:
+        """Put the anchor's comment frame on an existing empty line."""
+        frame = self._build_comment_frame(line - 1, anchor)
         self._diff.window_create(f'{line}.0', window=frame)
         self._diff.tag_add('comment', f'{line}.0', f'{line}.end')
+        self._minimap_lines[line - 1] = ('comment', self._comment_block_for(anchor))
+        self._mm_relayout()  # the block may have a different height now
         self.root.after_idle(self._render_gutter)  # the row grew; no yscroll fires
 
     def _render_comment_frame(self, src_line_no: int, anchor: '_ResolvedAnchor') -> None:
@@ -2927,7 +3169,7 @@ class App:
         self._flush_buf()
         cmt_line_no = src_line_no + 1
         self._diff.tag_add('comment', f'{cmt_line_no}.0', f'{cmt_line_no}.end')
-        self._minimap_lines.append(('comment', ''))
+        self._minimap_lines.append(('comment', self._comment_block_for(anchor)))
 
     def _remove_comment(self, anchor: '_ResolvedAnchor') -> None:
         """Take a rendered comment out of the widget without re-rendering.
@@ -3237,6 +3479,23 @@ class App:
     def _resize_editor_frame(self, frame: tk.Frame, prefix: tk.Label, entry: tk.Text) -> None:
         line_count = max(1, int(entry.index('end-1c').split('.')[0]))
         entry.configure(height=line_count)
+        if self._editor_line is not None:
+            # Draw the draft in the minimap as it is typed. A changed row
+            # count needs the (debounced) row table rebuild; otherwise only
+            # the block's own rows are re-rasterised.
+            idx = self._editor_line - 1
+            old = self._minimap_lines[idx]
+            mm_entry = ('comment', self._format_comment_block(
+                entry.get('1.0', 'end-1c'), False, self._comment_wrap_cols()))
+            if old != mm_entry:
+                self._minimap_lines[idx] = mm_entry
+                if old[0] != 'comment' or old[1].count('\n') != mm_entry[1].count('\n'):
+                    self._schedule_mm_relayout()
+                else:
+                    r0 = self._mm_row_of(self._editor_line, 0)
+                    for r in range(r0, r0 + mm_entry[1].count('\n') + 1):
+                        self._mm_rows.pop(r, None)
+                    self._render_minimap()
         frame.update_idletasks()
         h = max(prefix.winfo_reqheight(), entry.winfo_reqheight()) + 4
         w = max(self._diff.winfo_width() - self._diff_row_pad(), 1)
@@ -3272,7 +3531,7 @@ class App:
             else:
                 anchor = self._line_to_anchor.get(line - 1)
                 if anchor is not None:
-                    self._embed_comment_frame(line, self._build_comment_frame(line - 1, anchor))
+                    self._embed_comment_frame(line, anchor)
         self._diff.focus_set()
 
     def _confirm_comment_edit(self) -> None:
@@ -3288,7 +3547,7 @@ class App:
                                  target.side, target.line_text, comment)
                 if anchor is not None:
                     anchor.comment = comment
-                    self._embed_comment_frame(line, self._build_comment_frame(src_line, anchor))
+                    self._embed_comment_frame(line, anchor)
             else:
                 self._review.delete(target.file, target.existing_snapshot,
                                     target.existing_snap_line_no, target.side)
@@ -3312,7 +3571,7 @@ class App:
                 )
                 self._pending_anchors.setdefault(target.file, []).append(anchor)
                 self._line_to_anchor[src_line] = anchor
-                self._embed_comment_frame(line, self._build_comment_frame(src_line, anchor))
+                self._embed_comment_frame(line, anchor)
             else:
                 self._delete_lines(line, 1)
                 self._after_line_edit()
@@ -3379,7 +3638,10 @@ class App:
 
     def _close_app(self) -> None:
         if self._loaded and not self._review.is_empty():
-            self._dump_to_terminal()
+            try:
+                self._dump_to_terminal()
+            except OSError:
+                pass  # stdout's reader is gone (e.g. piped into head); still close
         if self._loaded:  # closed before the diff was loaded: keep the saved position
             try:
                 top_line = int(self._diff.index('@0,0').split('.')[0])
@@ -3568,6 +3830,41 @@ class App:
 # --entry point ------------------------------------------------------------
 
 
+def _install_interrupt(root: tk.Tk, app: 'App') -> None:
+    """Make Ctrl+C in the terminal close the app the way Ctrl+W does.
+
+    Python's default handler does not work under Tk: the event wait blocks
+    in C, so the signal is only noticed on the next event, and when that
+    event runs a Python callback the KeyboardInterrupt raised inside it is
+    caught and printed by tkinter while the loop carries on. A timer wakes
+    the loop regularly, and the handler schedules the normal close instead
+    of raising.
+    """
+    closing = False
+
+    def on_sigint(signum: int, frame: object) -> None:
+        nonlocal closing
+        # Mid-render there is nothing to save and the render cannot be cut
+        # short from inside its callback; a second Ctrl+C means the close
+        # is stuck (tkinter swallows exceptions raised in callbacks).
+        if app._rendering or closing:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(130)
+        closing = True
+        app._interrupted = True
+        try:
+            root.after(0, app._close_app)
+        except tk.TclError:
+            os._exit(130)
+
+    signal.signal(signal.SIGINT, on_sigint)
+
+    def heartbeat() -> None:
+        root.after(CFG.sigint_poll_ms, heartbeat)
+    heartbeat()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog='gitr', description=USAGE,
                                      formatter_class=argparse.RawTextHelpFormatter)
@@ -3613,12 +3910,15 @@ def main() -> None:
     if src_label:
         title_parts.append(src_label)
     root.title(' | '.join(title_parts))
-    App(root, diff_text,
-        commits=source.commits(),
-        has_staged=source.has_staged(),
-        has_unstaged=source.has_unstaged(),
-        source=source)
+    app = App(root, diff_text,
+              commits=source.commits(),
+              has_staged=source.has_staged(),
+              has_unstaged=source.has_unstaged(),
+              source=source)
+    _install_interrupt(root, app)
     root.mainloop()
+    if app._interrupted:
+        sys.exit(130)
 
 
 if __name__ == '__main__':

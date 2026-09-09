@@ -20,10 +20,22 @@ with the ability to attach persistent local comments to specific diff lines.
 - [x] File list: flat and tree view, status badge (A/M/D/R), per-file `+N -N` counts
 - [x] Diff view: unified diff with coloured +/- lines, hunk separators
 - [x] Sticky file header while scrolling
-- [x] Minimap with viewport indicator
+- [x] Minimap, VS Code style (1 px per character), with viewport indicator;
+      comments shown as coloured bands
 - [x] Smooth scrolling, keyboard navigation (n/p/Tab for next/prev file)
-- [x] Config persistence: wrap, tree view, word diff
-- [x] Word-level diff: highlight changed words, dim unchanged words within changed lines
+- [x] Config persistence: wrap, tree view, word diff, line numbers
+- [x] Word-level diff: highlight changed words, dim unchanged words within changed
+      lines; optional collapsing of re-indented lines
+- [x] Line numbers in a gutter: off / new / old+new (`l`)
+- [x] Reload the git source without restarting (`r`, F5)
+- [x] Large diffs: skeleton-first render behind a progress label, word diff
+      applied afterwards from the visible region outward
+- [x] Hover ruler on diff lines with `+comment (a)` and `copy (c)`; copy puts
+      `path:line` plus the line(s) and their comments on the clipboard
+- [x] Comments and Commits panels above the file list; comments dumped to the
+      terminal on exit (and on demand), Clear all with confirmation and a
+      timestamped backup
+- [x] Ctrl+C in the terminal closes the app like Ctrl+W
 - [x] Inline annotations: hover button, `a` or the context menu opens an inline
       editor; the saved comment renders as a bar below the line
 - [x] Comments stored in `.gitr/review.json` (repo-local) with file snapshots in
@@ -42,11 +54,23 @@ with the ability to attach persistent local comments to specific diff lines.
 ## Future
 
 - [ ] Side-by-side diff view (toggle between unified and split)
-- [ ] Line numbers alongside diff content
+- [ ] Whole-file view: besides the continuous all-files diff, open one file
+      in its own view (or window) showing the entire file, with the diff
+      overlaid and switchable: off (plain file), inline unified, or two
+      files side by side. The point is to see the changed lines in the
+      context of the whole file, not just the hunks.
+- [ ] Fog of war: mark what has been looked at. Each diff line accumulates
+      exposure while it is in the viewport (sampled at ~10 Hz) and its fog
+      clears over about a second, so resting on a region reveals it while a
+      fast scroll leaves it mostly fogged. Unseen rows are drawn darker in the
+      minimap and as a dim overlay on the overview strip (optionally a gutter
+      tint in the main view). Seen state is keyed by line content with its
+      neighbours, stored in `.gitr/seen.json`, so a reload or a new diff keeps
+      already-read parts clear and fogs only new or changed lines; a coverage
+      percentage could go in the status bar.
 - [ ] Search within diff (`Ctrl+F`)
 - [ ] Hunk navigation (`j` / `k` to jump between `@@` hunks within a file)
 - [ ] Jump to `$EDITOR` at the correct line (`o`)
-- [ ] Reload / refresh (`r`) — re-run the git source without restarting
 - [ ] Fold / collapse individual file diffs
 - [ ] Syntax highlighting per language (no extra deps — use `re`-based tokeniser)
 - [ ] Font size adjustment (`Ctrl++` / `Ctrl+-`)
@@ -88,8 +112,13 @@ gitr master                  # git diff master
 gitr --merge-base master     # diff from common ancestor
 gitr master HEAD             # committed changes only
 git diff | gitr              # pipe a patch
+gitr -                       # read stdin explicitly
 gitr -p patch.diff           # read from a patch file
+GITR_SCALE=2 gitr master     # scale the UI up (HiDPI)
 ```
+
+Comments need a git repository (they live in `<repo>/.gitr`), so run gitr from
+the repository the diff belongs to; outside one they are not offered.
 
 ---
 

@@ -17,6 +17,7 @@ import tkinter as tk
 from collections import deque
 from itertools import accumulate
 from tkinter import font as tkfont
+from tkinter import messagebox
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -407,11 +408,28 @@ class ReviewStore:
     def is_empty(self) -> bool:
         return not any(self._data.values())
 
-    def clear(self) -> None:
+    def backup_path(self) -> 'Path | None':
+        """Where clear() keeps the previous file: review-<timestamp>.json.bak
+        beside it, so repeated clears never overwrite an earlier backup."""
+        if not self._path:
+            return None
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        return self._path.with_name(f'review-{stamp}.json.bak')
+
+    def clear(self, backup: 'Path | None') -> bool:
+        """Drop every comment, first moving the current file to `backup` so
+        a mis-click can be undone by renaming it back. Nothing is dropped
+        when that move fails; returns whether the store was cleared."""
         if not self._data:
-            return
+            return True
+        if backup is not None and self._path and self._path.exists():
+            try:
+                self._path.replace(backup)  # one atomic rename, no partial copy
+            except OSError:
+                return False
         self._data.clear()
         self._save()
+        return True
 
 
 # --diff parsing ------------------------------------------------------------
@@ -961,6 +979,7 @@ class App:
         # existing comment being edited.
         self._editor_line: 'int | None' = None
         self._editor_kind: str = 'note'
+        self._focus_out_after_id: 'str | None' = None  # editor's pending focus-out close
         self._editor_is_new: bool = False
         self._loaded: bool = False  # the deferred first _load has run
         self._rendering: bool = False  # inside a synchronous parse/render
@@ -1061,23 +1080,23 @@ class App:
         menubar = tk.Menu(self.root, **menu_kw)
         file_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
         if self._can_reload:
-            file_menu.add_command(label='Reload', accelerator='F5',
+            file_menu.add_command(label='Reload', accelerator='(F5)',
                                   command=self._reload)
             file_menu.add_separator()
-        file_menu.add_command(label='Quit', accelerator='Ctrl+Q',
+        file_menu.add_command(label='Quit', accelerator='(Ctrl+Q)',
                               command=self._close_app)
         menubar.add_cascade(label='File', menu=file_menu)
         view_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
-        view_menu.add_checkbutton(label='Wrap long lines', variable=self._wrap_var,
+        view_menu.add_checkbutton(label='Wrap long lines', variable=self._wrap_var, accelerator='(w)',
                                   command=self._on_wrap_toggle)
-        view_menu.add_checkbutton(label='Tree view', variable=self._tree_var,
+        view_menu.add_checkbutton(label='Tree view', variable=self._tree_var, accelerator='(t)',
                                   command=self._on_tree_toggle)
         lineno_view_menu = tk.Menu(view_menu, tearoff=0, **menu_kw)
         for _val, _label in ((0, 'Off'), (1, 'New'), (2, 'Old + new')):
             lineno_view_menu.add_radiobutton(label=_label, value=_val,
                                              variable=self._lineno_var,
                                              command=self._on_lineno_toggle)
-        view_menu.add_cascade(label='Line numbers', menu=lineno_view_menu, accelerator='l')
+        view_menu.add_cascade(label='Line numbers', menu=lineno_view_menu, accelerator='(l)')
         word_diff_menu = tk.Menu(view_menu, tearoff=0, **menu_kw)
         word_diff_menu.add_radiobutton(label='Off',                      value=0,
                                        variable=self._word_diff_var,
@@ -1088,12 +1107,12 @@ class App:
         word_diff_menu.add_radiobutton(label='On + collapse re-indented', value=2,
                                        variable=self._word_diff_var,
                                        command=self._on_word_diff_toggle)
-        view_menu.add_cascade(label='Word diff', menu=word_diff_menu, accelerator='d')
+        view_menu.add_cascade(label='Word diff', menu=word_diff_menu, accelerator='(d)')
         menubar.add_cascade(label='View', menu=view_menu)
         go_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
-        go_menu.add_command(label='Next file',     accelerator='n / Tab',
+        go_menu.add_command(label='Next file',     accelerator='(n / Tab)',
                             command=lambda: self._jump_to_adjacent_file(1))
-        go_menu.add_command(label='Previous file', accelerator='p / Shift+Tab',
+        go_menu.add_command(label='Previous file', accelerator='(p / Shift+Tab)',
                             command=lambda: self._jump_to_adjacent_file(-1))
         menubar.add_cascade(label='Go', menu=go_menu)
         self._review_menu = tk.Menu(menubar, tearoff=0,
@@ -1241,8 +1260,8 @@ class App:
         self._diff.bind('<Leave>',  lambda e: self._schedule_hide())
         self.root.bind('<FocusOut>', self._on_root_focus_out, add='+')
         self.root.bind('<FocusIn>',  self._on_root_focus_in,  add='+')
-        self._comment_hover_btn = self._make_hover_button('+comment(a)', C['comment_fg'], self._on_comment_btn_click)
-        self._copy_hover_btn    = self._make_hover_button('copy(c)',      C['fg'],          self._on_copy_btn_click)
+        self._comment_hover_btn = self._make_hover_button('+comment (a)', C['comment_fg'], self._on_comment_btn_click)
+        self._copy_hover_btn    = self._make_hover_button('copy (c)',      C['fg'],          self._on_copy_btn_click)
         self._diff_vs = self._make_scrollbar(lf, orient='vertical', command=self._on_scrollbar_move)
         self._diff_vs.bind('<ButtonPress-1>', lambda e: setattr(self, '_manual_scroll', True))
         hs = self._make_scrollbar(lf, orient='horizontal', command=self._diff.xview)
@@ -3025,7 +3044,7 @@ class App:
             return cached
         font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
         w = h = 0
-        for text in ('remove', 'copy(c)', max(COMMENT_KINDS, key=len)):
+        for text in ('remove', 'copy (c)', max(COMMENT_KINDS, key=len)):
             b = tk.Button(self._diff, text=text, relief='flat', bd=0,
                           highlightthickness=0, font=font)
             w += b.winfo_reqwidth() + 8  # pack padx=4 on both sides
@@ -3089,22 +3108,38 @@ class App:
             return None
         return self._line_to_anchor.get(src_line)
 
-    def _copy_loc_and_lines(self, anchor_line: int | None = None) -> None:
+    def _selected_lines(self) -> 'tuple[int, int] | None':
+        """(first, last) text lines of the diff selection, or None."""
         try:
             sel_first = self._diff.index('sel.first')
             sel_last  = self._diff.index('sel.last')
         except tk.TclError:
-            sel_first = sel_last = None
+            return None
+        first = int(sel_first.split('.')[0])
+        last  = int(sel_last.split('.')[0])
+        if sel_last.split('.')[1] == '0' and last > first:
+            last -= 1
+        return first, last
 
-        if sel_first is not None:
-            lines_start = int(sel_first.split('.')[0])
-            lines_end   = int(sel_last.split('.')[0])
-            if sel_last.split('.')[1] == '0' and lines_end > lines_start:
-                lines_end -= 1
+    def _copy_loc_and_lines(self, anchor_line: int | None = None,
+                            lines: 'tuple[int, int] | None' = None) -> None:
+        """Copy "path:line" plus lines to the clipboard.
+
+        `lines` is an explicit range (the context menu decided it when it
+        was built). Otherwise the line is `anchor_line` (a button on a
+        specific line) or the one under the pointer, and the selection is
+        used only when that line lies inside it: a selection lingers in a
+        Text widget after clicks elsewhere, and copying it instead of the
+        line at hand was a surprise.
+        """
+        sel = self._selected_lines()
+        line = anchor_line or self._line_under_pointer()
+        if lines is not None:
+            lines_start, lines_end = lines
+        elif sel is not None and line is not None and sel[0] <= line <= sel[1]:
+            lines_start, lines_end = sel
         else:
-            line = (anchor_line
-                    or self._line_under_pointer()
-                    or int(self._diff.index('insert').split('.')[0]))
+            line = line or int(self._diff.index('insert').split('.')[0])
             # If cursor is on a comment annotation, anchor to source line above
             # and include the annotation in the copy.
             if 'comment' in self._diff.tag_names(f'{line}.0') and line > 1:
@@ -3155,6 +3190,10 @@ class App:
         elif anchor is not None:
             self._add_comment_menu_items(menu, anchor)
             menu.add_separator()
+        elif src in self._line_post_image and not self._comments_enabled():
+            menu.add_command(label='Comments need a git repository (run gitr inside one)',
+                             state='disabled')
+            menu.add_separator()
         elif src in self._line_post_image:
             for text, kind in COMMENT_PRESETS:
                 col, marker = COMMENT_KINDS[kind]
@@ -3169,17 +3208,9 @@ class App:
                          command=lambda: (self.root.clipboard_clear(),
                                           self.root.clipboard_append(loc)))
 
-        try:
-            sel_first = self._diff.index('sel.first')
-            sel_last  = self._diff.index('sel.last')
-        except tk.TclError:
-            sel_first = sel_last = None
-
-        if sel_first is not None:
-            lines_start = int(sel_first.split('.')[0])
-            lines_end   = int(sel_last.split('.')[0])
-            if sel_last.split('.')[1] == '0' and lines_end > lines_start:
-                lines_end -= 1
+        sel = self._selected_lines()
+        if sel is not None and sel[0] <= text_line <= sel[1]:
+            lines_start, lines_end = sel
             lines_path, lines_line_no = self._source_location(lines_start)
             lines_loc = f'{lines_path}:{lines_line_no}' if lines_line_no is not None else lines_path
         else:
@@ -3187,11 +3218,10 @@ class App:
             lines_loc = loc
 
         n_lines = lines_end - lines_start + 1
-        lines_text = self._diff.get(f'{lines_start}.0', f'{lines_end}.end')
         menu.add_command(
             label=f'Copy "{lines_loc}" + {n_lines} {"line" if n_lines == 1 else "lines"}',
-            accelerator='c',
-            command=lambda: self._copy_loc_and_lines(text_line))
+            accelerator='(c)',
+            command=lambda: self._copy_loc_and_lines(lines=(lines_start, lines_end)))
 
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -3229,13 +3259,22 @@ class App:
         if post is None or self._active_comment_frame or line_no in self._line_to_anchor:
             return
         file, new_line_no, side, line_text = post
+        reason = self._comment_refusal(file)
+        if reason:
+            self._refuse_comment(reason)
+            return
         target = _CommentEditTarget(file=file, new_line_no=new_line_no, side=side, line_text=line_text)
         line = line_no + 1
         self._insert_blank_line(line)
         if not self._add_comment(line, target, text, kind):
             self._delete_lines(line, 1)
+            self._refuse_comment(self._snapshot_failure(file))
         self._update_sticky_header()  # the rest is covered by _embed_comment_frame
         self._update_comments_section()
+
+    def _snapshot_failure(self, file_path: str) -> str:
+        return (self._comment_refusal(file_path)
+                or f'{file_path} could not be snapshotted: is\n{self._review._snap_dir}\nwritable?')
 
     def _add_comment(self, line: int, target: '_CommentEditTarget', comment: str, kind: str) -> bool:
         """Store a new comment for the source line above `line` (an empty
@@ -3273,6 +3312,34 @@ class App:
         if not self._repo_root:
             return None
         return _read_text_safe(self._repo_root / file_path)
+
+    def _comments_enabled(self) -> bool:
+        """Comments need a repository to live in (<repo>/.gitr), which a
+        piped diff viewed from outside one does not have."""
+        return self._repo_root is not None
+
+    def _comment_refusal(self, file_path: 'str | None' = None) -> 'str | None':
+        """Why a new comment cannot be stored, or None when it can."""
+        if not self._comments_enabled():
+            return ('Not inside a git repository.\n\nComments are stored in <repo>/.gitr, '
+                    'so run gitr from the repository this diff belongs to.')
+        if file_path is None or file_path in self._session_snapshots:
+            return None  # already snapshotted this session
+        path = self._repo_root / file_path
+        if not path.is_file():
+            return (f'{file_path}\nis not under\n{self._repo_root}\n\n'
+                    'A comment is anchored to a snapshot of the current file: it must '
+                    'exist in the working tree, and gitr must run from the repository '
+                    'this diff belongs to.')
+        try:
+            with open(path, encoding='utf-8') as fh:
+                fh.read(1)
+        except (OSError, UnicodeDecodeError) as e:
+            return (f'{file_path}\ncannot be read for its snapshot:\n{e}')
+        return None
+
+    def _refuse_comment(self, reason: str) -> None:
+        messagebox.showwarning('Cannot add comment', reason, parent=self.root)
 
     def _resolve_review_anchors(self) -> dict[str, list['_ResolvedAnchor']]:
         """Map every stored comment through its snapshot to a target line in
@@ -3369,7 +3436,7 @@ class App:
             command=lambda a=anchor: self._delete_comment(a),
         )
         copy_btn = tk.Button(
-            frame, text='copy(c)',
+            frame, text='copy (c)',
             bg=bg, fg=C['fg'],
             activebackground=bg, activeforeground=C['fg'],
             relief='flat', bd=0, highlightthickness=0, cursor='hand2',
@@ -3656,12 +3723,15 @@ class App:
             inset  = 2
             btn_h  = max(1, h - 2 * inset)
             btn_y  = y + inset
-            comment_w = self._comment_hover_btn.winfo_reqwidth()
-            copy_w    = self._copy_hover_btn.winfo_reqwidth()
-            comment_x = self._diff.winfo_width() - comment_w - 4
-            copy_x    = comment_x - copy_w - 6
+            right = self._diff.winfo_width() - 4
+            with_comment = self._comments_enabled()  # else nowhere to store one
+            comment_x = right - self._comment_hover_btn.winfo_reqwidth()
+            copy_x = (comment_x - 6 if with_comment else right) - self._copy_hover_btn.winfo_reqwidth()
             if copy_x > 0:
-                self._comment_hover_btn.place(x=comment_x, y=btn_y, height=btn_h)
+                if with_comment:
+                    self._comment_hover_btn.place(x=comment_x, y=btn_y, height=btn_h)
+                else:
+                    self._comment_hover_btn.place_forget()
                 self._copy_hover_btn.place(x=copy_x, y=btn_y, height=btn_h)
                 self._hover_btn_line = line_no
             else:
@@ -3711,6 +3781,11 @@ class App:
             return
         file, new_line_no, side, line_text = post
         anchor = self._line_to_anchor.get(line_no)
+        if anchor is None:
+            reason = self._comment_refusal(file)
+            if reason:
+                self._refuse_comment(reason)
+                return
         existing = anchor.comment if anchor else ''
         self._editor_kind = anchor.kind if anchor else _comment_kind(kind)
         # The ruler must not stay up next to the editor; the button click's
@@ -3770,7 +3845,11 @@ class App:
         for n, k in enumerate(COMMENT_KINDS, start=1):  # Ctrl+1/2/3: note/good/bad
             entry.bind(f'<Control-Key-{n}>', lambda e, k=k: _set_kind(k))
         _show_kind()
-        entry.bind('<FocusOut>',       lambda e: self.root.after(CFG.edit_focus_out_delay_ms, self._cancel_if_still_active))
+        def _focus_out(e: tk.Event) -> None:
+            if self._focus_out_after_id is not None:
+                self.root.after_cancel(self._focus_out_after_id)
+            self._focus_out_after_id = self.root.after(CFG.edit_focus_out_delay_ms, self._cancel_if_still_active)
+        entry.bind('<FocusOut>', _focus_out)
         def _on_modified(e: tk.Event) -> None:
             if entry.edit_modified():
                 entry.edit_modified(False)
@@ -3823,10 +3902,11 @@ class App:
         self.root.after_idle(self._render_gutter)
 
     def _cancel_if_still_active(self) -> None:
+        self._focus_out_after_id = None
         if self._active_comment_frame:
             text = self._active_comment_entry.get('1.0', 'end-1c') if self._active_comment_entry else ''
             if text.strip():
-                self._confirm_comment_edit()
+                self._confirm_comment_edit(from_focus_out=True)
             else:
                 self._cancel_comment_edit()
 
@@ -3853,7 +3933,9 @@ class App:
                     self._embed_comment_frame(line, anchor)
         self._diff.focus_set()
 
-    def _confirm_comment_edit(self) -> None:
+    def _confirm_comment_edit(self, from_focus_out: bool = False) -> None:
+        """`from_focus_out`: the editor lost focus, so a failure is reported
+        on stderr rather than with a dialog the user did not ask for."""
         if not self._active_comment_entry or not self._comment_target:
             return
         line, target, comment, kind = self._close_editor()
@@ -3877,6 +3959,11 @@ class App:
             if not self._add_comment(line, target, comment, kind):
                 self._delete_lines(line, 1)
                 self._after_line_edit()
+                reason = self._snapshot_failure(target.file)
+                if from_focus_out:
+                    print(f'gitr: comment dropped: {reason}', file=sys.stderr)
+                else:
+                    self._refuse_comment(reason)
         elif self._editor_is_new:
             self._delete_lines(line, 1)
             self._after_line_edit()
@@ -3915,7 +4002,7 @@ class App:
         m = self._review_menu
         m.delete(0, 'end')
         m.add_command(label='Dump to terminal', command=self._dump_to_terminal)
-        m.add_command(label='Clear all', command=self._clear_all_comments,
+        m.add_command(label='Clear all...', command=self._clear_all_comments,
                       state='disabled' if self._review.is_empty() else 'normal')
         items = list(self._iter_all_comments())
         if items:
@@ -3931,7 +4018,20 @@ class App:
     def _clear_all_comments(self) -> None:
         if self._review.is_empty():
             return
-        self._review.clear()
+        n = sum(1 for _ in self._review.all_entries())
+        bak = self._review.backup_path()  # once: the name shown is the name written
+        msg = f'Remove all {n} review comments?'
+        if bak:
+            msg += f'\n\nThe current file is kept as\n{bak.name}\nin {bak.parent}'
+        if not messagebox.askyesno('Clear all comments', msg, parent=self.root, default='no'):
+            return
+        if not self._review.clear(bak):
+            messagebox.showwarning('Clear all comments',
+                                   f'Could not write the backup\n{bak}\n\nNothing was removed.',
+                                   parent=self.root)
+            return
+        if bak:
+            print(f'gitr: comments cleared; previous file kept as {bak}')
         self._rerender_preserving_scroll()
 
     def _jump_to_diff_line(self, line_no: int) -> None:
@@ -3939,6 +4039,9 @@ class App:
         self._scroll_diff_to_line(line_no)
 
     def _close_app(self) -> None:
+        if self._focus_out_after_id is not None:
+            self.root.after_cancel(self._focus_out_after_id)  # no dialog after teardown
+            self._focus_out_after_id = None
         if self._loaded and not self._review.is_empty():
             try:
                 self._dump_to_terminal()

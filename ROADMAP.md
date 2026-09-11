@@ -41,11 +41,14 @@ with the ability to attach persistent local comments to specific diff lines.
 - [x] Comments stored in `.gitr/review.json` (repo-local) with file snapshots in
       `.gitr/snapshots/`
 - [x] Comment kinds: note / good / bad, each with a colour and a text marker
-      (`>>`, `++`, `!!`) used on screen, in the panels and in the terminal dump;
+      (`>>`, `++`, `!!`) used on screen and in the panels;
       one-click presets and a kind submenu in the context menu, a kind button on
       the comment and in the editor (Ctrl+1/2/3)
 - [x] Comment markers on an overview strip beside the scrollbar
-- [ ] Commented files marked in file list
+- [x] Commented files marked in file list: per-kind comment counts (`>>2 ++1 !!3`) in the kind colours after the `+N -N` stats
+- [x] Export for coding agents: Review > "Copy for agent" (all, or notes + bad,
+      `Ctrl+Shift+C` / `Ctrl+Shift+X`), per comment from its context menu, and
+      `gitr --export [--kinds bad,note] [refs]` printing the same text without a window
 - [x] Robust comment anchoring: each comment is anchored to a snapshot of the
       file taken when it was written; on load the snapshot is diffed against the
       current file to remap the line, so comments survive edits, rebases and

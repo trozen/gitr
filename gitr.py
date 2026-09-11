@@ -34,6 +34,8 @@ usage:
   git diff | gitr              # pipe a patch
   gitr -                       # read stdin explicitly
   gitr -p patch.diff           # read from a patch file
+  gitr --export master         # print the review comments for an agent, no window
+  gitr --export --kinds bad,note   # only these kinds (default: all)
 
   GITR_SCALE=2 gitr master   # scale UI up (HiDPI)
 """
@@ -621,6 +623,7 @@ class CFG:
     edit_focus_out_delay_ms = 50
     list_pane_max_lines      = 10
     menu_label_max_len       = 80
+    message_ms               = 2500  # how long a top-bar message (e.g. "copied") stays
     section_collapsed_arrow  = '▶'
     section_expanded_arrow   = '▼'
 
@@ -664,6 +667,162 @@ COMMENT_PRESETS: list[tuple[str, str]] = [
 
 def _comment_kind(name: object) -> str:
     return name if isinstance(name, str) and name in COMMENT_KINDS else 'note'
+
+
+# --review export -------------------------------------------------------------
+#
+# One text shape for handing comments to a coding agent, shared by the
+# clipboard entries in the Review menu and `gitr --export`: grouped by file,
+# each item a path:line reference the agent can open, the quoted diff line
+# and the comment, with the kind spelled out.
+
+@dataclass
+class _ExportItem:
+    path: str
+    line: Optional[int]  # post-image line number; None when unknown
+    side: str
+    kind: str
+    text: str            # diff line text including its +/-/space prefix
+    comment: str
+    moved: bool = False
+    orphaned: bool = False
+
+
+_EXPORT_NOT_GOOD = [k for k in COMMENT_KINDS if k != 'good']  # what an agent has to act on
+
+
+def _export_kinds(spec: str) -> list[str]:
+    """Kinds named by --kinds: 'all' or a comma-separated list."""
+    if spec == 'all':
+        return list(COMMENT_KINDS)
+    kinds = [k.strip() for k in spec.split(',') if k.strip()]
+    bad = [k for k in kinds if k not in COMMENT_KINDS]
+    if bad or not kinds:
+        sys.exit(f'gitr: --kinds takes "all" or a list of {", ".join(COMMENT_KINDS)}')
+    return kinds
+
+
+def _diff_side(kind: str) -> str:
+    """The side letter a comment is stored with for a diff line kind."""
+    if kind == 'added':   return '+'
+    if kind == 'removed': return '-'
+    return ' '
+
+
+def _entry_is_valid(entry: dict) -> bool:
+    """A stored comment that can be anchored; the others are ignored
+    everywhere (rendering, export, counts) so no view shows a comment the
+    others do not."""
+    return bool(entry.get('snapshot') and entry.get('line_no') and entry.get('comment'))
+
+
+def _match_anchor(anchors: list['_ResolvedAnchor'], new_line_no: int, side: str,
+                  text: str) -> '_ResolvedAnchor | None':
+    """Claim the stored comment for a diff line: the one whose text still
+    matches wins over one at the same line whose text changed."""
+    exact: '_ResolvedAnchor | None' = None
+    loose: '_ResolvedAnchor | None' = None
+    for a in anchors:
+        if a.matched or a.target_line_no != new_line_no or a.side != side:
+            continue
+        if a.line_text == text:
+            exact = a
+            break
+        loose = loose or a
+    a = exact or loose
+    if a is None:
+        return None
+    a.matched = True
+    a.moved = (exact is None) or (a.snap_line_no != a.target_line_no)
+    return a
+
+
+def _format_export(items: list[_ExportItem], kinds: list[str]) -> str:
+    """Markdown: a heading per file, a list item per comment. The diff line
+    goes in a fenced code block, since quoted or bare it would be parsed
+    (a leading + or - is a list bullet, # a heading, indentation a code
+    block); the fence is longer than any backtick run in the line."""
+    items = [i for i in items if i.kind in kinds]  # in diff order, files contiguous
+    label = ', '.join(k for k in COMMENT_KINDS if k in kinds)
+    n = len(items)
+    out = [f'Review comments: {n} item{"s" if n != 1 else ""} ({label})', '']
+    path = None
+    for it in items:
+        if it.path != path:
+            path = it.path
+            out += [f'## {path}', '']
+        ref = f'{it.path}:{it.line}' if it.line else it.path
+        side = f' ({it.side})' if it.side in '+-' else ''
+        flags = [it.kind, 'orphaned'] if it.orphaned else [it.kind, 'moved'] if it.moved else [it.kind]
+        out.append(f'- {ref}{side} [{", ".join(flags)}]')
+        fence = '`' * max(3, max((len(m) for m in re.findall('`+', it.text)), default=0) + 1)
+        out += [f'  {fence}diff', f'  {it.text}', f'  {fence}']
+        out += [f'  {l}' for l in (it.comment.splitlines() or [''])]
+        out.append('')
+    out.append('---')  # marks the end, e.g. among other terminal output
+    return '\n'.join(out)
+
+
+def _resolve_anchors(review: 'ReviewStore',
+                     read_current: 'Callable[[str], str | None]') -> dict[str, list['_ResolvedAnchor']]:
+    """Map every stored comment through its snapshot to a target line in
+    the current working tree (via difflib)."""
+    result: dict[str, list[_ResolvedAnchor]] = {}
+    current_cache: dict[str, str | None] = {}
+    map_cache: dict[tuple[str, str], dict[int, int]] = {}
+    for file, entry in review.all_entries():
+        snap_sha  = str(entry.get('snapshot') or '')
+        line_no   = int(entry.get('line_no') or 0)
+        side      = str(entry.get('side') or ' ')
+        line_text = str(entry.get('line_text') or '')
+        comment   = str(entry.get('comment') or '')
+        kind      = _comment_kind(entry.get('kind'))
+        if not _entry_is_valid(entry):
+            continue
+        if file not in current_cache:
+            current_cache[file] = read_current(file)
+        current = current_cache[file]
+        snap    = review.read_snapshot(snap_sha)
+        if current is not None and snap is not None:
+            key = (snap_sha, file)
+            line_map = map_cache.get(key)
+            if line_map is None:
+                line_map = _compute_line_map(snap, current)
+                map_cache[key] = line_map
+            target = line_map.get(line_no, line_no)
+        else:
+            target = line_no
+        result.setdefault(file, []).append(_ResolvedAnchor(
+            file=file, snapshot=snap_sha, snap_line_no=line_no,
+            target_line_no=target, side=side, line_text=line_text,
+            comment=comment, kind=kind,
+        ))
+    return result
+
+
+def _export_items_from_store(review: 'ReviewStore', repo_root: Path,
+                             diff_files: list[DiffFile]) -> list[_ExportItem]:
+    """The export the window would produce, without rendering: anchors are
+    matched against the parsed diff the way the render does (same target
+    line and side; the text decides between exact and moved)."""
+    anchors = _resolve_anchors(review, lambda f: _read_text_safe(repo_root / f))
+
+    def item(a: '_ResolvedAnchor') -> _ExportItem:
+        return _ExportItem(a.file, a.target_line_no, a.side, a.kind, a.line_text,
+                           a.comment, a.moved, orphaned=not a.matched)
+
+    items: list[_ExportItem] = []
+    for df in diff_files:  # diff order, each file's orphans after its hunks, as rendered
+        for dl in df.lines:
+            if dl.new_line_no is None:
+                continue
+            a = _match_anchor(anchors.get(df.path, []), dl.new_line_no, _diff_side(dl.kind), dl.text)
+            if a is not None:
+                items.append(item(a))
+        items += [item(a) for a in anchors.pop(df.path, []) if not a.matched]
+    for alist in anchors.values():  # files not in this diff
+        items += [item(a) for a in alist]
+    return items
 
 
 def _next_kind(kind: str) -> str:
@@ -1004,6 +1163,8 @@ class App:
         self._scroll_moved: bool = False       # this animation changed the view
         self._settle_after_id: 'str | None' = None
         self._flist_selected_row: int = -1
+        self._msg_after_id: 'str | None' = None  # pending clear of the top-bar message
+        self._flist_counts: dict[str, dict[str, int]] = {}  # counts the file list was drawn with
         self._last_top: str = ''  # top index at the last scroll callback
         self._flist_row_to_entry: list[FileEntry | None] = []
         self._flist_path_to_row: dict[str, int] = {}
@@ -1152,6 +1313,8 @@ class App:
 
         self._lbl_stat = tk.Label(bar, bg=C['topbar_bg'], fg=C['subdued'], font=font)
         self._lbl_stat.pack(side='left')
+        self._lbl_msg = tk.Label(bar, bg=C['topbar_bg'], fg=C['fg'], font=font)
+        self._lbl_msg.pack(side='left')
 
         if self._can_reload:
             self._reload_btn = tk.Button(
@@ -1246,6 +1409,8 @@ class App:
         self._diff.bind('r',          lambda e: self._reload() or 'break')
         self._diff.bind('<F5>',       lambda e: self._reload() or 'break')
         self._diff.bind('<Control-r>', lambda e: self._reload() or 'break')
+        self._diff.bind('<Control-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
+        self._diff.bind('<Control-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
         self._diff.bind('<Tab>',          lambda e: self._jump_to_adjacent_file( 1) or 'break')
         self._diff.bind('<Shift-Tab>',      lambda e: self._jump_to_adjacent_file(-1) or 'break')
         self._diff.bind('<ISO_Left_Tab>',   lambda e: self._jump_to_adjacent_file(-1) or 'break')
@@ -1400,7 +1565,14 @@ class App:
         self._sash.add(rf, stretch='never')
         self._sash.paneconfigure(lf, minsize=CFG.pane_min_w)
         self._sash.paneconfigure(rf, minsize=CFG.pane_min_w)
-        self.root.after(50, self._init_sash)
+        # The sash is placed from the paned window's own <Configure>, not the
+        # window's: Tk lays the panes out in an idle callback queued by that
+        # event, and a placement queued from the window's event runs before
+        # it and is then overridden (the right pane does not stretch, so a
+        # resize would leave it at whatever width the stale layout gave it,
+        # sometimes the minimum).
+        self._sash.bind('<Configure>', self._on_sash_configure)
+        self._sash.bind('<ButtonRelease-1>', self._on_sash_release, add='+')
 
         # diff tags — line highlight is a little more visible than the raw added_bg/removed_bg
         _rem_hi = _blend(C['removed_fg'], CFG.diff_hi_blend)
@@ -1431,6 +1603,8 @@ class App:
         self._flist.tag_configure('status_R',  foreground=C['status_R'])
         self._flist.tag_configure('stats',     foreground=C['subdued'])
         self._flist.tag_configure('dir',       foreground=C['subdued'])
+        for _kind, (_col, _m) in COMMENT_KINDS.items():
+            self._flist.tag_configure(f'cmt_{_kind}', foreground=_col)
         self._flist.tag_configure('selected',  background=C['selected_bg'])
 
         # Word diff: unchanged words — colored text, barely-there bg so they recede
@@ -1480,6 +1654,8 @@ class App:
         # the close combo is swallowed by "toggle wrap". Re-assert it (and Q for
         # symmetry), mirroring _make_read_only on the diff pane.
         self._flist.bind('<Control-w>', lambda e: self._close_app())
+        self._flist.bind('<Control-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
+        self._flist.bind('<Control-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
         self._flist.bind('<Control-q>', lambda e: self._close_app())
         self._on_wrap_toggle()
 
@@ -1590,18 +1766,9 @@ class App:
         x = int(w * self._sash_ratio)
         return max(CFG.pane_min_w, min(w - CFG.pane_min_w, x))
 
-    def _init_sash(self) -> None:
-        w = self._sash.winfo_width()
-        if w > 1:
-            self._sash.sash_place(0, self._clamped_sash_x(w), 0)
-            self.root.bind('<Configure>', self._on_window_configure)
-            self._sash.bind('<ButtonRelease-1>', self._on_sash_release, add='+')
-        else:
-            self.root.after(50, self._init_sash)
-
-    def _on_window_configure(self, event: tk.Event) -> None:
-        if event.widget is self.root:
-            self.root.after_idle(self._place_sash)
+    def _on_sash_configure(self, event: tk.Event) -> None:
+        if event.widget is self._sash:
+            self.root.after_idle(self._place_sash)  # after Tk's pane layout, see __init__
 
     def _place_sash(self) -> None:
         w = self._sash.winfo_width()
@@ -2843,10 +3010,46 @@ class App:
         del self._minimap_lines[first - 1:first - 1 + count]
         self._shift_lines(first + count, -count)
 
+    def _comment_counts(self) -> dict[str, dict[str, int]]:
+        """Per file, comments per kind, from the store: every anchorable
+        comment is rendered (matched or orphaned), so the store is the count."""
+        counts: dict[str, dict[str, int]] = {}
+        for path, entry in self._review.all_entries():
+            if not _entry_is_valid(entry):
+                continue
+            per_kind = counts.setdefault(path, {})
+            kind = _comment_kind(entry.get('kind'))
+            per_kind[kind] = per_kind.get(kind, 0) + 1
+        return counts
+
+    def _insert_flist_counts(self, per_kind: dict[str, int]) -> None:
+        """Append the row's comment counts, one marker+count per kind present,
+        in the kind's colour."""
+        sep = '  '  # two spaces from the stats, one between the counts
+        for kind, (_col, marker) in COMMENT_KINDS.items():
+            n = per_kind.get(kind)
+            if n:
+                self._flist.insert('end', f'{sep}{marker}{n}', f'cmt_{kind}')
+                sep = ' '
+
+    def _refresh_flist(self) -> None:
+        """Redraw the file list in place when its comment counts changed,
+        keeping the selected row and scroll position. Called after every
+        comment action, most of which change no count."""
+        if self._comment_counts() == self._flist_counts:
+            return
+        sel = self._flist_selected_row
+        top = self._flist.yview()[0]
+        self._render_flist(self._entries)
+        if sel > 0:
+            self._highlight_row(sel)
+        self._flist.yview_moveto(top)
+
     def _render_flist(self, entries: list[FileEntry]) -> None:
         self._flist_selected_row = -1
         self._flist_row_to_entry = []
         self._flist_path_to_row = {}
+        counts = self._flist_counts = self._comment_counts()
         self._flist.configure(state='normal')
         self._flist.delete('1.0', 'end')
 
@@ -2868,6 +3071,7 @@ class App:
                     self._flist.insert('end', label)
                     if stats:
                         self._flist.insert('end', f'  {" ".join(stats)}', 'stats')
+                    self._insert_flist_counts(counts.get(entry.path, {}))
                     self._flist.insert('end', '\n')
                     display_row = len(self._flist_row_to_entry) + 1
                     self._flist_path_to_row[entry.path] = display_row
@@ -2890,6 +3094,7 @@ class App:
                     self._flist.insert('end', e.path)
                 if parts:
                     self._flist.insert('end', f'  {" ".join(parts)}', 'stats')
+                self._insert_flist_counts(counts.get(e.path, {}))
                 self._flist.insert('end', '\n')
                 display_row = len(self._flist_row_to_entry) + 1
                 self._flist_path_to_row[e.path] = display_row
@@ -3222,6 +3427,8 @@ class App:
             label=f'Copy "{lines_loc}" + {n_lines} {"line" if n_lines == 1 else "lines"}',
             accelerator='(c)',
             command=lambda: self._copy_loc_and_lines(lines=(lines_start, lines_end)))
+        menu.add_separator()
+        self._add_agent_copy_items(menu)
 
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -3242,6 +3449,8 @@ class App:
                                 variable=self._ctx_kind_var, value=kind,
                                 command=lambda a=anchor, k=kind: self._set_comment_kind(a, k))
         menu.add_cascade(label=f'Change kind ({anchor.kind})', menu=sub)
+        menu.add_command(label='Copy this comment for agent',
+                         command=lambda a=anchor: self._copy_for_agent(list(COMMENT_KINDS), only=a))
         menu.add_command(label='Remove comment', command=lambda a=anchor: self._delete_comment(a))
 
     def _show_comment_context_menu(self, event: tk.Event, anchor: '_ResolvedAnchor') -> str:
@@ -3250,6 +3459,8 @@ class App:
         menu = self._ctx_menu
         menu.delete(0, 'end')
         self._add_comment_menu_items(menu, anchor)
+        menu.add_separator()
+        self._add_agent_copy_items(menu)
         menu.tk_popup(event.x_root, event.y_root)
         return 'break'
 
@@ -3302,12 +3513,6 @@ class App:
         self._embed_comment_frame(line, anchor)
         return True
 
-    @staticmethod
-    def _side_for_kind(kind: str) -> str:
-        if kind == 'added':   return '+'
-        if kind == 'removed': return '-'
-        return ' '
-
     def _read_current_file(self, file_path: str) -> 'str | None':
         if not self._repo_root:
             return None
@@ -3342,73 +3547,25 @@ class App:
         messagebox.showwarning('Cannot add comment', reason, parent=self.root)
 
     def _resolve_review_anchors(self) -> dict[str, list['_ResolvedAnchor']]:
-        """Map every stored comment through its snapshot to a target line in
-        the current working tree (via difflib). Unmatched anchors fall
-        through to orphan rendering at the end of each file's hunks."""
-        result: dict[str, list[_ResolvedAnchor]] = {}
-        current_cache: dict[str, str | None] = {}
-        map_cache: dict[tuple[str, str], dict[int, int]] = {}
-        for file, entry in self._review.all_entries():
-            snap_sha  = str(entry.get('snapshot') or '')
-            line_no   = int(entry.get('line_no') or 0)
-            side      = str(entry.get('side') or ' ')
-            line_text = str(entry.get('line_text') or '')
-            comment   = str(entry.get('comment') or '')
-            kind      = _comment_kind(entry.get('kind'))
-            if not (snap_sha and line_no and comment):
-                continue
-            if file not in current_cache:
-                current_cache[file] = self._read_current_file(file)
-            current = current_cache[file]
-            snap    = self._review.read_snapshot(snap_sha)
-            if current is not None and snap is not None:
-                key = (snap_sha, file)
-                line_map = map_cache.get(key)
-                if line_map is None:
-                    line_map = _compute_line_map(snap, current)
-                    map_cache[key] = line_map
-                target = line_map.get(line_no, line_no)
-            else:
-                target = line_no
-            result.setdefault(file, []).append(_ResolvedAnchor(
-                file=file, snapshot=snap_sha, snap_line_no=line_no,
-                target_line_no=target, side=side, line_text=line_text,
-                comment=comment, kind=kind,
-            ))
-        return result
+        """Unmatched anchors fall through to orphan rendering at the end of
+        each file's hunks."""
+        return _resolve_anchors(self._review, self._read_current_file)
 
     def _consume_anchor(self, file_path: str, new_line_no: int, side: str,
                         rendered_text: str) -> '_ResolvedAnchor | None':
-        anchors = self._pending_anchors.get(file_path)
-        if not anchors:
-            return None
-        exact: '_ResolvedAnchor | None' = None
-        loose: '_ResolvedAnchor | None' = None
-        for a in anchors:
-            if a.matched or a.target_line_no != new_line_no or a.side != side:
-                continue
-            if a.line_text == rendered_text:
-                exact = a
-                break
-            loose = loose or a
-        a = exact or loose
-        if a is None:
-            return None
-        a.matched = True
-        a.moved   = (exact is None) or (a.snap_line_no != a.target_line_no)
-        return a
+        return _match_anchor(self._pending_anchors.get(file_path, []), new_line_no, side, rendered_text)
 
     def _insert_comment_annotation(self, file_path: str, dl: DiffLine,
                                    line_text: str) -> None:
         src_line_no = self._cur_line
         if dl.new_line_no is not None:
             self._line_post_image[src_line_no] = (
-                file_path, dl.new_line_no, self._side_for_kind(dl.kind), line_text,
+                file_path, dl.new_line_no, _diff_side(dl.kind), line_text,
             )
         if dl.new_line_no is None:
             return
         anchor = self._consume_anchor(
-            file_path, dl.new_line_no, self._side_for_kind(dl.kind), line_text,
+            file_path, dl.new_line_no, _diff_side(dl.kind), line_text,
         )
         if anchor is None:
             return
@@ -3998,12 +4155,57 @@ class App:
                     loc = self._loc_for_line(src_line) or file
                 yield src_line, loc, a.line_text, a.comment, is_orphan, a.moved, a.kind
 
+    def _export_items(self, only: '_ResolvedAnchor | None' = None) -> list[_ExportItem]:
+        """In rendered order (files not in the diff last), which is what
+        _export_items_from_store produces without a window."""
+        anchors = [a for alist in self._pending_anchors.values() for a in alist
+                   if only is None or a is only]
+        anchors.sort(key=lambda a: (a.src_line is None, a.src_line or 0, a.file))
+        items: list[_ExportItem] = []
+        for a in anchors:
+            src = a.src_line
+            orphan = src is None or 'orphan_src' in self._diff.tag_names(f'{src}.0')
+            post = self._line_post_image.get(src) if src is not None else None
+            line = post[1] if post is not None and not orphan else a.target_line_no
+            items.append(_ExportItem(a.file, line, a.side, a.kind, a.line_text,
+                                     a.comment, a.moved, orphan))
+        return items
+
+    def _copy_for_agent(self, kinds: list[str], only: '_ResolvedAnchor | None' = None) -> None:
+        items = [i for i in self._export_items(only) if i.kind in kinds]
+        text = _format_export(items, kinds)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        n = len(items)
+        self._flash_message(f'copied {n} comment{"s" if n != 1 else ""} for an agent')
+
+    def _flash_message(self, text: str) -> None:
+        if self._msg_after_id is not None:
+            self.root.after_cancel(self._msg_after_id)
+        self._lbl_msg.configure(text=f'  {text}')
+        self._msg_after_id = self.root.after(
+            CFG.message_ms, lambda: (self._lbl_msg.configure(text=''),
+                                     setattr(self, '_msg_after_id', None)))
+
+    def _add_agent_copy_items(self, menu: tk.Menu) -> None:
+        state = 'disabled' if self._review.is_empty() else 'normal'
+        menu.add_command(label='Copy for agent: notes + bad', accelerator='(Ctrl+Shift+X)',
+                         command=lambda: self._copy_for_agent(_EXPORT_NOT_GOOD), state=state)
+        menu.add_command(label='Copy for agent: all', accelerator='(Ctrl+Shift+C)',
+                         command=lambda: self._copy_for_agent(list(COMMENT_KINDS)), state=state)
+
     def _rebuild_review_menu(self) -> None:
         m = self._review_menu
         m.delete(0, 'end')
-        m.add_command(label='Dump to terminal', command=self._dump_to_terminal)
+        empty = self._review.is_empty()
+        self._add_agent_copy_items(m)
+        m.add_command(label='Dump to terminal: notes + bad',
+                      command=lambda: self._dump_to_terminal(_EXPORT_NOT_GOOD),
+                      state='disabled' if empty else 'normal')
+        m.add_command(label='Dump to terminal: all', command=self._dump_to_terminal,
+                      state='disabled' if empty else 'normal')
         m.add_command(label='Clear all...', command=self._clear_all_comments,
-                      state='disabled' if self._review.is_empty() else 'normal')
+                      state='disabled' if empty else 'normal')
         items = list(self._iter_all_comments())
         if items:
             m.add_separator()
@@ -4120,6 +4322,7 @@ class App:
                           'Comments', n, self._comments_anchor())
 
     def _update_comments_section(self) -> None:
+        self._refresh_flist()
         items = list(self._iter_all_comments())
         n = len(items)
         anchor = self._comments_anchor()
@@ -4216,12 +4419,11 @@ class App:
             return
         print(out)
 
-    def _dump_to_terminal(self) -> None:
+    def _dump_to_terminal(self, kinds: 'list[str] | None' = None) -> None:
         if self._review.is_empty():
             print('gitr: no review comments')
             return
-        for _src_line, loc, src_text, cmt, _is_orphan, moved, kind in self._iter_all_comments():
-            print(f'{loc}\n{src_text}\n{self._format_comment_block(cmt, moved, kind=kind)}\n')
+        print(_format_export(self._export_items(), kinds or list(COMMENT_KINDS)))
 
     def _jump_to(self, path: str) -> None:
         self._manual_scroll = False
@@ -4276,11 +4478,17 @@ def main() -> None:
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--merge-base', action='store_true', dest='merge_base')
     parser.add_argument('-p', '--patch', metavar='FILE', default=None)
+    parser.add_argument('--export', action='store_true')
+    parser.add_argument('--kinds', default='all', metavar='KINDS')
     parser.add_argument('refs', nargs='*')
     args = parser.parse_args()
 
     if args.merge_base and not args.refs:
         sys.exit('gitr: --merge-base requires a ref (e.g. gitr --merge-base master)')
+    export_kinds = _export_kinds(args.kinds) if args.export else None
+    export_root = _find_repo_root() if args.export else None
+    if args.export and export_root is None:
+        sys.exit('gitr: --export needs a git repository (comments live in <repo>/.gitr)')
 
     source: PatchSource | GitSource
 
@@ -4295,12 +4503,20 @@ def main() -> None:
         source = PatchSource(sys.stdin.read())
     elif args.refs or args.merge_base:
         source = GitSource(args.refs, merge_base=args.merge_base)
+    elif args.export:
+        # Headless: an agent's stdin is closed, empty or an idle pipe. A
+        # patch on stdin is asked for explicitly with `-`.
+        source = GitSource([])
     elif not sys.stdin.isatty():
         source = PatchSource(sys.stdin.read())
     else:
         source = GitSource([])
 
     diff_text = source.diff_text()
+    if export_kinds is not None and export_root is not None:
+        items = _export_items_from_store(ReviewStore(), export_root, parse_diff(diff_text))
+        sys.stdout.write(_format_export(items, export_kinds) + '\n')
+        return
     if not diff_text.strip():
         print('gitr: no changes')
         sys.exit(0)

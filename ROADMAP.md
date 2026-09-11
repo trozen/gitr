@@ -59,15 +59,19 @@ with the ability to attach persistent local comments to specific diff lines.
       overlaid and switchable: off (plain file), inline unified, or two
       files side by side. The point is to see the changed lines in the
       context of the whole file, not just the hunks.
-- [ ] Fog of war: mark what has been looked at. Each diff line accumulates
-      exposure while it is in the viewport (sampled at ~10 Hz) and its fog
-      clears over about a second, so resting on a region reveals it while a
-      fast scroll leaves it mostly fogged. Unseen rows are drawn darker in the
-      minimap and as a dim overlay on the overview strip (optionally a gutter
-      tint in the main view). Seen state is keyed by line content with its
-      neighbours, stored in `.gitr/seen.json`, so a reload or a new diff keeps
-      already-read parts clear and fogs only new or changed lines; a coverage
-      percentage could go in the status bar.
+- [ ] Viewed marks: an explicit per-file (maybe per-hunk) "viewed" state set
+      by the user (a key, or a checkbox in the file list, as GitHub and Gerrit
+      do), shown in the file list, the overview strip and the minimap; kept
+      per hunk under a content key so a reload resets only files whose diff
+      changed. A variant worth trying: a file counts as viewed automatically
+      once the view scrolled past its end.
+- [ ] Fog of war (experiment, branch `fog-of-war`): per-line exposure while
+      on screen, minimap rows wiping clear after a dwell, seen state per hunk
+      in `.gitr/seen.json`. Tried in use: the time-based per-line signal is
+      too noisy to act on (a hunk on screen while reading another counts as
+      seen, a skimmed one does not), and the shading is hard to read on the
+      narrow minimap. Parked; the per-hunk content keys on that branch are
+      the basis for the viewed marks above.
 - [ ] Search within diff (`Ctrl+F`)
 - [ ] Hunk navigation (`j` / `k` to jump between `@@` hunks within a file)
 - [ ] Jump to `$EDITOR` at the correct line (`o`)

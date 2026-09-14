@@ -737,6 +737,12 @@ def _match_anchor(anchors: list['_ResolvedAnchor'], new_line_no: int, side: str,
     return a
 
 
+def _code_fence(text: str) -> str:
+    """A backtick fence longer than any backtick run in `text`, so the
+    fence cannot be closed early by the content."""
+    return '`' * max(3, max((len(m) for m in re.findall('`+', text)), default=0) + 1)
+
+
 def _format_export(items: list[_ExportItem], kinds: list[str]) -> str:
     """Markdown: a heading per file, a list item per comment. The diff line
     goes in a fenced code block, since quoted or bare it would be parsed
@@ -755,7 +761,7 @@ def _format_export(items: list[_ExportItem], kinds: list[str]) -> str:
         side = f' ({it.side})' if it.side in '+-' else ''
         flags = [it.kind, 'orphaned'] if it.orphaned else [it.kind, 'moved'] if it.moved else [it.kind]
         out.append(f'- {ref}{side} [{", ".join(flags)}]')
-        fence = '`' * max(3, max((len(m) for m in re.findall('`+', it.text)), default=0) + 1)
+        fence = _code_fence(it.text)
         out += [f'  {fence}diff', f'  {it.text}', f'  {fence}']
         out += [f'  {l}' for l in (it.comment.splitlines() or [''])]
         out.append('')
@@ -3327,7 +3333,8 @@ class App:
         return first, last
 
     def _copy_loc_and_lines(self, anchor_line: int | None = None,
-                            lines: 'tuple[int, int] | None' = None) -> None:
+                            lines: 'tuple[int, int] | None' = None,
+                            raw: bool = False) -> None:
         """Copy "path:line" plus lines to the clipboard.
 
         `lines` is an explicit range (the context menu decided it when it
@@ -3336,6 +3343,11 @@ class App:
         used only when that line lies inside it: a selection lingers in a
         Text widget after clicks elsewhere, and copying it instead of the
         line at hand was a surprise.
+
+        The lines go in a diff code fence unless `raw`: pasted bare into a
+        markdown renderer (a coding agent's chat, an issue) the +/- markers
+        read as list bullets and the indentation as code blocks, so the
+        block no longer looks like what the panel shows.
         """
         sel = self._selected_lines()
         line = anchor_line or self._line_under_pointer()
@@ -3366,6 +3378,8 @@ class App:
             if cmt is not None:
                 parts.append(self._format_comment_block(cmt.comment, cmt.moved, kind=cmt.kind))
         text = '\n'.join(parts)
+        if not raw:
+            text = f'{_code_fence(text)}diff\n{text}\n{_code_fence(text)}'
         self.root.clipboard_clear()
         self.root.clipboard_append(f'{loc}\n{text}\n')
 
@@ -3423,10 +3437,11 @@ class App:
             lines_loc = loc
 
         n_lines = lines_end - lines_start + 1
-        menu.add_command(
-            label=f'Copy "{lines_loc}" + {n_lines} {"line" if n_lines == 1 else "lines"}',
-            accelerator='(c)',
-            command=lambda: self._copy_loc_and_lines(lines=(lines_start, lines_end)))
+        what = f'"{lines_loc}" + {n_lines} {"line" if n_lines == 1 else "lines"}'
+        menu.add_command(label=f'Copy {what}', accelerator='(c)',
+                         command=lambda: self._copy_loc_and_lines(lines=(lines_start, lines_end)))
+        menu.add_command(label=f'Copy {what} raw (no code fence)',
+                         command=lambda: self._copy_loc_and_lines(lines=(lines_start, lines_end), raw=True))
         menu.add_separator()
         self._add_agent_copy_items(menu)
 

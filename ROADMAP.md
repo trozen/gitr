@@ -31,7 +31,9 @@ with the ability to attach persistent local comments to specific diff lines.
 - [x] Large diffs: skeleton-first render behind a progress label, word diff
       applied afterwards from the visible region outward
 - [x] Hover ruler on diff lines with `+comment (a)` and `copy (c)`; copy puts
-      `path:line` plus the line(s) and their comments on the clipboard
+      `path:line` plus the line(s) and their comments on the clipboard, in a
+      diff code fence so a markdown renderer keeps the +/- markers (the context
+      menu has a raw variant without the fence)
 - [x] Comments and Commits panels above the file list; comments dumped to the
       terminal on exit (and on demand), Clear all with confirmation and a
       timestamped backup

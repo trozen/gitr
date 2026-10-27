@@ -1211,7 +1211,7 @@ class App:
         self._mm_relayout_id: 'str | None' = None
         self._mm_img: 'tk.PhotoImage | None' = None
         self._mm_item: int = 0
-        self._mm_vp_img: 'tk.PhotoImage | None' = None  # aqua viewport fill, see _update_minimap_viewport
+        self._mm_vp_img: 'tk.PhotoImage | None' = None  # minimap viewport fill
         self._mm_vp_size: tuple[int, int] = (0, 0)
         self._mm_drag: 'tuple[int, float] | None' = None
         # Diff panel text is queued and inserted in bulk; see _emit.
@@ -2512,19 +2512,14 @@ class App:
         c.delete('viewport')
         y0, y1 = top * lh - offset, bottom * lh - offset
         w = c.winfo_width()
-        if self._aqua:
-            # Stipples are X11-only; aqua fills them solid and hides the band
-            # underneath, so the see-through fill is an image with alpha.
-            size = (w, max(1, y1 - y0))
-            if self._mm_vp_img is None or self._mm_vp_size != size:
-                self._mm_vp_img = tk.PhotoImage(data=_png_rgba(*size, C['fg'], 32))
-                self._mm_vp_size = size
-            c.create_image(0, y0, anchor='nw', image=self._mm_vp_img, tags='viewport')
-            c.create_rectangle(0, y0, w, y1, outline=C['fg'], width=1, tags='viewport')
-        else:
-            c.create_rectangle(0, y0, w, y1,
-                               fill=C['fg'], stipple='gray12',
-                               outline=C['fg'], width=1, tags='viewport')
+        # The see-through fill is an image with alpha rather than a stipple:
+        # stipples are X11-only, and aqua fills them solid.
+        size = (w, max(1, y1 - y0))
+        if self._mm_vp_img is None or self._mm_vp_size != size:
+            self._mm_vp_img = tk.PhotoImage(data=_png_rgba(*size, C['fg'], 32))
+            self._mm_vp_size = size
+        c.create_image(0, y0, anchor='nw', image=self._mm_vp_img, tags='viewport')
+        c.create_rectangle(0, y0, w, y1, outline=C['fg'], width=1, tags='viewport')
 
     def _mm_scroll_to_row(self, row: float, span: int) -> int:
         """Put minimap row `row` at the top of the diff; returns the row used."""

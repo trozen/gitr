@@ -9,10 +9,12 @@ import json
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import textwrap
 import time
+import zlib
 import tkinter as tk
 from collections import deque
 from itertools import accumulate
@@ -608,6 +610,9 @@ class CFG:
     overview_w         = 6     # comment marker strip beside the scrollbar
     overview_file_ticks = True # faint tick per file start on the strip
     scroll_speed       = 8   # lines per mouse-wheel tick
+    scroll_ease        = 0.35  # fraction of the remaining scroll covered per frame
+    scroll_frame_ms    = 16    # nominal animation frame
+    touch_settle_ms    = 120   # trackpad quiet this long: the gesture is over
     diff_hi_blend      = 0.12   # bg intensity for changed lines / word-diff changed words
     diff_dim_blend     = 0.06   # bg intensity for word-diff unchanged words
     diff_dim_fg        = 0.50   # fg intensity for word-diff unchanged words
@@ -905,7 +910,66 @@ def _detect_scale(root: tk.Tk) -> float:
     return dpi / 96.0
 
 
-def _primary_monitor_size() -> tuple[int, int]:
+def _is_aqua(widget: tk.Misc) -> bool:
+    return widget.tk.call('tk', 'windowingsystem') == 'aqua'
+
+
+def _adapt_fonts(root: tk.Tk) -> None:
+    """Fall back to Tk's own fixed-width font when CFG.font_family is not
+    monospaced: 'monospace' is a fontconfig alias, and Tk on macOS and
+    Windows silently substitutes a proportional system font for it."""
+    if _is_aqua(root):
+        # Tk 9 on macOS assumes 96 dpi, so a point is 1.33 screen points and
+        # text comes out a third larger than in native apps, which draw 1:1.
+        CFG.font_size = max(1, round(CFG.font_size * 72 / root.winfo_fpixels('1i')))
+    if not tkfont.Font(root=root, family=CFG.font_family, size=CFG.font_size).metrics('fixed'):
+        CFG.font_family = tkfont.nametofont('TkFixedFont', root=root).actual('family')
+
+
+def _use_dark_appearance(root: tk.Tk) -> None:
+    """On macOS, draw the native parts (title bar, scrollbars, menus) dark
+    whatever the system theme, so they match the dark panes."""
+    if not _is_aqua(root):
+        return
+    try:
+        root.tk.call('::tk::unsupported::MacWindowStyle', 'appearance', root._w, 'darkaqua')
+    except tk.TclError:
+        pass  # Tk older than 8.6.10
+
+
+class _FlatButton(tk.Label):
+    """tk.Button stand-in for aqua, where tk.Button is a native control that
+    ignores bg/fg and draws a light push button over the dark UI."""
+
+    def __init__(self, master: tk.Misc, command=None, **kw) -> None:
+        super().__init__(master, **kw)
+        self._command = command
+        self.bind('<ButtonRelease-1>', self._on_release, add='+')
+        self.bind('<Enter>', lambda e: super(_FlatButton, self).configure(state='active'), add='+')
+        self.bind('<Leave>', lambda e: super(_FlatButton, self).configure(state='normal'), add='+')
+
+    def _on_release(self, event: tk.Event) -> None:
+        # Like a real button: releasing outside the widget cancels the click.
+        inside = 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        if inside and self._command is not None:
+            self._command()
+
+    def configure(self, cnf=None, **kw):
+        if 'command' in kw:
+            self._command = kw.pop('command')
+        return super().configure(cnf, **kw)
+
+    config = configure
+
+
+def _button(master: tk.Misc, **kw) -> tk.Widget:
+    return _FlatButton(master, **kw) if _is_aqua(master) else tk.Button(master, **kw)
+
+
+def _primary_monitor_size(root: tk.Tk) -> tuple[int, int]:
+    """Primary monitor size from xrandr; Tk's screen size where there is no
+    xrandr (macOS, Windows). On X11 Tk reports the whole multi-monitor
+    desktop, which is why xrandr comes first."""
     try:
         out = subprocess.run(['xrandr', '--query'], capture_output=True, text=True,
                              timeout=1).stdout
@@ -922,7 +986,21 @@ def _primary_monitor_size() -> tuple[int, int]:
                     return int(m.group(1)), int(m.group(2))
     except Exception:
         pass
-    return 1920, 1080
+    return root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def _png_rgba(w: int, h: int, color: str, alpha: int) -> bytes:
+    """A w x h PNG of one colour at one alpha, for PhotoImage(data=...)."""
+    rgba = bytes.fromhex(color.lstrip('#')) + bytes([alpha])
+    raw = (b'\x00' + rgba * w) * h  # filter byte 0 (none) per row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))
+
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw))
+            + chunk(b'IEND', b''))
 
 
 _MM_LINE_H = 2  # minimap pixels per source line at 1x scale (matches VS Code)
@@ -1095,15 +1173,22 @@ class App:
                  has_staged: bool = False, has_unstaged: bool = False,
                  source: 'PatchSource | GitSource | None' = None) -> None:
         self.root = root
+        # Shortcut modifier: Cmd on macOS, Ctrl elsewhere.
+        self._mod, self._mod_label = ('Command', 'Cmd') if _is_aqua(root) else ('Control', 'Ctrl')
+        mod = self._mod
         # Override Text/Entry class bindings so Ctrl+W/Q always close the window
         # (default Text binding for Ctrl+W is "delete previous word", which would
         # otherwise consume the event before our bind_all reaches it).
         for cls in ('Text', 'Entry'):
-            root.bind_class(cls, '<Control-w>', lambda e: self._close_app())
-            root.bind_class(cls, '<Control-q>', lambda e: self._close_app())
-        root.bind_all('<Control-w>', lambda e: self._close_app())
-        root.bind_all('<Control-q>', lambda e: self._close_app())
+            root.bind_class(cls, f'<{mod}-w>', lambda e: self._close_app())
+            root.bind_class(cls, f'<{mod}-q>', lambda e: self._close_app())
+        root.bind_all(f'<{mod}-w>', lambda e: self._close_app())
+        root.bind_all(f'<{mod}-q>', lambda e: self._close_app())
         root.protocol('WM_DELETE_WINDOW', self._close_app)
+        if _is_aqua(root):
+            # Cmd+Q and the app menu's Quit reach this command before any key
+            # binding; without it Tk exits without saving the window state.
+            root.createcommand('::tk::mac::Quit', self._close_app)
         self.diff_text = diff_text
         self._entries: list[FileEntry] = []
         self._diff_files: list[DiffFile] = []
@@ -1126,6 +1211,8 @@ class App:
         self._mm_relayout_id: 'str | None' = None
         self._mm_img: 'tk.PhotoImage | None' = None
         self._mm_item: int = 0
+        self._mm_vp_img: 'tk.PhotoImage | None' = None  # aqua viewport fill, see _update_minimap_viewport
+        self._mm_vp_size: tuple[int, int] = (0, 0)
         self._mm_drag: 'tuple[int, float] | None' = None
         # Diff panel text is queued and inserted in bulk; see _emit.
         self._buf: list[tuple[str, list[str]]] = []  # (tag, text parts)
@@ -1150,6 +1237,9 @@ class App:
         self._rendering: bool = False  # inside a synchronous parse/render
         self._interrupted: bool = False  # closed by Ctrl+C: exit status 130
         self._scroll_after_id: 'str | None' = None
+        self._touch_px: float = 0.0  # trackpad pixels received but not yet scrolled
+        self._touch_after_id: 'str | None' = None
+        self._touch_settle_id: 'str | None' = None
         self._scroll_edge: int = 0  # +1/-1 while a Home/End run is heading for that edge
         self._pending_scroll_line: 'int | None' = None
         self._hunk_seps: list[tk.Canvas] = []
@@ -1166,6 +1256,7 @@ class App:
         self._repo_root = _find_repo_root()
         self._scroll_remaining: float = 0.0  # pixels the smooth scroll still has to cover
         self._scroll_animating: bool = False
+        self._scroll_frame_t: float = 0.0  # perf_counter() of the previous animation frame
         self._scroll_moved: bool = False       # this animation changed the view
         self._settle_after_id: 'str | None' = None
         self._flist_selected_row: int = -1
@@ -1206,6 +1297,9 @@ class App:
         self._gutter_nums: dict[int, tuple[Optional[int], Optional[int]]] = {}
         self._gutter_max: tuple[int, int] = (0, 0)  # (old, new); avoids an O(n) scan per scroll
         self._scale = _detect_scale(root)
+        self._aqua = _is_aqua(root)
+        _adapt_fonts(root)
+        _use_dark_appearance(root)
         # Single source of truth for the hover-ruler colour: the 'hover' tag and
         # the copy/comment buttons that sit on the ruler row must match.
         self._ruler_bg = _mix(C['topbar_bg'], C['subdued'], 0.45)
@@ -1226,9 +1320,9 @@ class App:
         # Overriding it here is unavoidable; extract to one place so each
         # read-only widget needs only a single call.
         widget.bind('<Key>', lambda e: 'break')
-        widget.bind('<Control-c>', lambda e: None)
-        widget.bind('<Control-w>', lambda e: self._close_app())
-        widget.bind('<Control-q>', lambda e: self._close_app())
+        widget.bind(f'<{self._mod}-c>', lambda e: None)
+        widget.bind(f'<{self._mod}-w>', lambda e: self._close_app())
+        widget.bind(f'<{self._mod}-q>', lambda e: self._close_app())
 
     def _make_scrollbar(self, parent: tk.Widget, **kw) -> tk.Scrollbar:
         return tk.Scrollbar(parent,
@@ -1250,7 +1344,7 @@ class App:
             file_menu.add_command(label='Reload', accelerator='(F5)',
                                   command=self._reload)
             file_menu.add_separator()
-        file_menu.add_command(label='Quit', accelerator='(Ctrl+Q)',
+        file_menu.add_command(label='Quit', accelerator=f'({self._mod_label}+Q)',
                               command=self._close_app)
         menubar.add_cascade(label='File', menu=file_menu)
         view_menu = tk.Menu(menubar, tearoff=0, **menu_kw)
@@ -1292,7 +1386,7 @@ class App:
         if saved_state and isinstance(saved_state.get('geometry'), str):
             self.root.geometry(saved_state['geometry'])
         else:
-            sw, sh = _primary_monitor_size()
+            sw, sh = _primary_monitor_size(self.root)
             w, h = int(sw * CFG.window_scale), int(sh * CFG.window_scale)
             self.root.geometry(f'{w}x{h}')
         if saved_state and isinstance(saved_state.get('sash_ratio'), (int, float)):
@@ -1323,7 +1417,7 @@ class App:
         self._lbl_msg.pack(side='left')
 
         if self._can_reload:
-            self._reload_btn = tk.Button(
+            self._reload_btn = _button(
                 bar, text='reload',
                 bg=C['topbar_bg'], fg=C['fg'],
                 activebackground=C['selected_bg'], activeforeground=C['fg'],
@@ -1414,9 +1508,9 @@ class App:
         self._diff.bind('a',              lambda e: self._add_comment_at_cursor() or 'break')
         self._diff.bind('r',          lambda e: self._reload() or 'break')
         self._diff.bind('<F5>',       lambda e: self._reload() or 'break')
-        self._diff.bind('<Control-r>', lambda e: self._reload() or 'break')
-        self._diff.bind('<Control-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
-        self._diff.bind('<Control-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
+        self._diff.bind(f'<{self._mod}-r>', lambda e: self._reload() or 'break')
+        self._diff.bind(f'<{self._mod}-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
+        self._diff.bind(f'<{self._mod}-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
         self._diff.bind('<Tab>',          lambda e: self._jump_to_adjacent_file( 1) or 'break')
         self._diff.bind('<Shift-Tab>',      lambda e: self._jump_to_adjacent_file(-1) or 'break')
         self._diff.bind('<ISO_Left_Tab>',   lambda e: self._jump_to_adjacent_file(-1) or 'break')
@@ -1497,8 +1591,8 @@ class App:
         # right: optional collapsible Comments + Commits panels above the file list
         rf = tk.Frame(self._sash, bg=C['bg'])
 
-        def _make_section_toggle(parent: tk.Frame, command) -> tk.Button:
-            return tk.Button(
+        def _make_section_toggle(parent: tk.Frame, command) -> tk.Widget:
+            return _button(
                 parent, text='',
                 bg=C['topbar_bg'], fg=C['fg'],
                 activebackground=C['topbar_bg'], activeforeground=C['fg'],
@@ -1659,10 +1753,10 @@ class App:
         # most specific per-widget binding, so without an explicit Ctrl+W here
         # the close combo is swallowed by "toggle wrap". Re-assert it (and Q for
         # symmetry), mirroring _make_read_only on the diff pane.
-        self._flist.bind('<Control-w>', lambda e: self._close_app())
-        self._flist.bind('<Control-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
-        self._flist.bind('<Control-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
-        self._flist.bind('<Control-q>', lambda e: self._close_app())
+        self._flist.bind(f'<{self._mod}-w>', lambda e: self._close_app())
+        self._flist.bind(f'<{self._mod}-C>', lambda e: self._copy_for_agent(list(COMMENT_KINDS)) or 'break')
+        self._flist.bind(f'<{self._mod}-X>', lambda e: self._copy_for_agent(_EXPORT_NOT_GOOD) or 'break')
+        self._flist.bind(f'<{self._mod}-q>', lambda e: self._close_app())
         self._on_wrap_toggle()
 
     def _update_wrap_bar(self) -> None:
@@ -1812,6 +1906,7 @@ class App:
         if not self._scroll_animating:
             self._scroll_animating = True
             self._scroll_moved = False
+            self._scroll_frame_t = time.perf_counter() - CFG.scroll_frame_ms / 1000
             self._animate_scroll()
 
     def _stop_scroll_animation(self) -> None:
@@ -1846,6 +1941,8 @@ class App:
     def _embedded_rects(self) -> list[tuple[int, int]]:
         """(y0, y1) of every embedded window (comment frame, hunk separator,
         editor) currently on screen, in diff widget pixels."""
+        if self._aqua:
+            return []  # aqua redraws the whole view on scroll; no Expose lag to cover
         d = self._diff
         rects: list[tuple[int, int]] = []
         for _key, _name, idx in d.dump('@0,0', f'@0,{d.winfo_height()} lineend', window=True):
@@ -1902,9 +1999,10 @@ class App:
         # Flush the redisplay that the move queued behind this callback, so
         # its yscroll callback cannot hide the ruler placed below.
         d.update_idletasks()
-        top, bottom = d.index('@0,0 linestart'), d.index(f'@0,{d.winfo_height()} lineend')
-        d.tag_add('repaint', top, bottom)
-        d.tag_remove('repaint', top, bottom)
+        if not self._aqua:
+            top, bottom = d.index('@0,0 linestart'), d.index(f'@0,{d.winfo_height()} lineend')
+            d.tag_add('repaint', top, bottom)
+            d.tag_remove('repaint', top, bottom)
         # The ruler is suppressed while scrolling; bring it back for wherever
         # the pointer ended up without waiting for the next motion event.
         self._rehover_under_pointer()
@@ -1938,9 +2036,50 @@ class App:
         widget.bind('<Button-4>',   lambda e: self._on_wheel(-1) or 'break')
         widget.bind('<Button-5>',   lambda e: self._on_wheel( 1) or 'break')
         widget.bind('<MouseWheel>', lambda e: self._on_wheel(_wheel_ticks(e.delta)) or 'break')
+        try:
+            widget.bind('<TouchpadScroll>', lambda e: self._on_touchpad(e.delta) or 'break')
+        except tk.TclError:
+            pass  # Tk before 9: touchpads arrive as wheel events
 
     def _on_wheel(self, ticks: int) -> None:
         self._scroll_by_pixels(CFG.scroll_speed * ticks * self._line_px())
+
+    def _on_touchpad(self, delta: int) -> None:
+        """Accumulate a <TouchpadScroll> (Tk 9; the only scroll event a macOS
+        trackpad sends), already pixel-precise and with momentum, so it is
+        applied as is rather than animated.
+
+        The events come every ~20 ms, faster than Tk on macOS can repaint
+        the view (~35 ms), so moving the view once per event builds a backlog
+        and the content keeps sliding after the fingers stop. Instead the
+        deltas pile up and are applied at most once per frame.
+        """
+        low = delta & 0xffff
+        self._touch_px -= low - 0x10000 if low >= 0x8000 else low  # %D packs dx << 16 | dy
+        if self._touch_after_id is None:
+            self._touch_after_id = self.root.after(CFG.scroll_frame_ms, self._apply_touchpad)
+
+    def _apply_touchpad(self) -> None:
+        self._touch_after_id = None
+        px = int(self._touch_px)
+        self._touch_px -= px
+        if not px:
+            return
+        self._manual_scroll = True
+        self._stop_scroll_animation()
+        self._hide_for_scroll()
+        rects = self._embedded_rects()
+        self._diff.yview_scroll(px, 'pixels')
+        self._repaint_rects(rects)
+        # Settle (repair, bring the ruler back) once the gesture and its
+        # momentum are over, not between every two frames of it.
+        if self._touch_settle_id is not None:
+            self.root.after_cancel(self._touch_settle_id)
+        self._touch_settle_id = self.root.after(CFG.touch_settle_ms, self._touch_settled)
+
+    def _touch_settled(self) -> None:
+        self._touch_settle_id = None
+        self._schedule_settle()
 
     def _edge_distance(self, edge: int) -> float:
         """Pixels from the current view to the top (-1) or bottom (+1).
@@ -1988,7 +2127,14 @@ class App:
         if abs(remaining) < 1:
             self._stop_scroll_animation()
             return
-        step = remaining * 0.35
+        # Ease by elapsed time rather than per frame: where a frame costs
+        # far more than its slot (Tk on macOS repaints the whole view on every
+        # scroll, ~40 ms at Retina sizes), fixed-fraction steps would stretch
+        # one wheel tick to the better part of a second.
+        now = time.perf_counter()
+        frames = min(8.0, (now - self._scroll_frame_t) * 1000 / CFG.scroll_frame_ms)
+        self._scroll_frame_t = now
+        step = remaining * (1 - (1 - CFG.scroll_ease) ** frames)
         step_i = int(step) if abs(step) >= 1 else (1 if step > 0 else -1)
         if self._at_edge(1 if step_i > 0 else -1):
             # Nothing can move, so leave the ruler alone: hiding it here would
@@ -2005,7 +2151,7 @@ class App:
             return
         self._scroll_moved = True
         self._repaint_rects(rects)
-        self._scroll_after_id = self.root.after(16, self._animate_scroll)
+        self._scroll_after_id = self.root.after(CFG.scroll_frame_ms, self._animate_scroll)
 
     # --hunk separators -------------------------------------------------------
 
@@ -2365,9 +2511,20 @@ class App:
             self._mm_paint_band(iw, chw, lh, offset, min(ch, content_h - offset))
         c.delete('viewport')
         y0, y1 = top * lh - offset, bottom * lh - offset
-        c.create_rectangle(0, y0, c.winfo_width(), y1,
-                           fill=C['fg'], stipple='gray12',
-                           outline=C['fg'], width=1, tags='viewport')
+        w = c.winfo_width()
+        if self._aqua:
+            # Stipples are X11-only; aqua fills them solid and hides the band
+            # underneath, so the see-through fill is an image with alpha.
+            size = (w, max(1, y1 - y0))
+            if self._mm_vp_img is None or self._mm_vp_size != size:
+                self._mm_vp_img = tk.PhotoImage(data=_png_rgba(*size, C['fg'], 32))
+                self._mm_vp_size = size
+            c.create_image(0, y0, anchor='nw', image=self._mm_vp_img, tags='viewport')
+            c.create_rectangle(0, y0, w, y1, outline=C['fg'], width=1, tags='viewport')
+        else:
+            c.create_rectangle(0, y0, w, y1,
+                               fill=C['fg'], stipple='gray12',
+                               outline=C['fg'], width=1, tags='viewport')
 
     def _mm_scroll_to_row(self, row: float, span: int) -> int:
         """Put minimap row `row` at the top of the diff; returns the row used."""
@@ -3256,7 +3413,7 @@ class App:
         font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
         w = h = 0
         for text in ('remove', 'copy (c)', max(COMMENT_KINDS, key=len)):
-            b = tk.Button(self._diff, text=text, relief='flat', bd=0,
+            b = _button(self._diff, text=text, relief='flat', bd=0,
                           highlightthickness=0, font=font)
             w += b.winfo_reqwidth() + 8  # pack padx=4 on both sides
             h = max(h, b.winfo_reqheight())
@@ -3599,7 +3756,7 @@ class App:
             font=(CFG.font_family, CFG.font_size),
         )
         btn_font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
-        btn = tk.Button(
+        btn = _button(
             frame, text='remove',
             bg=bg, fg=C['removed_fg'],
             activebackground=bg, activeforeground=C['removed_fg'],
@@ -3607,7 +3764,7 @@ class App:
             font=btn_font,
             command=lambda a=anchor: self._delete_comment(a),
         )
-        copy_btn = tk.Button(
+        copy_btn = _button(
             frame, text='copy (c)',
             bg=bg, fg=C['fg'],
             activebackground=bg, activeforeground=C['fg'],
@@ -3615,7 +3772,7 @@ class App:
             font=btn_font,
             command=lambda a=anchor: self._copy_loc_and_lines((a.src_line or 0) + 1),
         )
-        kind_btn = tk.Button(
+        kind_btn = _button(
             frame, text=anchor.kind,
             bg=bg, fg=C['bg'],  # the diff background reads as ink on the band
             activebackground=bg, activeforeground=C['bg'],
@@ -3973,7 +4130,7 @@ class App:
         prefix = tk.Label(frame, text='  >> ', bg=C['topbar_bg'], fg=C['comment_fg'],
                           font=bar_font)
         prefix.pack(side='left', padx=(4, 0), pady=2, anchor='nw')
-        kind_btn = tk.Button(frame, text='', bg=C['topbar_bg'], activebackground=C['selected_bg'],
+        kind_btn = _button(frame, text='', bg=C['topbar_bg'], activebackground=C['selected_bg'],
                              relief='flat', bd=0, highlightthickness=0, cursor='hand2', font=bar_font)
         kind_btn.pack(side='right', padx=4, pady=2, anchor='ne')
         self._bind_wheel(frame)
@@ -4015,7 +4172,7 @@ class App:
         entry.bind('<Alt-KP_Enter>',   _newline)
         entry.bind('<Escape>',         lambda e: self._cancel_comment_edit() or 'break')
         for n, k in enumerate(COMMENT_KINDS, start=1):  # Ctrl+1/2/3: note/good/bad
-            entry.bind(f'<Control-Key-{n}>', lambda e, k=k: _set_kind(k))
+            entry.bind(f'<{self._mod}-Key-{n}>', lambda e, k=k: _set_kind(k))
         _show_kind()
         def _focus_out(e: tk.Event) -> None:
             if self._focus_out_after_id is not None:
@@ -4204,9 +4361,9 @@ class App:
 
     def _add_agent_copy_items(self, menu: tk.Menu) -> None:
         state = 'disabled' if self._review.is_empty() else 'normal'
-        menu.add_command(label='Copy for agent: notes + bad', accelerator='(Ctrl+Shift+X)',
+        menu.add_command(label='Copy for agent: notes + bad', accelerator=f'({self._mod_label}+Shift+X)',
                          command=lambda: self._copy_for_agent(_EXPORT_NOT_GOOD), state=state)
-        menu.add_command(label='Copy for agent: all', accelerator='(Ctrl+Shift+C)',
+        menu.add_command(label='Copy for agent: all', accelerator=f'({self._mod_label}+Shift+C)',
                          command=lambda: self._copy_for_agent(list(COMMENT_KINDS)), state=state)
 
     def _rebuild_review_menu(self) -> None:
@@ -4288,7 +4445,7 @@ class App:
     def _section_arrow(expanded: bool) -> str:
         return CFG.section_expanded_arrow if expanded else CFG.section_collapsed_arrow
 
-    def _toggle_pane(self, expanded_attr: str, pane: tk.Frame, toggle_btn: tk.Button,
+    def _toggle_pane(self, expanded_attr: str, pane: tk.Frame, toggle_btn: tk.Widget,
                      title: str, count: int, anchor: tk.Widget) -> None:
         expanded = getattr(self, expanded_attr)
         if expanded:

@@ -113,7 +113,7 @@ or `bad` and defaults to `note` when absent.
 
 ---
 
-## Web version: `gitr serve` (planned)
+## Web version: `gitr-serve`
 
 A browser-based gitr for agent work on a remote machine: several projects,
 each with one worktree per agent. A small server runs next to the worktrees
@@ -139,10 +139,10 @@ whole diff in one read-only document as in gitr.
 
 ### Later
 
-- [ ] `gitr serve start|stop|status` as a user daemon: install and drive a
+- [ ] `gitr-serve start|stop|status` as a user daemon: install and drive a
       systemd user unit (`systemctl --user`, with `loginctl enable-linger`
       so it survives logout) rather than self-daemonizing; plain
-      `gitr serve` stays the foreground mode the unit runs
+      `gitr-serve` stays the foreground mode the unit runs
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       and `c` to comment on the cursor line
 - [ ] Comments panel in the sidebar: every comment in diff order with
@@ -156,13 +156,25 @@ whole diff in one read-only document as in gitr.
       merges included. Use it to pick the review base (any commit, not just
       a branch) and to narrow the head side (e.g. review up to `HEAD^^`
       instead of the working tree)
+- [ ] Replace the Tk window with the web view: `gitr` becomes a launcher
+      for a one-diff `gitr-serve`, so there is one UI to maintain. Steps:
+      1. A one-diff mode in gitr-serve: refs or a piped patch (also outside
+         configured repos), a free local port, a Chrome app window
+         (`--app=URL`, else a browser tab via `webbrowser`), exit when the
+         window closes (page heartbeat). Stdlib only: no embedded web view.
+      2. Parity with the Tk window (keyboard navigation, comments panel,
+         word-diff and line-number modes) and Monaco bundled instead of
+         loaded from a CDN, so it works offline. Check the start-up time
+         (a browser window vs Tk's) is acceptable.
+      3. `gitr` launches it; the Tk window stays behind `gitr --tk` until
+         it is no longer used, then goes.
 
 ### Known issues
 
-- [ ] Minimap file names are clipped for files shorter than about 5
-      lines (empty files, one-line changes): Monaco draws each label on a
-      box about 5 minimap rows tall, and the next file's box covers it.
-      No public option controls this.
+- [x] Minimap file names were clipped for files shorter than about 7
+      lines (empty files, pure renames, one-line changes): Monaco draws
+      each label on a box about 7 minimap rows tall. Fixed by padding every
+      file to at least 7 lines.
 
 ---
 

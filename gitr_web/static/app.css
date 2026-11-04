@@ -55,7 +55,7 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .err { color: var(--rem); padding: 1px 24px; }
 
 .file .st { font: var(--mono); width: 1ch; text-align: center; }
-.st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R { color: var(--ren); }
+.st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R, .st-C { color: var(--ren); }
 .file .name.st-D { text-decoration: line-through; }
 .file .namecell { display: flex; align-items: baseline; min-width: 0; }
 .file .namecell .name { overflow: hidden; text-overflow: ellipsis; }
@@ -91,10 +91,12 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 /* Monaco decorations */
 .l-add { background: var(--add-bg); }
 .l-rem { background: var(--rem-bg); }
-/* File and hunk headers look alike, inline and in the sticky header; only
-   a file header has the separator line above it. */
-.l-head, .l-file { background: var(--head-bg); }
+/* A file header is a two-line tinted band (name, first hunk) with a line
+   above it; any later hunk header, as in gitr, only a thin line above (on
+   the gutter too, across the view). */
+.l-file, .l-file2 { background: var(--head-bg); }
 .l-file { border-top: 1px solid var(--file-line); }
+.l-head { border-top: 1px solid var(--dim); }
 /* The sticky header's first line is always a file header: the files are the
    outermost folding regions. */
 .monaco-editor .sticky-widget .sticky-line-content[data-sticky-line-index="0"],

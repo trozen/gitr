@@ -5,7 +5,7 @@ Lightweight terminal-launched Git diff viewer. Two-panel GUI: coloured diff on t
 ## Install
 
 ```bash
-uv tool install .
+uv tool install .            # installs gitr and gitr-serve
 ```
 
 Or just point an alias at the script directly (no install step needed):
@@ -27,19 +27,21 @@ gitr -                       # read stdin explicitly
 gitr -p patch.diff           # read from a patch file
 ```
 
-## Web version (prototype)
+## gitr-serve
 
-`web/server.py` is a proof of concept of `gitr serve`: the same diff view in
-a browser, for several repositories and all their worktrees. It runs where the
-repositories are (e.g. a remote machine with agents working in worktrees).
+`gitr-serve` is the same diff view and review in a browser, for several
+repositories and all their worktrees. It runs where the repositories are
+(e.g. a remote machine with agents working in worktrees), in the foreground,
+and needs no Tk.
 
 ```bash
-python3 web/server.py ~/dev/repo-a ~/dev/repo-b    # http://127.0.0.1:8765/
-python3 web/server.py --port 9000 ~/dev/repo-a
-python3 web/server.py --reload             # restart on changes to server.py / gitr.py
+gitr-serve ~/dev/repo-a ~/dev/repo-b         # http://127.0.0.1:4487/
+gitr-serve --port 9000 ~/dev/repo-a
 ```
 
-The page files under `web/static/` are read from disk on every request, so
+From a checkout, without installing: `python3 gitr_web/server.py`, with
+`--reload` to restart on changes to `gitr_web/server.py` or `gitr.py`. The
+page files under `gitr_web/static/` are read from disk on every request, so
 changes to them only need a browser refresh.
 
 With no repository arguments the list is read from
@@ -49,23 +51,26 @@ With no repository arguments the list is read from
 {"projects": ["~/dev/repo-a", {"path": "~/dev/repo-b", "name": "b"}]}
 ```
 
+`gitr-serve --print-config [repo ...]` prints one for the repos given (or the
+one you are in), ready to redirect into that file.
+
 The server listens on localhost only and has no authentication, so reach it
 from another machine through an SSH tunnel rather than exposing the port:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 remote-host    # then open http://127.0.0.1:8765/
+ssh -L 4487:127.0.0.1:4487 remote-host    # then open http://127.0.0.1:4487/
 ```
 
 Chrome can install the page as an app with its own window (the install icon
 in the address bar, or menu > Cast, save and share > Install page). The app
 belongs to the address it was installed from, port included, so keep the
 tunnel on the same local port. To install apps from two machines, reach them
-on different local ports (e.g. `ssh -L 8766:127.0.0.1:8765 remote-host` for
+on different local ports (e.g. `ssh -L 4488:127.0.0.1:4487 remote-host` for
 the remote one); each app is named after its server's hostname.
 
 Pick a worktree on the left; the base defaults to `main` / `master` and can be
 any ref. The base and the untracked / wrap options are remembered per
-worktree on the server (`~/.local/state/gitr/serve.json`); a worktree opened
+worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
 for the first time starts from the ones last used in its project. The page
 loads Monaco from a CDN, so the browser needs internet access.
 

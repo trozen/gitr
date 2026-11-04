@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Prototype of `gitr serve`: a web diff viewer for many repos and worktrees.
+"""gitr-serve: the gitr diff view and review in the browser, for many repos and
+their worktrees.
 
-Run:  python3 web/server.py [--port 8765] [repo ...]
+Run:  gitr-serve [--port 4487] [repo ...]     (from a checkout: python3 gitr_web/server.py)
 With no repo arguments the project list is read from
 ~/.config/gitr/projects.json:  {"projects": ["~/dev/a", {"path": "~/dev/b", "name": "b"}]}
 
@@ -27,9 +28,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# gitr imports tkinter at module level; the server never opens a window but
-# still needs Tk installed. Fine for the prototype, split out later.
+if not __package__:
+    # Run as a script from a checkout: gitr.py sits one level up. Installed,
+    # both are on the path already.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import gitr  # noqa: E402
 from gitr import (COMMENT_KINDS, ReviewStore, _diff_side,  # noqa: E402
                   _ExportItem, _format_export, _match_anchor,
                   _pair_lines_for_word_diff, _read_text_safe,
@@ -38,7 +41,10 @@ from gitr import (COMMENT_KINDS, ReviewStore, _diff_side,  # noqa: E402
 STATIC_DIR = Path(__file__).resolve().parent / 'static'
 CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'projects.json'
 SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
-                 / 'gitr' / 'serve.json')
+                 / 'gitr' / 'web.json')
+# Where the prototype (`gitr serve`) kept them; read until web.json exists.
+OLD_SETTINGS_PATH = SETTINGS_PATH.with_name('serve.json')
+MIN_FILE_LINES = 7  # see the padding in Doc._add_file
 MAX_DOCS = 4  # a huge diff's document is tens of MB
 UNTRACKED_MAX_BYTES = 2 * 1024 * 1024
 TOKEN_RE = re.compile(r'\w+|[^\w\s]|\s+')
@@ -172,7 +178,11 @@ class Doc:
         return len(self.lines)
 
     def _add_file(self, df) -> None:
-        title = f'{df.old_path} -> {df.path}' if df.status == 'R' and df.old_path else df.path
+        title = f'{df.old_path} -> {df.path}' if df.status in 'RC' and df.old_path else df.path
+        similarity = next((dl.text.rsplit(' ', 1)[-1] for dl in df.lines if dl.kind == 'fileheader'
+                           and dl.text.startswith('similarity index ')), None)
+        if similarity:
+            title += f'  ({similarity} similar)'
         # The status letter leads the header so the browser's tokenizer can
         # tell a header from a +/-/space/@ line by its first character.
         start = self._push(f'{df.status} {title}', K_FILE)
@@ -219,10 +229,18 @@ class Doc:
                 self._push(dl.text, K_CTX, old=dl.old_line_no, new=dl.new_line_no,
                            anchor=dl.new_line_no)
         flush()
-        # git prints only header lines for an empty new or deleted file;
-        # without a note the bare header looks like something is missing.
-        if len(self.lines) == body_start and df.status in ('A', 'D'):
-            self._push('(empty file)', K_META)
+        # git prints only header lines for an empty new or deleted file, a
+        # pure rename or copy, or a mode change; without a note the bare
+        # header looks like something is missing.
+        if len(self.lines) == body_start:
+            note = _header_only_note(df)
+            if note:
+                self._push(note, K_META)
+        # The minimap labels each file with its name in a box ~7 lines tall
+        # (9px font x 1.5 at 2px per line); a shorter file would have the
+        # next file's label drawn over its own.
+        while len(self.lines) - start + 1 < MIN_FILE_LINES:
+            self._push('', K_META)
         self.files.append({'path': df.path, 'oldPath': df.old_path, 'status': df.status,
                            'add': adds, 'del': dels, 'start': start,
                            'end': len(self.lines)})
@@ -323,6 +341,20 @@ class Doc:
             col_new += _u16len(t_new)
 
 
+def _header_only_note(df) -> str:
+    modes = {dl.text[:8]: dl.text[9:] for dl in df.lines
+             if dl.kind == 'fileheader' and dl.text.startswith(('old mode ', 'new mode '))}
+    if len(modes) == 2:
+        return f"(mode {modes['old mode']} -> {modes['new mode']})"
+    if df.status in ('A', 'D'):
+        return '(empty file)'
+    if df.status == 'R':
+        return '(renamed, no content changes)'
+    if df.status == 'C':
+        return '(copied, no content changes)'
+    return ''
+
+
 def _nws_tokens(text: str) -> tuple:
     return tuple(t for t in TOKEN_RE.findall(text) if not t.isspace())
 
@@ -396,7 +428,8 @@ class State:
 
     def _load_settings(self) -> dict:
         try:
-            obj = json.loads(SETTINGS_PATH.read_text())
+            path = SETTINGS_PATH if SETTINGS_PATH.exists() else OLD_SETTINGS_PATH
+            obj = json.loads(path.read_text())
         except (OSError, ValueError):
             obj = {}
         if not isinstance(obj, dict):
@@ -633,7 +666,7 @@ def write_review_md(wt: str, items: 'list[_ExportItem]') -> None:
         tmp.write_text(_format_export(items, list(COMMENT_KINDS)) + '\n')
         tmp.replace(path)
     except OSError as e:
-        print(f'gitr serve: cannot write {path}: {e}', file=sys.stderr)
+        print(f'gitr-serve: cannot write {path}: {e}', file=sys.stderr)
 
 
 def merge_base(wt: str, base: str) -> str:
@@ -812,7 +845,7 @@ def supervise() -> None:
     the next save instead of ending it. The page files are read from disk on
     every request and need no restart."""
     here = Path(__file__).resolve()
-    watched = [here, here.parent.parent / 'gitr.py']
+    watched = [here, Path(gitr.__file__).resolve()]
 
     def stamp() -> tuple:
         out = []
@@ -834,7 +867,7 @@ def supervise() -> None:
             child = subprocess.Popen(cmd, env=env)
             while stamp() == seen:
                 time.sleep(0.5)
-            print('gitr serve: source changed, restarting', file=sys.stderr)
+            print('gitr-serve: source changed, restarting', file=sys.stderr)
             child.terminate()
             child.wait()
     except KeyboardInterrupt:
@@ -846,23 +879,55 @@ def supervise() -> None:
             child.wait()
 
 
+def tilde(path: str) -> str:
+    path = os.path.realpath(os.path.expanduser(path))
+    home = os.path.expanduser('~')
+    return '~' + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+def config_template(args_repos: list[str]) -> str:
+    """projects.json for the repos named, else the one the cwd is in, else
+    an example. Paths under the home directory are written with ~."""
+    paths = [tilde(p) for p in args_repos]
+    if not paths:
+        try:
+            paths = [tilde(git(os.getcwd(), 'rev-parse', '--show-toplevel').strip())]
+        except GitError:
+            pass
+    projects: list = paths or ['~/dev/repo-a', {'path': '~/dev/repo-b', 'name': 'b'}]
+    return json.dumps({'projects': projects}, indent=2)
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description='gitr web prototype')
+    ap = argparse.ArgumentParser(prog='gitr-serve', description='gitr diff view and review in the browser')
     ap.add_argument('repos', nargs='*', help=f'repositories (default: {CONFIG_PATH})')
     ap.add_argument('--host', default='127.0.0.1')
-    ap.add_argument('--port', type=int, default=8765)
+    ap.add_argument('--port', type=int, default=4487)  # "gitr" on a phone keypad
     ap.add_argument('--reload', action='store_true',
                     help='restart when server.py or gitr.py changes (for development)')
+    ap.add_argument('--print-config', action='store_true',
+                    help=f'print a {CONFIG_PATH.name} for the given repos (or the current one) '
+                         f'to stdout, to save as {CONFIG_PATH}')
     a = ap.parse_args()
+    if a.print_config:
+        print(config_template(a.repos))
+        # stderr, so a redirect to the config file gets the JSON alone
+        print(f'gitr-serve: save as {CONFIG_PATH}, e.g. with: '
+              f'gitr-serve --print-config ... > {CONFIG_PATH}', file=sys.stderr)
+        return
     if a.reload and not os.environ.get(RELOAD_CHILD_ENV):
         return supervise()
     repos = load_repos(a.repos)
     if not repos:
-        sys.exit(f'gitr serve: no repositories given and none in {CONFIG_PATH}')
+        sys.exit(f'gitr-serve: no repositories given and none in {CONFIG_PATH}\n'
+                 f'  create it with: gitr-serve --print-config [repo ...] > {CONFIG_PATH}')
     Handler.state = State(repos)
     ALLOWED_HOSTS.add(a.host.lower())
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f'gitr serve: http://{a.host}:{a.port}/  ({len(repos)} projects)', file=sys.stderr)
+    print(f'gitr-serve: http://{a.host}:{a.port}/', file=sys.stderr)
+    width = max(len(r['name']) for r in repos)
+    for r in repos:
+        print(f"  {r['name']:<{width}}  {tilde(r['path'])}", file=sys.stderr)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

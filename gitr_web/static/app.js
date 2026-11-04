@@ -76,7 +76,7 @@ function init() {
       { token: 'inserted', foreground: '50fa7b' },
       { token: 'deleted', foreground: 'ff5555' },
       { token: 'hunk', foreground: 'ffb86c' },
-      { token: 'fileheader', foreground: 'bd93f9', fontStyle: 'bold' },
+      { token: 'fileheader', foreground: 'ffffff', fontStyle: 'bold' },  // white, as the minimap's file labels
       { token: 'context', foreground: 'f8f8f2' },
       { token: 'meta', foreground: '6272a4' },
       { token: 'reindent', foreground: '6272a4' },  // gitr's colour for it
@@ -368,8 +368,15 @@ function foldingRanges() {
 
 // --decorations ----------------------------------------------------------
 
-const LINE_CLASS = { a: 'l-add', r: 'l-rem', f: 'l-file', h: 'l-head' };
-const MARGIN_CLASS = { f: 'l-file', h: 'l-head' };
+// 'g' is not a server kind: the second line of a file's header band, which
+// is the file's first hunk header (or the empty line of a hunkless file).
+// Only hunk headers further down are drawn as plain separated lines.
+const LINE_CLASS = { a: 'l-add', r: 'l-rem', f: 'l-file', g: 'l-file2', h: 'l-head' };
+const MARGIN_CLASS = { f: 'l-file', g: 'l-file2', h: 'l-head' };
+const decoKind = (ln) => {
+  const k = doc.kinds[ln - 1];
+  return k === 'h' && doc.kinds[ln - 2] === 'f' ? 'g' : k;
+};
 
 // Unlike the line backgrounds these cover the whole document (one per
 // file), since the minimap shows all of it.
@@ -416,7 +423,7 @@ function updateDecorations(force) {
   const from = Math.max(1, top - DECO_MARGIN), to = Math.min(n, bottom + DECO_MARGIN);
   decoWindow = [from, to];
   const list = [];
-  let runStart = from, runKind = doc.kinds[from - 1];
+  let runStart = from, runKind = decoKind(from);
   const flush = (end) => {
     const cls = LINE_CLASS[runKind];
     if (cls) list.push({ range: new monaco.Range(runStart, 1, end, 1),
@@ -424,10 +431,10 @@ function updateDecorations(force) {
                                     marginClassName: MARGIN_CLASS[runKind] } });
   };
   for (let ln = from + 1; ln <= to; ln++) {
-    const k = doc.kinds[ln - 1];
-    // Each file header is its own run: its top border separates files, and
-    // an empty file's header is directly followed by the next one.
-    if (k !== runKind || k === 'f') { flush(ln - 1); runStart = ln; runKind = k; }
+    const k = decoKind(ln);
+    // File and hunk headers are runs of their own: each draws its line
+    // above, and an empty file's header is directly followed by the next.
+    if (k !== runKind || k === 'f' || k === 'h') { flush(ln - 1); runStart = ln; runKind = k; }
   }
   flush(to);
   decos.set(list);
@@ -522,7 +529,7 @@ function renderFiles() {
           el('span', 'n n-rem', f.del ? '-' + f.del : ''),
           el('span', 'st st-' + f.status, f.status),
         ]);
-        row.title = f.oldPath && f.status === 'R' ? `${f.oldPath} -> ${f.path}` : f.path;
+        row.title = f.oldPath && 'RC'.includes(f.status) ? `${f.oldPath} -> ${f.path}` : f.path;
         row.addEventListener('click', () => jumpToFile(i));
         into.append(row);
         fileRows[i] = row;

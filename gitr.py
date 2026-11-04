@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """gitr - lightweight Git diff viewer"""
 
+# Annotations stay unevaluated, so the few naming Tk types do not need
+# tkinter at import time (see the import below).
+from __future__ import annotations
+
 import argparse
 import bisect
 import difflib
@@ -13,14 +17,21 @@ import subprocess
 import sys
 import textwrap
 import time
-import tkinter as tk
 from collections import deque
 from itertools import accumulate
-from tkinter import font as tkfont
-from tkinter import messagebox
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Only the window needs Tk. gitr-serve imports this module for the parser and
+# the review store on machines that may lack python3-tk, and --export
+# never opens a window.
+try:
+    import tkinter as tk
+    from tkinter import font as tkfont
+    from tkinter import messagebox
+except ImportError:
+    tk = tkfont = messagebox = None
 
 _CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'config.json'
 
@@ -308,7 +319,7 @@ class ReviewStore:
     """
 
     def __init__(self, gitr_dir: 'Path | None' = None) -> None:
-        # gitr serve passes the worktree's .gitr; the window uses the cwd's repo.
+        # gitr-serve passes the worktree's .gitr; the window uses the cwd's repo.
         gitr_dir = gitr_dir or _find_gitr_dir()
         self._gitr_dir = gitr_dir
         self._path = (gitr_dir / 'review.json') if gitr_dir else None
@@ -343,7 +354,7 @@ class ReviewStore:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            # gitr serve and a gitr window may both use this file; a reader
+            # gitr-serve and a gitr window may both use this file; a reader
             # must never see it half written.
             tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
             tmp.write_text(json.dumps({'files': self._data}, indent=2))
@@ -444,6 +455,8 @@ class ReviewStore:
 _FILEHEADER_PREFIXES = (
     'diff ', 'index ', '--- ', '+++ ',
     'new file', 'deleted file', 'old mode', 'new mode', 'rename ',
+    # a renamed or copied file with changes (copies only with git diff -C)
+    'similarity index ', 'dissimilarity index ', 'copy from ', 'copy to ',
 )
 
 
@@ -521,6 +534,9 @@ def parse_diff(text: str) -> list[DiffFile]:
                 elif raw.startswith('rename from '):
                     current.status = 'R'
                     current.old_path = raw[len('rename from '):]
+                elif raw.startswith('copy from '):
+                    current.status = 'C'
+                    current.old_path = raw[len('copy from '):]
                 elif raw.startswith('index '):
                     current.index = raw
 
@@ -1614,6 +1630,7 @@ class App:
         self._diff.tag_configure('status_M',    foreground=C['status_M'])
         self._diff.tag_configure('status_D',    foreground=C['status_D'])
         self._diff.tag_configure('status_R',    foreground=C['status_R'])
+        self._diff.tag_configure('status_C',    foreground=C['status_R'])
         self._diff.tag_configure('hover',       background=self._ruler_bg)
         self._diff.tag_configure('hover_line',  background=_blend(C['topbar_bg'], 0.72))
         self._diff.tag_configure('repaint',     background=C['bg'])
@@ -1626,6 +1643,7 @@ class App:
         self._flist.tag_configure('status_M',  foreground=C['status_M'])
         self._flist.tag_configure('status_D',  foreground=C['status_D'])
         self._flist.tag_configure('status_R',  foreground=C['status_R'])
+        self._flist.tag_configure('status_C',  foreground=C['status_R'])
         self._flist.tag_configure('stats',     foreground=C['subdued'])
         self._flist.tag_configure('dir',       foreground=C['subdued'])
         for _kind, (_col, _m) in COMMENT_KINDS.items():
@@ -4555,6 +4573,9 @@ def main() -> None:
         print('gitr: no changes')
         sys.exit(0)
 
+    if tk is None:
+        sys.exit('gitr: the window needs tkinter (e.g. the python3-tk package); '
+                 '--export works without it')
     root = tk.Tk()
     cwd = Path(os.getcwd())
     try:

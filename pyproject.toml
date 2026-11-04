@@ -10,6 +10,11 @@ requires-python = ">=3.10"
 
 [project.scripts]
 gitr = "gitr:main"
+gitr-serve = "gitr_web.server:main"
 
 [tool.setuptools]
 py-modules = ["gitr"]
+packages = ["gitr_web"]
+
+[tool.setuptools.package-data]
+gitr_web = ["static/*.html", "static/*.js", "static/*.css", "static/*.webmanifest", "static/icons/*.png"]

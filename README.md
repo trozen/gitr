@@ -56,11 +56,23 @@ from another machine through an SSH tunnel rather than exposing the port:
 ssh -L 8765:127.0.0.1:8765 remote-host    # then open http://127.0.0.1:8765/
 ```
 
+Chrome can install the page as an app with its own window (the install icon
+in the address bar, or menu > Cast, save and share > Install page). The app
+belongs to the address it was installed from, port included, so keep the
+tunnel on the same local port. To install apps from two machines, reach them
+on different local ports (e.g. `ssh -L 8766:127.0.0.1:8765 remote-host` for
+the remote one); each app is named after its server's hostname.
+
 Pick a worktree on the left; the base defaults to `main` / `master` and can be
 any ref. The base and the untracked / wrap options are remembered per
 worktree on the server (`~/.local/state/gitr/serve.json`); a worktree opened
 for the first time starts from the ones last used in its project. The page
 loads Monaco from a CDN, so the browser needs internet access.
+
+As in gitr, "collapse re-indent" shows a removed and added line that differ
+only in whitespace as one dimmed `~` line, and the right-click menu copies
+the file path, `path:line`, or `path:line` with the line (or the selection
+holding it) in a `diff` code fence for pasting into an agent's chat.
 
 Comment on a line with the `+` that appears in the gutter on hover, or
 right-click a line for gitr's one-click presets; click a comment to edit it.

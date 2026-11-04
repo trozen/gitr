@@ -13,6 +13,7 @@ window.MonacoEnvironment = {
 const DECO_MARGIN = 3000;      // lines decorated above and below the viewport
 const WORD_WINDOW = 4000;      // lines per word-diff request
 const POLL_MS = 3000;
+const PROJECTS_MS = 10000;
 // File and hunk headers share one background with Monaco's sticky header,
 // so a header looks the same pinned at the top and in place.
 const HEADER_BG = '#433d59';
@@ -30,6 +31,8 @@ let monaco, editor, decos, wordDecos, fileDecos;
 let doc = null;                // current diff payload
 let fileStarts = [];           // sorted 1-based start line per file
 let fileRows = [];             // DOM rows parallel to doc.files
+let fileDirs = [];             // per file, its folder rows from the top: {path, row, kids}
+const collapsedDirs = new Map(); // worktree -> Set of collapsed folder paths
 let activeFile = -1;
 let pinned = null;             // {file, scrollTop} after a click, see onScroll
 let decoWindow = [0, 0];
@@ -61,7 +64,7 @@ function init() {
     tokenize(line) {
       const c = line[0];
       const scope = c === '+' ? 'inserted' : c === '-' ? 'deleted' : c === ' ' ? 'context'
-        : c === '@' ? 'hunk' : c === '\\' ? 'meta'
+        : c === '@' ? 'hunk' : c === '\\' ? 'meta' : c === '~' ? 'reindent'
         : /^[AMDRCT] /.test(line) ? 'fileheader' : 'meta';
       return { tokens: [{ startIndex: 0, scopes: scope }], endState: lineState };
     },
@@ -76,6 +79,7 @@ function init() {
       { token: 'fileheader', foreground: 'bd93f9', fontStyle: 'bold' },
       { token: 'context', foreground: 'f8f8f2' },
       { token: 'meta', foreground: '6272a4' },
+      { token: 'reindent', foreground: '6272a4' },  // gitr's colour for it
     ],
     colors: {
       'editor.background': '#282a36', 'editor.foreground': '#f8f8f2',
@@ -122,6 +126,7 @@ function init() {
   });
   $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition()));
   $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
+  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
   $('wrap').checked = true;
   $('wrap').addEventListener('change', () => {
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
@@ -130,6 +135,9 @@ function init() {
   initSash();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
+  setInterval(refreshProjects, PROJECTS_MS);
+  addEventListener('focus', refreshProjects);
+  document.addEventListener('visibilitychange', refreshProjects);
 }
 
 function initSash() {
@@ -155,30 +163,9 @@ async function api(path, params) {
 // --projects -------------------------------------------------------------
 
 async function loadProjects() {
-  const projects = await api('/api/projects', {});
-  const box = $('projects');
-  box.textContent = '';
+  renderProjects(await api('/api/projects', {}));
   const hash = new URLSearchParams(location.hash.slice(1));
-  let initial = null;
-  for (const p of projects) {
-    box.append(el('div', 'row project', [el('span', 'grow', p.name)]));
-    if (p.error) box.append(el('div', 'err', p.error));
-    for (const w of p.worktrees) {
-      const label = w.branch || (w.head ? w.head + ' (detached)' : '?');
-      const rel = w.path === p.path ? '' : w.path.split('/').pop();
-      const row = el('div', 'row wt', [el('span', 'grow branch', label), el('span', 'dim', rel)]);
-      row.title = w.path;
-      row.dataset.wt = w.path;
-      worktrees.set(w.path, { p, w });
-      row.addEventListener('click', () => {
-        const st = settingsFor(w.path);
-        applyOptions(st);
-        load(w.path, st.base, p.defaultBase, w.position);
-      });
-      box.append(row);
-      if (hash.get('wt') === w.path) initial = w.path;
-    }
-  }
+  const initial = worktrees.has(hash.get('wt')) ? hash.get('wt') : null;
   if (initial) {
     // A link names its base and untracked option; the rest comes from what
     // was saved for the worktree.
@@ -191,21 +178,90 @@ async function loadProjects() {
   }
 }
 
+let projectsSig = '';
+
+function renderProjects(projects) {
+  // Settings and positions changed in this page may not have reached the
+  // server yet; the copies here are the newer ones.
+  for (const p of projects) {
+    for (const w of p.worktrees) {
+      const known = worktrees.get(w.path);
+      if (!known) continue;
+      if (known.p.settings) p.settings = known.p.settings;
+      if (known.w.settings) w.settings = known.w.settings;
+      if ('position' in known.w) w.position = known.w.position;
+    }
+  }
+  projectsSig = listSignature(projects);
+  worktrees.clear();
+  const box = $('projects');
+  box.textContent = '';
+  for (const p of projects) {
+    box.append(el('div', 'row project', [el('span', 'grow', p.name)]));
+    if (p.error) box.append(el('div', 'err', p.error));
+    for (const w of p.worktrees) {
+      const label = w.branch || (w.head ? w.head + ' (detached)' : '?');
+      const rel = w.path === p.path ? '' : w.path.split('/').pop();
+      const row = el('div', 'row wt', [el('span', 'grow branch', label), el('span', 'dim', rel)]);
+      row.title = w.path;
+      row.dataset.wt = w.path;
+      row.classList.toggle('active', w.path === current?.wt);
+      worktrees.set(w.path, { p, w });
+      row.addEventListener('click', () => {
+        const st = settingsFor(w.path);
+        applyOptions(st);
+        load(w.path, st.base, p.defaultBase, w.position);
+      });
+      box.append(row);
+    }
+  }
+  updateRemoved();
+}
+
+// What the list shows; settings and positions are not part of it.
+function listSignature(projects) {
+  return JSON.stringify(projects.map((p) => [p.name, p.path, p.error,
+    p.worktrees.map((w) => [w.path, w.branch, w.head, w.detached])]));
+}
+
+// Agents add and remove worktrees and switch branches; the list follows,
+// every PROJECTS_MS while the page is visible and when it comes back.
+let refreshing = false;
+async function refreshProjects() {
+  if (document.hidden || refreshing) return;
+  refreshing = true;
+  try {
+    const projects = await api('/api/projects', {});
+    if (listSignature(projects) !== projectsSig) renderProjects(projects);
+  } catch { /* transient; the next refresh retries */ }
+  refreshing = false;
+}
+
+function updateRemoved() {
+  const gone = !!shown && !worktrees.has(shown.wt);
+  $('removed').hidden = !gone;
+  if (gone) $('changed').hidden = true;
+}
+
 // Saved for the worktree, else the last used in its project (a new agent
 // worktree usually wants the same base), else the defaults.
 function settingsFor(wt) {
   const { p, w } = worktrees.get(wt);
-  return { base: p.defaultBase, untracked: false, wrap: true, ...(p.settings || {}), ...(w.settings || {}) };
+  // gitr collapses re-indented lines by default too
+  return { base: p.defaultBase, untracked: false, wrap: true, reindent: true,
+           ...(p.settings || {}), ...(w.settings || {}) };
 }
 
 function applyOptions(st) {
   $('untracked').checked = st.untracked;
+  $('reindent').checked = st.reindent;
   $('wrap').checked = st.wrap;
   editor.updateOptions({ wordWrap: st.wrap ? 'on' : 'off' });
 }
 
 async function saveSettings(wt, base) {
-  const st = { base, untracked: $('untracked').checked, wrap: $('wrap').checked };
+  const st = { base, untracked: $('untracked').checked, wrap: $('wrap').checked,
+               reindent: $('reindent').checked };
   const entry = worktrees.get(wt);
   if (entry) { entry.w.settings = st; entry.p.settings = st; }
   try { await post('/api/settings', { wt, ...st }); } catch (e) { flash('settings not saved: ' + e.message); }
@@ -223,12 +279,13 @@ async function load(wt, base, defaultBase, restore) {
   $('base').value = base;
   $('crumb').textContent = wt;
   $('changed').hidden = true;
+  $('removed').hidden = true;
   shown = null;
   showProgress(`loading diff against ${base} ...`);
   const t0 = performance.now();
   let d;
   try {
-    d = await api('/api/diff', { wt, base, untracked });
+    d = await api('/api/diff', { wt, base, untracked, reindent: $('reindent').checked ? '1' : '0' });
   } catch (e) {
     if (gen === wordGen) showProgress('error: ' + e.message);
     return;
@@ -285,7 +342,7 @@ function lineNumber(n) {
   if (!doc) return '';
   const k = doc.kinds[n - 1];
   const o = doc.oldNo[n - 1], w = doc.newNo[n - 1];
-  if (k === 'c') return String(o).padStart(numWidth) + ' ' + String(w).padStart(numWidth);
+  if (k === 'c' || k === 'i') return String(o).padStart(numWidth) + ' ' + String(w).padStart(numWidth);
   if (k === 'r') return String(o).padStart(numWidth) + ' '.repeat(numWidth + 1);
   if (k === 'a') return ' '.repeat(numWidth + 1) + String(w).padStart(numWidth);
   return '';
@@ -420,27 +477,88 @@ async function fetchWords(gen) {
 
 // --file list ------------------------------------------------------------
 
+// A tree like gitr's (and VS Code's compact folders): a directory holding
+// only one subdirectory shares its row ("web/static"), and siblings are in
+// diff order, so the list reads in the order the diff scrolls.
+function buildTree(files) {
+  const node = () => ({ dirs: new Map(), files: [], first: Infinity });
+  const root = node();
+  files.forEach((f, i) => {
+    const parts = f.path.split('/');
+    let n = root;
+    for (const p of parts.slice(0, -1)) {
+      if (!n.dirs.has(p)) n.dirs.set(p, node());
+      n = n.dirs.get(p);
+      n.first = Math.min(n.first, i);
+    }
+    n.files.push({ name: parts[parts.length - 1], i });
+  });
+  return root;
+}
+
 function renderFiles() {
   const box = $('files');
   box.textContent = '';
+  fileRows = new Array(doc.files.length);
+  fileDirs = new Array(doc.files.length);
+  const collapsed = collapsedDirs.get(shown.wt) || new Set();
+  collapsedDirs.set(shown.wt, collapsed);
+  const guides = (depth) => Array.from({ length: depth }, () => el('span', 'guide'));
+
+  const walk = (n, depth, prefix, into, ancestors) => {
+    const children = [
+      ...n.files.map((f) => ({ first: f.i, file: f })),
+      ...[...n.dirs].map(([name, d]) => ({ first: d.first, name, dir: d })),
+    ].sort((a, b) => a.first - b.first);
+    for (const c of children) {
+      if (c.file) {
+        const i = c.file.i, f = doc.files[i];
+        const row = el('div', 'row file', [
+          ...guides(depth), el('span', 'chev-space'),
+          // The comment count follows the name, where the eye already is.
+          el('span', 'grow namecell', [el('span', 'name st-' + f.status, c.file.name),
+                                       el('span', 'n n-cmt', '')]),
+          el('span', 'n n-add', f.add ? '+' + f.add : ''),
+          el('span', 'n n-rem', f.del ? '-' + f.del : ''),
+          el('span', 'st st-' + f.status, f.status),
+        ]);
+        row.title = f.oldPath && f.status === 'R' ? `${f.oldPath} -> ${f.path}` : f.path;
+        row.addEventListener('click', () => jumpToFile(i));
+        into.append(row);
+        fileRows[i] = row;
+        fileDirs[i] = ancestors;
+        continue;
+      }
+      let name = c.name, d = c.dir;
+      while (!d.files.length && d.dirs.size === 1) {
+        const [sub, subNode] = d.dirs.entries().next().value;
+        name += '/' + sub;
+        d = subNode;
+      }
+      const path = prefix + name;
+      const row = el('div', 'row dir', [...guides(depth), el('span', 'chev'), el('span', 'grow', name)]);
+      row.title = path;
+      const kids = el('div', 'kids');
+      const entry = { path, row, kids };
+      row.addEventListener('click', () => {
+        if (collapsed.has(path)) collapsed.delete(path); else collapsed.add(path);
+        showCollapsed(entry, collapsed.has(path));
+        setActive(activeFile, true);
+      });
+      showCollapsed(entry, collapsed.has(path));
+      into.append(row, kids);
+      walk(d, depth + 1, path + '/', kids, [...ancestors, entry]);
+    }
+  };
   const frag = document.createDocumentFragment();
-  fileRows = doc.files.map((f, i) => {
-    const slash = f.path.lastIndexOf('/');
-    const row = el('div', 'row file', [
-      el('span', 'st st-' + f.status, f.status),
-      el('span', 'grow', [el('span', '', f.path.slice(slash + 1)),
-                          el('span', 'dir', slash >= 0 ? '  ' + f.path.slice(0, slash) : '')]),
-      el('span', 'n n-add', f.add ? '+' + f.add : ''),
-      el('span', 'n n-rem', f.del ? '-' + f.del : ''),
-      el('span', 'n n-cmt', ''),
-    ]);
-    row.title = f.oldPath && f.status === 'R' ? `${f.oldPath} -> ${f.path}` : f.path;
-    row.addEventListener('click', () => jumpToFile(i));
-    frag.append(row);
-    return row;
-  });
+  walk(buildTree(doc.files), 0, '', frag, []);
   box.append(frag);
   $('files-count').textContent = doc.files.length ? `(${doc.files.length})` : '';
+}
+
+function showCollapsed(entry, isCollapsed) {
+  entry.row.classList.toggle('collapsed', isCollapsed);
+  entry.kids.hidden = isCollapsed;
 }
 
 function jumpToFile(i) {
@@ -465,7 +583,7 @@ function viewPosition() {
   if (!doc || !top || !doc.files.length) return null;
   const f = doc.files[Math.max(0, upperBound(fileStarts, top) - 1)];
   for (let ln = top; ln <= f.end && ln < top + 50; ln++)
-    if ('ac'.includes(doc.kinds[ln - 1])) return { file: f.path, at: doc.newNo[ln - 1] - (ln - top), off: 0 };
+    if ('aci'.includes(doc.kinds[ln - 1])) return { file: f.path, at: doc.newNo[ln - 1] - (ln - top), off: 0 };
   return { file: f.path, at: 0, off: top - f.start };
 }
 
@@ -475,7 +593,7 @@ function scrollToPosition(pos) {
   let target = Math.min(f.start + (pos.off || 0), f.end);
   if (pos.at) {
     for (let ln = f.start; ln <= f.end; ln++) {
-      if ('ac'.includes(doc.kinds[ln - 1]) && doc.newNo[ln - 1] >= pos.at) {
+      if ('aci'.includes(doc.kinds[ln - 1]) && doc.newNo[ln - 1] >= pos.at) {
         target = ln - (doc.newNo[ln - 1] - pos.at);
         break;
       }
@@ -531,12 +649,17 @@ function onScroll() {
   setActive(upperBound(fileStarts, top) - 1);
 }
 
-function setActive(i) {
-  if (i === activeFile) return;
-  fileRows[activeFile]?.classList.remove('active');
+// In a collapsed folder the current file is not visible; its outermost
+// collapsed folder is highlighted instead.
+function setActive(i, force) {
+  if (i === activeFile && !force) return;
+  $('files').querySelector('.row.active')?.classList.remove('active');
   activeFile = i;
-  const row = fileRows[i];
-  if (row) { row.classList.add('active'); row.scrollIntoView({ block: 'nearest' }); }
+  if (!fileRows[i]) return;
+  const hidden = fileDirs[i].find((d) => d.kids.hidden);
+  const row = hidden ? hidden.row : fileRows[i];
+  row.classList.add('active');
+  row.scrollIntoView({ block: 'nearest' });
 }
 
 function upperBound(arr, x) {
@@ -557,7 +680,7 @@ const KIND_MARK = { note: '>>', good: '++', bad: '!!' };
 const SEVERITY = { good: 0, note: 1, bad: 2 };
 const KIND_COLOR = { note: '#f1fa8c', good: '#8be9fd', bad: '#ff79c6' };
 const PRESETS = [['okay', 'good'], ['wtf', 'bad'], ['why?', 'note'], ['nice', 'good'], ['no', 'bad']];
-const commentable = (ln) => doc && 'arc'.includes(doc.kinds[ln - 1] || 'x');
+const commentable = (ln) => doc && 'arci'.includes(doc.kinds[ln - 1] || 'x');
 const keyStr = (c) => (c.key ? c.key.join('\0') + '\0' + c.file : 'new\0' + c.line);
 
 function initComments() {
@@ -578,7 +701,7 @@ function initComments() {
   });
   editor.onContextMenu((e) => {
     const ln = e.target.position?.lineNumber;
-    if (!ln || !commentable(ln)) return;
+    if (!ln || !doc || !doc.files.length) return;
     // Monaco's own menu is off, so nothing else stops the browser's.
     e.event.preventDefault();
     showMenu(ln, e.event.posx, e.event.posy);
@@ -631,12 +754,24 @@ function applyComments(r) {
   comments = r.comments;
   commentStamp = r.stamp;
   const T = monaco.editor;
-  commentDecos.set(comments.filter((c) => !c.orphan).map((c) => ({
+  // An orphan sits after its file's last line, which is not the line it
+  // was written on: marked in the minimap and scrollbar, but no gutter bar
+  // claiming that line.
+  const list = comments.filter((c) => !c.orphan).map((c) => ({
     range: new monaco.Range(c.line, 1, c.line, 1),
-    options: { linesDecorationsClassName: 'c-mark c-' + c.kind,
-               overviewRuler: { color: KIND_COLOR[c.kind], position: T.OverviewRulerLane.Left },
-               minimap: { color: KIND_COLOR[c.kind], position: T.MinimapPosition.Gutter } },
-  })));
+    options: { linesDecorationsClassName: 'c-mark c-' + c.kind },
+  }));
+  // Several comments can share a line (orphans of one file all sit on its
+  // last line); their marks would cover each other, so one mark per line
+  // in the colour of the most severe.
+  const worst = new Map();
+  for (const c of comments)
+    if (!worst.has(c.line) || SEVERITY[c.kind] > SEVERITY[worst.get(c.line)]) worst.set(c.line, c.kind);
+  for (const [line, kind] of worst)
+    list.push({ range: new monaco.Range(line, 1, line, 1),
+                options: { overviewRuler: { color: KIND_COLOR[kind], position: T.OverviewRulerLane.Left },
+                           minimap: { color: KIND_COLOR[kind], position: T.MinimapPosition.Inline } } });
+  commentDecos.set(list);
   const perFile = new Map();  // file index -> {n, kind}, kind the most severe
   for (const c of comments) {
     const i = upperBound(fileStarts, c.line) - 1;
@@ -838,14 +973,26 @@ function showMenu(ln, x, y) {
     it.addEventListener('click', () => { hideMenu(); fn(); });
     m.append(it);
   };
-  item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c));
-  m.append(el('div', 'c-sep'));
-  for (const [text, kind] of PRESETS)
-    item(`${KIND_MARK[kind]} ${text}`, () => saveComment(c || { line: ln }, text, kind), 'c-' + kind);
-  if (c) {
+  if (commentable(ln)) {
+    item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c));
     m.append(el('div', 'c-sep'));
-    item('Delete comment', () => saveComment(c, '', c.kind));
+    for (const [text, kind] of PRESETS)
+      item(`${KIND_MARK[kind]} ${text}`, () => saveComment(c || { line: ln }, text, kind), 'c-' + kind);
+    if (c) {
+      m.append(el('div', 'c-sep'));
+      item('Delete comment', () => saveComment(c, '', c.kind));
+    }
+    m.append(el('div', 'c-sep'));
   }
+  const path = doc.files[Math.max(0, upperBound(fileStarts, ln) - 1)].path;
+  const loc = locationOf(ln);
+  item(`Copy "${path}"`, () => copyText(path, `copied ${path}`));
+  if (loc !== path) item(`Copy "${loc}"`, () => copyText(loc, `copied ${loc}`));
+  const [from, to] = linesAround(ln);
+  const n = to - from + 1;
+  // A file header alone has nothing worth quoting.
+  if (n > 1 || doc.kinds[from - 1] !== 'f')
+    item(`Copy "${locationOf(from)}" + ${n} line${n === 1 ? '' : 's'}`, () => copyLines(from, to));
   const wrap = $('editor-wrap').getBoundingClientRect();
   m.hidden = false;
   m.style.left = Math.min(x - wrap.left, wrap.width - m.offsetWidth - 4) + 'px';
@@ -853,6 +1000,74 @@ function showMenu(ln, x, y) {
 }
 
 function hideMenu() { $('cmenu').hidden = true; }
+
+// --copying lines (gitr's "c", from the context menu) -----------------------
+//
+// "path:line" plus the lines, in a diff code fence: pasted bare into an
+// agent's chat (markdown) the +/- markers would read as list bullets.
+
+// The selection when it holds the line (a selection lingers after clicks
+// elsewhere, and copying it instead of the line at hand surprises), else
+// the line alone.
+function linesAround(ln) {
+  const sel = editor.getSelection();
+  if (sel && !sel.isEmpty()) {
+    let end = sel.endLineNumber;
+    if (sel.endColumn === 1 && end > sel.startLineNumber) end--;  // ends at a line start
+    if (sel.startLineNumber <= ln && ln <= end) return [sel.startLineNumber, end];
+  }
+  return [ln, ln];
+}
+
+// gitr's location: the file and the new-side line number, a removed line
+// taking the number of the new-side line above it; headers give the path.
+function locationOf(ln) {
+  const f = doc.files[Math.max(0, upperBound(fileStarts, ln) - 1)];
+  for (let i = ln; i > f.start; i--) {
+    const k = doc.kinds[i - 1];
+    if ('aci'.includes(k)) return `${f.path}:${doc.newNo[i - 1]}`;
+    if (k === 'h') {
+      const m = /\+(\d+)/.exec(editor.getModel().getLineContent(i));
+      const no = m ? +m[1] - 1 : 0;
+      return no > 0 ? `${f.path}:${no}` : f.path;
+    }
+  }
+  return f.path;
+}
+
+// gitr's comment block: the kind's marker, continuation lines indented, a
+// moved comment marked with "~".
+function commentBlock(c) {
+  const lines = c.text.split('\n');
+  const first = (c.moved ? '~ ' : '  ') + KIND_MARK[c.kind] + ' ';
+  const rest = c.moved ? '~    ' : '     ';
+  return lines.map((l, i) => (i ? rest : first) + l).join('\n');
+}
+
+function copyLines(from, to) {
+  const model = editor.getModel();
+  const parts = [];
+  for (let ln = from; ln <= to; ln++) {
+    parts.push(model.getLineContent(ln));
+    // Comments between the copied lines come along, as in gitr, where a
+    // selection spans the comment rows.
+    if (ln < to) for (const c of comments) if (c.line === ln && !c.orphan) parts.push(commentBlock(c));
+  }
+  let text = parts.join('\n');
+  const longest = Math.max(0, ...(text.match(/`+/g) || []).map((r) => r.length));
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  text = `${fence}diff\n${text}\n${fence}`;
+  const loc = locationOf(from);
+  const n = to - from + 1;
+  copyText(`${loc}\n${text}\n`, `copied ${loc} + ${n} line${n === 1 ? '' : 's'}`);
+}
+
+async function copyText(text, msg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flash(msg);
+  } catch (e) { flash('copy failed: ' + e.message); }
+}
 
 async function copyForAgent() {
   if (!shown) return;
@@ -889,7 +1104,7 @@ function flash(msg) {
 // --change detection -----------------------------------------------------
 
 async function pollChanges() {
-  if (!shown || document.hidden) return;
+  if (!shown || document.hidden || !worktrees.has(shown.wt)) return;
   // A load started while the request was out replaces the doc, so its
   // answer no longer applies.
   const gen = wordGen, fp = doc.fingerprint;

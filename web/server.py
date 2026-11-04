@@ -16,6 +16,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -45,6 +46,9 @@ TOKEN_RE = re.compile(r'\w+|[^\w\s]|\s+')
 # Line kinds in the combined document, one char per line so the browser gets
 # a compact string instead of a list.
 K_FILE, K_HUNK, K_ADD, K_REM, K_CTX, K_META = 'f', 'h', 'a', 'r', 'c', 'm'
+# A removed + added pair that differs only in whitespace, shown once as
+# "~<new text>" (gitr's "collapse re-indented").
+K_REIND = 'i'
 
 
 # --git helpers ---------------------------------------------------------------
@@ -139,7 +143,8 @@ class Doc:
     """The whole diff as one text plus parallel per-line arrays (1-based
     line numbers in the browser map to index line-1 here)."""
 
-    def __init__(self, diff_files) -> None:
+    def __init__(self, diff_files, reindent: bool = False) -> None:
+        self.reindent = reindent
         self.lines: list[str] = []
         self.kinds: list[str] = []
         self.old_no: list[int] = []
@@ -151,6 +156,9 @@ class Doc:
         # Post-image line a comment on this line is stored under (a removed
         # line uses the position it sits at); 0 where no comment can go.
         self.anchor_no: list[int] = []
+        # Collapsed line -> (the removed line's text, its anchor): a comment
+        # stored for either side of the pair belongs on the one shown line.
+        self.reindent_src: dict[int, tuple[str, int]] = {}
         for df in diff_files:
             self._add_file(df)
 
@@ -174,14 +182,14 @@ class Doc:
             self._push('', K_HUNK)
         body_start = len(self.lines)
         adds = dels = 0
-        rem: list[int] = []
-        add: list[int] = []
+        # The current run of removed and added lines (with any "\ No newline
+        # at end of file" between them), emitted as a whole by flush().
+        run: list = []
 
         def flush() -> None:
-            nonlocal rem, add
-            if rem and add:
-                self.blocks.append((rem, add))
-            rem, add = [], []
+            if run:
+                self._emit_run(run)
+                run.clear()
 
         has_hunk = False
         for dl in df.lines:
@@ -193,19 +201,15 @@ class Doc:
                 has_hunk = True
                 self._push(dl.text, K_HUNK)
             elif k == 'removed':
-                if add:
+                if any(d.kind == 'added' for d in run):
                     flush()
-                rem.append(self._push(dl.text, K_REM, old=dl.old_line_no, anchor=dl.new_line_no))
+                run.append(dl)
                 dels += 1
             elif k == 'added':
-                ln = self._push(dl.text, K_ADD, new=dl.new_line_no, anchor=dl.new_line_no)
-                if rem:
-                    add.append(ln)
+                run.append(dl)
                 adds += 1
             elif dl.text.startswith('\\') and has_hunk:
-                # "\ No newline at end of file" sits between the removed and
-                # added versions of a file's last line; the pair stays a block.
-                self._push(dl.text, K_META)
+                run.append(dl)
             elif not has_hunk:
                 # The body of a hunkless file ("Binary files ... differ").
                 flush()
@@ -222,6 +226,52 @@ class Doc:
         self.files.append({'path': df.path, 'oldPath': df.old_path, 'status': df.status,
                            'add': adds, 'del': dels, 'start': start,
                            'end': len(self.lines)})
+
+    def _emit_run(self, run: list) -> None:
+        rems = [d for d in run if d.kind == 'removed']
+        adds = [d for d in run if d.kind == 'added']
+        actions = None
+        if self.reindent and rems and adds and _may_be_reindented(rems, adds):
+            actions = _pair_lines_for_word_diff([d.text[1:] for d in rems],
+                                                [d.text[1:] for d in adds])
+            if not any(a[0] == 'pair' and a[3] for a in actions):
+                actions = None
+        if actions is None:
+            rem_lns: list[int] = []
+            add_lns: list[int] = []
+            for d in run:
+                if d.kind == 'removed':
+                    rem_lns.append(self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no))
+                elif d.kind == 'added':
+                    add_lns.append(self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no))
+                else:
+                    self._push(d.text, K_META)
+            if rem_lns and add_lns:
+                self.blocks.append((rem_lns, add_lns))
+            return
+        # gitr's order: the pairing's, each changed pair as - then + with its
+        # own word-diff block, a whitespace-only pair as one "~" line.
+        ri, ai = iter(rems), iter(adds)
+        for act in actions:
+            if act[0] == 'pair':
+                old, new = next(ri), next(ai)
+                if act[3]:
+                    ln = self._push('~' + new.text[1:], K_REIND, old=old.old_line_no,
+                                    new=new.new_line_no, anchor=new.new_line_no)
+                    self.reindent_src[ln] = (old.text, old.new_line_no)
+                    continue
+                r = self._push(old.text, K_REM, old=old.old_line_no, anchor=old.new_line_no)
+                a = self._push(new.text, K_ADD, new=new.new_line_no, anchor=new.new_line_no)
+                self.blocks.append(([r], [a]))
+            elif act[0] == 'rem':
+                d = next(ri)
+                self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no)
+            else:
+                d = next(ai)
+                self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no)
+        for d in run:
+            if d.kind not in ('removed', 'added'):
+                self._push(d.text, K_META)
 
     def file_at(self, line: int) -> dict:
         lo, hi = 0, len(self.files)
@@ -271,6 +321,18 @@ class Doc:
                     out += (line_new, col_new, col_new + _u16len(t_new))
             col_old += _u16len(t_old)
             col_new += _u16len(t_new)
+
+
+def _nws_tokens(text: str) -> tuple:
+    return tuple(t for t in TOKEN_RE.findall(text) if not t.isspace())
+
+
+def _may_be_reindented(rems: list, adds: list) -> bool:
+    """Whether some removed and added line have the same non-space tokens.
+    The pairing that finds re-indented lines is quadratic per run; most runs
+    have no candidate and skip it."""
+    old = {_nws_tokens(d.text[1:]) for d in rems}
+    return any(_nws_tokens(d.text[1:]) in old for d in adds)
 
 
 def _u16len(s: str) -> int:
@@ -346,7 +408,7 @@ class State:
     def save_settings(self, req: dict) -> dict:
         wt, repo = self._find_worktree(str(req['wt']))
         settings = {'base': str(req['base']), 'untracked': bool(req.get('untracked')),
-                    'wrap': bool(req.get('wrap'))}
+                    'wrap': bool(req.get('wrap')), 'reindent': bool(req.get('reindent'))}
         with self._settings_lock:
             saved = self._load_settings()
             saved['worktrees'][wt] = settings
@@ -381,7 +443,7 @@ class State:
         except OSError as e:
             raise GitError(f'cannot save settings to {SETTINGS_PATH}: {e}')
 
-    def diff(self, wt: str, base: str, untracked: bool) -> dict:
+    def diff(self, wt: str, base: str, untracked: bool, reindent: bool = False) -> dict:
         wt = self.check_worktree(wt)
         t0 = time.perf_counter()
         mb = merge_base(wt, base)
@@ -395,7 +457,7 @@ class State:
         if untracked:
             text += untracked_diff(wt)
         t_git = time.perf_counter()
-        doc = Doc(parse_diff(text))
+        doc = Doc(parse_diff(text), reindent)
         t_doc = time.perf_counter()
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
@@ -460,7 +522,7 @@ class State:
                 if not 1 <= line <= len(doc.lines) or not doc.anchor_no[line - 1]:
                     raise GitError('no comment can go on this line')
                 file = doc.file_at(line)['path']
-                anchor, line_text = doc.anchor_no[line - 1], doc.lines[line - 1]
+                anchor, side, line_text = line_sides(doc, line)[0]
                 current = _read_text_safe(Path(wt) / file)
                 if current is None:
                     raise GitError(f'{file} cannot be read, so the comment cannot be anchored')
@@ -473,8 +535,7 @@ class State:
                 snap = store.write_snapshot(current)
                 if snap is None:
                     raise GitError(f'cannot write a snapshot to {wt}/.gitr')
-                store.add(file, snap, anchor, _diff_side(KIND_NAMES[doc.kinds[line - 1]]),
-                          line_text, text, kind)
+                store.add(file, snap, anchor, side, line_text, text, kind)
             out, items = resolve_comments(wt, doc, store)
             write_review_md(wt, items)
         return out
@@ -501,7 +562,21 @@ class State:
         return self._doc(wt, doc_id).word_ranges(first, last)
 
 
-KIND_NAMES = {K_ADD: 'added', K_REM: 'removed', K_CTX: 'context'}
+KIND_NAMES = {K_ADD: 'added', K_REM: 'removed', K_CTX: 'context', K_REIND: 'added'}
+
+
+def line_sides(doc: 'Doc', ln: int) -> 'list[tuple[int, str, str]]':
+    """(anchor, side, diff line text) a comment on this document line can be
+    stored under; a collapsed line stands for both its removed and added
+    line, the added one first."""
+    no = doc.anchor_no[ln - 1]
+    if not no:
+        return []
+    kind, text = doc.kinds[ln - 1], doc.lines[ln - 1]
+    if kind == K_REIND:
+        old_text, old_anchor = doc.reindent_src[ln]
+        return [(no, '+', '+' + text[1:]), (old_anchor, '-', old_text)]
+    return [(no, _diff_side(KIND_NAMES[kind]), text)]
 
 
 def review_stamp(wt: str) -> int:
@@ -532,10 +607,8 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
         if not alist:
             continue
         for ln in range(f['start'], f['end'] + 1):
-            no = doc.anchor_no[ln - 1]
-            if no:
-                kind = KIND_NAMES[doc.kinds[ln - 1]]
-                a = _match_anchor(alist, no, _diff_side(kind), doc.lines[ln - 1])
+            for no, side, text in line_sides(doc, ln):
+                a = _match_anchor(alist, no, side, text)
                 if a is not None:
                     add(a, ln, no, False)
         for a in alist:
@@ -596,10 +669,13 @@ def fingerprint(wt: str, merge_base: str, untracked: bool) -> str:
 
 # --http --------------------------------------------------------------------------
 
+APP_NAME = 'gitr - ' + socket.gethostname().split('.')[0]
+
 ALLOWED_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
 CONTENT_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
-                 '.css': 'text/css; charset=utf-8'}
+                 '.css': 'text/css; charset=utf-8', '.png': 'image/png',
+                 '.webmanifest': 'application/manifest+json'}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -641,7 +717,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/projects':
                 return self._json(self.state.projects())
             if url.path == '/api/diff':
-                return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1'))
+                return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1',
+                                                  q.get('reindent') == '1'))
             if url.path == '/api/words':
                 return self._json(self.state.word_ranges(q['wt'], q['id'],
                                                          int(q['from']), int(q['to'])))
@@ -699,7 +776,17 @@ class Handler(BaseHTTPRequestHandler):
         p = (STATIC_DIR / rel).resolve()
         if STATIC_DIR not in p.parents or not p.is_file():
             return self._send(HTTPStatus.NOT_FOUND, b'not found', 'text/plain')
-        self._send(200, p.read_bytes(), CONTENT_TYPES.get(p.suffix, 'application/octet-stream'))
+        body = p.read_bytes()
+        # The machine's name goes into the window title and the installed
+        # app's name: apps installed from two machines (one through a
+        # tunnel) must be told apart in the dock and the app switcher.
+        if rel == 'index.html':
+            body = body.replace(b'<title>gitr</title>', f'<title>{APP_NAME}</title>'.encode())
+        elif rel == 'manifest.webmanifest':
+            manifest = json.loads(body)
+            manifest['name'] = manifest['short_name'] = APP_NAME
+            body = json.dumps(manifest, indent=2).encode()
+        self._send(200, body, CONTENT_TYPES.get(p.suffix, 'application/octet-stream'))
 
 
 def load_repos(args_repos: list[str]) -> list[dict]:

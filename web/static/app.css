@@ -54,10 +54,23 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .wt .branch { color: var(--file); }
 .err { color: var(--rem); padding: 1px 24px; }
 
-.file .st { font: var(--mono); width: 1ch; }
+.file .st { font: var(--mono); width: 1ch; text-align: center; }
 .st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R { color: var(--ren); }
-.file .dir { color: var(--dim); }
+.file .name.st-D { text-decoration: line-through; }
+.file .namecell { display: flex; align-items: baseline; min-width: 0; }
+.file .namecell .name { overflow: hidden; text-overflow: ellipsis; }
+.file .namecell .n-cmt { flex: none; margin-left: 6px; }
 .file .n { font: 12px monospace; }
+/* Tree: VS Code's 8px indent per level with a guide line, and a chevron
+   (drawn, the source stays ASCII) that points down when open. */
+#files .row { padding-left: 8px; gap: 0; }
+#files .row > .n, #files .row > .st { margin-left: 6px; }
+#files .guide { align-self: stretch; flex: none; width: 12px; margin-left: 4px; border-left: 1px solid #ffffff14; }
+.chev, .chev-space { flex: none; width: 16px; align-self: center; }
+.chev::before { content: ""; display: block; width: 5px; height: 5px; margin: 0 0 3px 4px;
+  border: solid var(--fg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .8; }
+.dir.collapsed .chev::before { transform: rotate(-45deg); margin: 1px 0 1px 3px; }
+#files .row.dir { color: var(--fg); }
 .n-add { color: var(--add); } .n-rem { color: var(--rem); }
 
 #topbar { display: flex; align-items: center; gap: 14px; padding: 4px 12px; background: var(--bg-bar);
@@ -66,6 +79,7 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 #base { font: var(--mono); font-size: 12px; background: var(--bg); color: var(--fg);
         border: 1px solid var(--sel); padding: 1px 4px; }
 #changed { color: var(--note); }
+#removed { color: var(--rem); }
 .opt { display: flex; align-items: center; gap: 4px; color: var(--dim); }
 #editor-wrap { flex: 1; position: relative; min-height: 0; }
 #editor { position: absolute; inset: 0; }
@@ -108,7 +122,7 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .c-note { --c: #f1fa8c; } .c-good { --c: #8be9fd; } .c-bad { --c: #ff79c6; }
 .c-zone { padding: 4px 0; font: var(--font); }
 .c-box { box-sizing: border-box; border-left: 3px solid var(--c); border-radius: 3px; padding: 4px 10px;
-  background: color-mix(in srgb, var(--c) 10%, var(--bg-side)); color: var(--fg); cursor: pointer; }
+  background: color-mix(in srgb, var(--c) 20%, var(--bg-side)); color: var(--fg); cursor: pointer; }
 .c-head { display: flex; gap: 10px; font-size: 11px; }
 .c-kind { color: var(--c); font: bold 11px monospace; }
 .c-flag { color: var(--dim); font-style: italic; }
@@ -132,3 +146,11 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 #cmenu .c-item.c-note, #cmenu .c-item.c-good, #cmenu .c-item.c-bad { color: var(--c); font-family: monospace; }
 #cmenu .c-sep { height: 1px; margin: 4px 0; background: var(--sel); }
 .c-zone { position: absolute; }
+
+/* Scrollbars outside the editor (sidebar lists) look like Monaco's: 14px,
+   no track, translucent square thumb. These are its vs-dark defaults. */
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(121, 121, 121, .4); }
+::-webkit-scrollbar-thumb:hover { background: rgba(100, 100, 100, .7); }
+::-webkit-scrollbar-thumb:active { background: rgba(191, 191, 191, .4); }

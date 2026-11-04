@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gitr</title>
 <link rel="stylesheet" href="app.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/favicon-32.png">
+<meta name="theme-color" content="#191a21">
 </head>
 <body>
 <div id="app">
@@ -25,8 +28,10 @@
       <label class="base">base <input id="base" spellcheck="false" size="14"></label>
       <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
       <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
+      <label class="opt" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> collapse re-indent</label>
       <span id="mergebase" class="dim"></span>
       <span id="changed" hidden>worktree changed <button id="reload">reload</button></span>
+      <span id="removed" hidden>worktree removed</span>
       <span id="review">
         <span id="ccount" class="dim"></span>
         <button id="copy-agent" title="Copy all comments as text for a coding agent (also kept in .gitr/review.md)">copy for agent</button>

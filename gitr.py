@@ -454,13 +454,17 @@ def _classify(line: str) -> str:
     return 'context'
 
 
-_HUNK_RE = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
+_HUNK_RE = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
 def parse_diff(text: str) -> list[DiffFile]:
     files: list[DiffFile] = []
     current: Optional[DiffFile] = None
     cur_old = cur_new = 0  # next line numbers within the active hunk
+    # Lines the active hunk still holds, from its header. Inside a hunk only
+    # the first character decides the kind: a removed "-- x" reads "--- x"
+    # and must not be taken for a file header.
+    left_old = left_new = 0
 
     for raw in text.splitlines():
         if raw.startswith('diff --git '):
@@ -470,15 +474,25 @@ def parse_diff(text: str) -> list[DiffFile]:
             path = raw[b_idx + 3:] if b_idx != -1 else 'unknown'
             current = DiffFile(path)
             cur_old = cur_new = 0
+            left_old = left_new = 0
         if current is not None:
-            kind = _classify(raw)
+            if (left_old > 0 or left_new > 0) and raw[:1] in ('+', '-', ' ', ''):
+                kind = {'+': 'added', '-': 'removed'}.get(raw[:1], 'context')
+                if kind != 'added':
+                    left_old -= 1
+                if kind != 'removed':
+                    left_new -= 1
+            else:
+                kind = _classify(raw)
             new_no: Optional[int] = None
             old_no: Optional[int] = None
             if kind == 'hunk':
                 m = _HUNK_RE.match(raw)
                 if m:
                     cur_old = int(m.group(1))
-                    cur_new = int(m.group(2))
+                    cur_new = int(m.group(3))
+                    left_old = int(m.group(2) or 1)
+                    left_new = int(m.group(4) or 1)
             elif kind == 'context':
                 old_no, new_no = cur_old, cur_new
                 cur_old += 1

@@ -113,6 +113,55 @@ or `bad` and defaults to `note` when absent.
 
 ---
 
+## Web version: `gitr serve` (planned)
+
+A browser-based gitr for agent work on a remote machine: several projects,
+each with one worktree per agent. A small server runs next to the worktrees
+(stdlib Python, reusing gitr's diff parsing, review store and export, so
+`.gitr/review.json` and `gitr --export` stay the agent contract) and is
+reached over an SSH tunnel or Tailscale; the frontend is Monaco, with the
+whole diff in one read-only document as in gitr.
+
+### V1 - gitr parity, multi-repo
+
+- [ ] Project list from a config file, worktrees per project
+      (`git worktree list --porcelain`), switch worktree by clicking
+- [ ] Diff base per worktree, default `main` / `master`; diff against the
+      merge base including uncommitted and untracked files
+- [ ] Single continuous diff, file list (flat / tree, `+N -N`, per-kind
+      comment counts), minimap with comment marks, word diff, line numbers,
+      sticky file header
+- [ ] File list synced with the diff: scrolling highlights the current file,
+      clicking a file scrolls to its start
+- [ ] Comments with kinds and presets, same storage as gitr; copy for agent
+- [ ] "Worktree changed" banner with reload (no silent re-render)
+- Mouse navigation only; no Commits panel
+
+### Later
+
+- [ ] `gitr serve start|stop|status` as a user daemon: install and drive a
+      systemd user unit (`systemctl --user`, with `loginctl enable-linger`
+      so it survives logout) rather than self-daemonizing; plain
+      `gitr serve` stays the foreground mode the unit runs
+- [ ] Keyboard navigation (n / p / Tab)
+- [ ] Tabs: open a file or a subdirectory as its own view of the diff
+- [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
+- [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks
+- [ ] Per-file syntax highlighting in the combined view
+- [ ] Commit graph view for a worktree: all commits leading to its checkout,
+      merges included. Use it to pick the review base (any commit, not just
+      a branch) and to narrow the head side (e.g. review up to `HEAD^^`
+      instead of the working tree)
+
+### Known issues
+
+- [ ] Minimap file names are clipped for files shorter than about 5
+      lines (empty files, one-line changes): Monaco draws each label on a
+      box about 5 minimap rows tall, and the next file's box covers it.
+      No public option controls this.
+
+---
+
 ## Usage
 
 ```bash

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gitr</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <section id="projects-section">
+      <h2>Projects</h2>
+      <div id="projects" class="list"></div>
+    </section>
+    <section id="files-section">
+      <h2>Changed files <span id="files-count"></span></h2>
+      <div id="files" class="list"></div>
+    </section>
+  </aside>
+  <div id="sash"></div>
+  <main id="main">
+    <header id="topbar">
+      <span id="crumb">no worktree selected</span>
+      <label class="base">base <input id="base" spellcheck="false" size="14"></label>
+      <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
+      <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
+      <span id="mergebase" class="dim"></span>
+      <span id="changed" hidden>worktree changed <button id="reload">reload</button></span>
+    </header>
+    <div id="editor-wrap">
+      <div id="editor"></div>
+      <div id="progress" hidden></div>
+    </div>
+    <footer id="statusbar"><span id="stats"></span><span id="timing" class="dim"></span></footer>
+  </main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

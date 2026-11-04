@@ -1,0 +1,93 @@
+/* Colours follow gitr's C dict (Dracula). */
+:root {
+  --bg: #282a36;
+  --bg-side: #21222c;
+  --bg-bar: #191a21;
+  --fg: #f8f8f2;
+  --dim: #6272a4;
+  --sel: #44475a;
+  --add: #50fa7b;
+  --rem: #ff5555;
+  --hunk: #ffb86c;
+  --file: #bd93f9;
+  --ren: #ff79c6;
+  --note: #f1fa8c;
+  /* Diff backgrounds are translucent tints: Monaco paints line decorations
+     over the selection, so an opaque colour would hide it. */
+  --add-bg: rgba(80, 250, 123, .06);
+  --rem-bg: rgba(255, 85, 85, .06);
+  --add-hi: rgba(80, 250, 123, .22);
+  --rem-hi: rgba(255, 85, 85, .25);
+  --head-bg: rgba(189, 147, 249, .18);  /* = HEADER_BG in app.js over --bg */
+  --file-line: rgba(189, 147, 249, .6);
+  --font: 13px/1.4 system-ui, sans-serif;
+  --mono: 13px "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: var(--font); }
+button { font: inherit; color: var(--fg); background: var(--sel); border: 1px solid var(--dim);
+         border-radius: 3px; padding: 0 8px; cursor: pointer; }
+.dim { color: var(--dim); }
+
+#app { display: flex; height: 100vh; }
+#sidebar { width: 340px; min-width: 180px; display: flex; flex-direction: column;
+           background: var(--bg-side); overflow: hidden; }
+#sash { width: 4px; cursor: col-resize; background: var(--bg-bar); }
+#sash:hover, #sash.drag { background: var(--dim); }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+     text-transform: uppercase; color: var(--dim); }
+#projects-section { max-height: 40%; display: flex; flex-direction: column; border-bottom: 1px solid var(--bg-bar); }
+#files-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.list { overflow: auto; flex: 1; padding-bottom: 8px; }
+
+.row { display: flex; align-items: baseline; gap: 6px; padding: 1px 12px; white-space: nowrap;
+       cursor: pointer; user-select: none; }
+.row:hover { background: #2c2e3a; }
+.row.active { background: var(--sel); }
+.row .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.project { font-weight: 600; cursor: default; }
+.project:hover { background: none; }
+.wt { padding-left: 24px; }
+.wt .branch { color: var(--file); }
+.err { color: var(--rem); padding: 1px 24px; }
+
+.file .st { font: var(--mono); width: 1ch; }
+.st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R { color: var(--ren); }
+.file .dir { color: var(--dim); }
+.file .n { font: 12px monospace; }
+.n-add { color: var(--add); } .n-rem { color: var(--rem); }
+
+#topbar { display: flex; align-items: center; gap: 14px; padding: 4px 12px; background: var(--bg-bar);
+          white-space: nowrap; overflow: hidden; }
+#crumb { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+#base { font: var(--mono); font-size: 12px; background: var(--bg); color: var(--fg);
+        border: 1px solid var(--sel); padding: 1px 4px; }
+#changed { color: var(--note); }
+.opt { display: flex; align-items: center; gap: 4px; color: var(--dim); }
+#editor-wrap { flex: 1; position: relative; min-height: 0; }
+#editor { position: absolute; inset: 0; }
+#progress { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            background: var(--bg); color: var(--dim); font-size: 15px; z-index: 10; white-space: pre; }
+#statusbar { display: flex; justify-content: space-between; padding: 2px 12px; font-size: 12px;
+             background: var(--bg-bar); }
+
+/* Monaco decorations */
+.l-add { background: var(--add-bg); }
+.l-rem { background: var(--rem-bg); }
+/* File and hunk headers look alike, inline and in the sticky header; only
+   a file header has the separator line above it. */
+.l-head, .l-file { background: var(--head-bg); }
+.l-file { border-top: 1px solid var(--file-line); }
+/* The sticky header's first line is always a file header: the files are the
+   outermost folding regions. */
+.monaco-editor .sticky-widget .sticky-line-content[data-sticky-line-index="0"],
+.monaco-editor .sticky-widget .sticky-line-number[data-sticky-line-index="0"] {
+  border-top: 1px solid var(--file-line);
+}
+.w-add { background: var(--add-hi); border-radius: 2px; }
+.w-rem { background: var(--rem-hi); border-radius: 2px; }
+/* lineNumber() pads with spaces to form the old / new columns */
+.monaco-editor .line-numbers { white-space: pre; }

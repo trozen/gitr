@@ -91,3 +91,44 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .w-rem { background: var(--rem-hi); border-radius: 2px; }
 /* lineNumber() pads with spaces to form the old / new columns */
 .monaco-editor .line-numbers { white-space: pre; }
+
+/* Review comments */
+#review { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.n-cmt { color: var(--c); }
+#timing.flash { color: var(--note); }
+/* Gutter column between the line numbers and the code: "+" on hover, a
+   kind-coloured bar where a comment is. */
+.monaco-editor .c-add { cursor: pointer; }
+.monaco-editor .c-add::before { content: "+"; display: block; width: 14px; height: 14px; margin: 2px 0 0 1px;
+  border-radius: 3px; background: var(--file); color: var(--bg); font: bold 13px/14px monospace;
+  text-align: center; }
+.monaco-editor .c-mark { cursor: pointer; }
+.monaco-editor .c-mark::before { content: ""; display: block; width: 4px; height: 100%; margin-left: 6px;
+  border-radius: 2px; background: var(--c); }
+.c-note { --c: #f1fa8c; } .c-good { --c: #8be9fd; } .c-bad { --c: #ff79c6; }
+.c-zone { padding: 4px 0; font: var(--font); }
+.c-box { box-sizing: border-box; border-left: 3px solid var(--c); border-radius: 3px; padding: 4px 10px;
+  background: color-mix(in srgb, var(--c) 10%, var(--bg-side)); color: var(--fg); cursor: pointer; }
+.c-head { display: flex; gap: 10px; font-size: 11px; }
+.c-kind { color: var(--c); font: bold 11px monospace; }
+.c-flag { color: var(--dim); font-style: italic; }
+.c-quote { font: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+.c-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.c-edit { cursor: default; }
+.c-input { display: block; width: 100%; resize: none; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--sel); border-radius: 3px; padding: 4px 6px; font: var(--font); }
+.c-input:focus { outline: none; border-color: var(--c); }
+.c-bar { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.c-bar .grow { flex: 1; }
+.c-kinds { display: flex; gap: 4px; }
+.c-kindbtn { color: var(--c); background: none; border-color: transparent; font: 11px monospace; }
+.c-kindbtn.on { border-color: var(--c); }
+.c-del { color: var(--rem); }
+#measure { position: absolute; visibility: hidden; left: 0; top: 0; pointer-events: none; }
+#cmenu { position: absolute; z-index: 20; min-width: 160px; padding: 4px 0; background: var(--bg-side);
+  border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
+#cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }
+#cmenu .c-item:hover { background: var(--sel); }
+#cmenu .c-item.c-note, #cmenu .c-item.c-good, #cmenu .c-item.c-bad { color: var(--c); font-family: monospace; }
+#cmenu .c-sep { height: 1px; margin: 4px 0; background: var(--sel); }
+.c-zone { position: absolute; }

@@ -38,6 +38,13 @@ let wordGen = 0;               // bumps on every load so stale fetches are dropp
 let current = null;            // {wt, base, untracked} last requested
 let shown = null;              // {wt, base, untracked} of the diff on screen, null while loading
 let numWidth = 4;
+const worktrees = new Map();   // worktree path -> {p, w} from /api/projects
+let commentDecos, hoverDecos;
+let comments = [];             // resolved comments of the doc on screen, from the server
+let commentStamp = null;
+let totalComments = 0;         // including comments on files not in this diff       // review.json mtime they were read at
+let editing = null;            // {line, key, file, kind, text} of the open comment editor
+const zones = new Map();       // zone key -> {id, sig, zone}
 
 require.config({ paths: { vs: MONACO + '/vs' } });
 require(['vs/editor/editor.main'], (m) => { monaco = m; init(); });
@@ -89,31 +96,36 @@ function init() {
     automaticLayout: true, fontSize: 13, lineHeight: 19, scrollBeyondLastLine: true,
     minimap: { enabled: true, renderCharacters: true, size: 'proportional', scale: 1, maxColumn: 120,
                showSlider: 'always' },
-    lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 6,
+    lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 16,
     glyphMargin: false, folding: true, showFoldingControls: 'mouseover',
     foldingMaximumRegions: 200000,
     stickyScroll: { enabled: true, maxLineCount: 2, defaultModel: 'foldingProviderModel' },
     renderLineHighlight: 'line', occurrencesHighlight: 'off', selectionHighlight: false,
     renderWhitespace: 'none', guides: { indentation: false },
-    wordWrap: loadPref('wrap', true) ? 'on' : 'off', wrappingIndent: 'none',
+    wordWrap: 'on', wrappingIndent: 'none',
     wrappingStrategy: 'simple',  // monospace arithmetic, no DOM measuring
+    // contextmenu off: the comment menu replaces Monaco's, whose entries
+    // (copy aside) do nothing in a read-only diff.
     smoothScrolling: false, mouseWheelScrollSensitivity: 1, contextmenu: false,
     unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false },
   });
   decos = editor.createDecorationsCollection();
   wordDecos = editor.createDecorationsCollection();
   fileDecos = editor.createDecorationsCollection();
+  commentDecos = editor.createDecorationsCollection();
+  hoverDecos = editor.createDecorationsCollection();
   editor.onDidScrollChange(onScroll);
+  initComments();
 
   $('base').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && current) load(current.wt, $('base').value.trim() || current.defaultBase);
+    if (e.key === 'Enter' && current) load(current.wt, $('base').value.trim() || current.defaultBase, null, viewPosition());
   });
-  $('reload').addEventListener('click', () => current && load(current.wt, current.base));
-  $('untracked').addEventListener('change', () => current && load(current.wt, current.base));
-  $('wrap').checked = loadPref('wrap', true);
+  $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition()));
+  $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
+  $('wrap').checked = true;
   $('wrap').addEventListener('change', () => {
-    savePref('wrap', $('wrap').checked);
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
+    if (shown) saveSettings(shown.wt, shown.base);
   });
   initSash();
   loadProjects();
@@ -157,22 +169,56 @@ async function loadProjects() {
       const row = el('div', 'row wt', [el('span', 'grow branch', label), el('span', 'dim', rel)]);
       row.title = w.path;
       row.dataset.wt = w.path;
-      row.addEventListener('click', () => load(w.path, p.defaultBase, p.defaultBase));
+      worktrees.set(w.path, { p, w });
+      row.addEventListener('click', () => {
+        const st = settingsFor(w.path);
+        applyOptions(st);
+        load(w.path, st.base, p.defaultBase, w.position);
+      });
       box.append(row);
-      if (hash.get('wt') === w.path) initial = [w.path, hash.get('base') || p.defaultBase, p.defaultBase];
+      if (hash.get('wt') === w.path) initial = w.path;
     }
   }
-  $('untracked').checked = hash.get('untracked') === '1';
-  if (initial) load(...initial);
+  if (initial) {
+    // A link names its base and untracked option; the rest comes from what
+    // was saved for the worktree.
+    const st = settingsFor(initial);
+    if (hash.has('untracked')) st.untracked = hash.get('untracked') === '1';
+    applyOptions(st);
+    const pos = hash.get('file') ? { file: hash.get('file'), at: +hash.get('at') || 0, off: +hash.get('off') || 0 }
+                                 : worktrees.get(initial).w.position;
+    load(initial, hash.get('base') || st.base, worktrees.get(initial).p.defaultBase, pos);
+  }
+}
+
+// Saved for the worktree, else the last used in its project (a new agent
+// worktree usually wants the same base), else the defaults.
+function settingsFor(wt) {
+  const { p, w } = worktrees.get(wt);
+  return { base: p.defaultBase, untracked: false, wrap: true, ...(p.settings || {}), ...(w.settings || {}) };
+}
+
+function applyOptions(st) {
+  $('untracked').checked = st.untracked;
+  $('wrap').checked = st.wrap;
+  editor.updateOptions({ wordWrap: st.wrap ? 'on' : 'off' });
+}
+
+async function saveSettings(wt, base) {
+  const st = { base, untracked: $('untracked').checked, wrap: $('wrap').checked };
+  const entry = worktrees.get(wt);
+  if (entry) { entry.w.settings = st; entry.p.settings = st; }
+  try { await post('/api/settings', { wt, ...st }); } catch (e) { flash('settings not saved: ' + e.message); }
 }
 
 // --loading a diff -------------------------------------------------------
 
-async function load(wt, base, defaultBase) {
+async function load(wt, base, defaultBase, restore) {
+  if (shown && shown.wt !== wt) flushPosition();
   const gen = ++wordGen;
   const untracked = $('untracked').checked ? '1' : '0';
   current = { wt, base, untracked, defaultBase: defaultBase || current?.defaultBase || base };
-  location.hash = new URLSearchParams({ wt, base, untracked }).toString();
+  setHash({ wt, base, untracked, ...(restore || {}) });
   document.querySelectorAll('.wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
   $('base').value = base;
   $('crumb').textContent = wt;
@@ -193,17 +239,21 @@ async function load(wt, base, defaultBase) {
   await nextFrame();
   doc = d;
   shown = { wt, base, untracked };
+  saveSettings(wt, base);  // only a base that loaded is worth remembering
   fileStarts = d.files.map((f) => f.start);
   let maxNo = 1;
   for (let i = 0; i < d.oldNo.length; i++) maxNo = Math.max(maxNo, d.oldNo[i], d.newNo[i]);
   numWidth = String(maxNo).length;
   wordsByLine = new Map();
+  editing = null;
+  applyComments({ comments: [], elsewhere: 0, stamp: null });
   decoWindow = [0, 0];
   activeFile = -1;
   pinned = null;
   editor.updateOptions({ lineNumbersMinChars: numWidth * 2 + 2 });
   editor.getModel().setValue(d.text);
   editor.setScrollTop(0);
+  if (restore) scrollToPosition(restore);
   renderFiles();
   markHeadersInMinimap();
   updateDecorations(true);
@@ -221,6 +271,7 @@ async function load(wt, base, defaultBase) {
   $('timing').textContent = `git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +
     `fetch ${timing.fetchMs} ms, render ${timing.renderMs} ms`;
   onScroll();
+  loadComments(gen);
   fetchWords(gen);
 }
 
@@ -381,6 +432,7 @@ function renderFiles() {
                           el('span', 'dir', slash >= 0 ? '  ' + f.path.slice(0, slash) : '')]),
       el('span', 'n n-add', f.add ? '+' + f.add : ''),
       el('span', 'n n-rem', f.del ? '-' + f.del : ''),
+      el('span', 'n n-cmt', ''),
     ]);
     row.title = f.oldPath && f.status === 'R' ? `${f.oldPath} -> ${f.path}` : f.path;
     row.addEventListener('click', () => jumpToFile(i));
@@ -400,8 +452,75 @@ function jumpToFile(i) {
   setActive(i);
 }
 
+// --view position ---------------------------------------------------------
+//
+// Kept in the page address so a browser reload comes back to it. A file and
+// its new-side line number rather than a line of the combined document: a
+// reload after the worktree changed keeps the place even when files before
+// it changed. Lines without a new-side number (a deleted file, headers) use
+// the offset from the file's start.
+
+function viewPosition() {
+  const top = editor.getVisibleRanges()[0]?.startLineNumber;
+  if (!doc || !top || !doc.files.length) return null;
+  const f = doc.files[Math.max(0, upperBound(fileStarts, top) - 1)];
+  for (let ln = top; ln <= f.end && ln < top + 50; ln++)
+    if ('ac'.includes(doc.kinds[ln - 1])) return { file: f.path, at: doc.newNo[ln - 1] - (ln - top), off: 0 };
+  return { file: f.path, at: 0, off: top - f.start };
+}
+
+function scrollToPosition(pos) {
+  const f = doc.files.find((x) => x.path === pos.file);
+  if (!f) return;
+  let target = Math.min(f.start + (pos.off || 0), f.end);
+  if (pos.at) {
+    for (let ln = f.start; ln <= f.end; ln++) {
+      if ('ac'.includes(doc.kinds[ln - 1]) && doc.newNo[ln - 1] >= pos.at) {
+        target = ln - (doc.newNo[ln - 1] - pos.at);
+        break;
+      }
+    }
+    target = Math.max(f.start, Math.min(target, f.end));
+  }
+  editor.setScrollTop(editor.getTopForLineNumber(target));
+}
+
+// The view is about to show another worktree: its debounced save would
+// otherwise record the new one's position.
+function flushPosition() {
+  clearTimeout(hashTimer);
+  clearTimeout(posTimer);
+  const pos = viewPosition();
+  const entry = worktrees.get(shown.wt);
+  if (entry) entry.w.position = pos;
+  post('/api/position', { wt: shown.wt, pos }).catch(() => {});
+}
+
+function setHash(params) {
+  // replaceState: scrolling must not fill the back-button history
+  history.replaceState(null, '', '#' + new URLSearchParams(params).toString());
+}
+
+let hashTimer = 0, posTimer = 0;
+function saveViewPosition() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    if (!shown) return;
+    const pos = viewPosition();
+    setHash({ ...shown, ...(pos || {}) });
+    // Kept per worktree for switching back, here at once; on the server
+    // (for the next session) only once scrolling has settled.
+    const entry = worktrees.get(shown.wt);
+    if (entry) entry.w.position = pos;
+    const wt = shown.wt;
+    clearTimeout(posTimer);
+    posTimer = setTimeout(() => post('/api/position', { wt, pos }).catch(() => {}), 1000);
+  }, 300);
+}
+
 function onScroll() {
   if (!doc) return;
+  saveViewPosition();
   updateDecorations(false);
   if (pinned) {
     if (Math.abs(editor.getScrollTop() - pinned.scrollTop) < 1) return;
@@ -426,32 +545,361 @@ function upperBound(arr, x) {
   return lo;
 }
 
+// --comments -------------------------------------------------------------
+//
+// Stored by the server in the worktree's .gitr/review.json, gitr's own
+// format. Each comment takes a view zone below its line; an orphan (its line
+// left the diff) sits at the end of its file. A view zone lies under Monaco's
+// text layer and never gets the mouse, so the box itself is an overlay widget
+// kept on top of its zone, the way VS Code's own comment widget is built.
+
+const KIND_MARK = { note: '>>', good: '++', bad: '!!' };
+const SEVERITY = { good: 0, note: 1, bad: 2 };
+const KIND_COLOR = { note: '#f1fa8c', good: '#8be9fd', bad: '#ff79c6' };
+const PRESETS = [['okay', 'good'], ['wtf', 'bad'], ['why?', 'note'], ['nice', 'good'], ['no', 'bad']];
+const commentable = (ln) => doc && 'arc'.includes(doc.kinds[ln - 1] || 'x');
+const keyStr = (c) => (c.key ? c.key.join('\0') + '\0' + c.file : 'new\0' + c.line);
+
+function initComments() {
+  const T = monaco.editor.MouseTargetType;
+  editor.onMouseMove((e) => {
+    const ln = e.target.position?.lineNumber;
+    const show = ln && commentable(ln) && !commentAt(ln) &&
+      (e.target.type === T.GUTTER_LINE_DECORATIONS || e.target.type === T.GUTTER_LINE_NUMBERS ||
+       e.target.type === T.CONTENT_TEXT || e.target.type === T.CONTENT_EMPTY);
+    hoverDecos.set(show ? [{ range: new monaco.Range(ln, 1, ln, 1),
+                             options: { linesDecorationsClassName: 'c-add' } }] : []);
+  });
+  editor.onMouseLeave(() => hoverDecos.clear());
+  editor.onMouseDown((e) => {
+    if (e.target.type !== T.GUTTER_LINE_DECORATIONS || !e.event.leftButton) return;
+    const ln = e.target.position?.lineNumber;
+    if (ln && commentable(ln)) openEditor(ln);
+  });
+  editor.onContextMenu((e) => {
+    const ln = e.target.position?.lineNumber;
+    if (!ln || !commentable(ln)) return;
+    // Monaco's own menu is off, so nothing else stops the browser's.
+    e.event.preventDefault();
+    showMenu(ln, e.event.posx, e.event.posy);
+  });
+  let relayout = 0;
+  editor.onDidLayoutChange(() => {
+    clearTimeout(relayout);
+    relayout = setTimeout(() => renderZones(true), 100);
+  });
+  editor.onDidScrollChange(() => requestAnimationFrame(syncOverlays));
+  addEventListener('mousedown', (e) => { if (!$('cmenu').contains(e.target)) hideMenu(); });
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
+  editor.onDidScrollChange(hideMenu);
+  $('copy-agent').addEventListener('click', copyForAgent);
+  $('clear-comments').addEventListener('click', clearComments);
+}
+
+function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
+
+async function loadComments(gen) {
+  try {
+    const r = await api('/api/comments', { wt: shown.wt, id: doc.id });
+    if (gen === wordGen) applyComments(r);
+  } catch (e) { flash('comments: ' + e.message); }
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(body) });
+  const out = await r.json();
+  if (!r.ok) throw new Error(out.error || r.statusText);
+  return out;
+}
+
+async function saveComment(target, text, kind) {
+  const body = { wt: shown.wt, id: doc.id, text, kind };
+  if (target.key) Object.assign(body, { key: target.key, file: target.file });
+  else body.line = target.line;
+  const gen = wordGen;
+  try {
+    const r = await post('/api/comment', body);
+    if (gen !== wordGen) return false;
+    editing = null;
+    applyComments(r);
+    return true;
+  } catch (e) { flash(e.message); return false; }
+}
+
+function applyComments(r) {
+  comments = r.comments;
+  commentStamp = r.stamp;
+  const T = monaco.editor;
+  commentDecos.set(comments.filter((c) => !c.orphan).map((c) => ({
+    range: new monaco.Range(c.line, 1, c.line, 1),
+    options: { linesDecorationsClassName: 'c-mark c-' + c.kind,
+               overviewRuler: { color: KIND_COLOR[c.kind], position: T.OverviewRulerLane.Left },
+               minimap: { color: KIND_COLOR[c.kind], position: T.MinimapPosition.Gutter } },
+  })));
+  const perFile = new Map();  // file index -> {n, kind}, kind the most severe
+  for (const c of comments) {
+    const i = upperBound(fileStarts, c.line) - 1;
+    const f = perFile.get(i) || { n: 0, kind: 'good' };
+    f.n++;
+    if (SEVERITY[c.kind] > SEVERITY[f.kind]) f.kind = c.kind;
+    perFile.set(i, f);
+  }
+  fileRows.forEach((row, i) => {
+    const f = perFile.get(i);
+    const cell = row.querySelector('.n-cmt');
+    cell.textContent = f ? '\u25cf' + f.n : '';
+    cell.className = 'n n-cmt' + (f ? ' c-' + f.kind : '');
+  });
+  const n = (totalComments = comments.length + (r.elsewhere || 0));
+  $('ccount').textContent = !doc ? '' : n === 0 ? 'no comments'
+    : `${n} comment${n === 1 ? '' : 's'}` + (r.elsewhere ? ` (${r.elsewhere} on files not in this diff)` : '');
+  renderZones(false);
+}
+
+// Zones are keyed so that only changed boxes are re-created; re-creating
+// one above the viewport would shift the view.
+function renderZones(all) {
+  const width = Math.max(200, editor.getLayoutInfo().contentWidth - 24);
+  const want = new Map();
+  for (const c of comments) {
+    const ed = editing && editing.key && keyStr(editing) === keyStr(c) ? editing : null;
+    want.set(keyStr(c), { c, ed });
+  }
+  if (editing && !editing.key) want.set(keyStr(editing), { c: editing, ed: editing });
+  const sigOf = (w) => JSON.stringify([w.c.line, w.c.kind, w.c.text, w.c.moved, w.c.orphan, !!w.ed, width]);
+  const anchor = editor.getVisibleRanges()[0]?.startLineNumber;
+  const offset = anchor ? editor.getScrollTop() - editor.getTopForLineNumber(anchor) : 0;
+  let focus = null;
+  const left = editor.getLayoutInfo().contentLeft;
+  editor.changeViewZones((acc) => {
+    for (const [k, z] of zones) {
+      const w = want.get(k);
+      if (all || !w || sigOf(w) !== z.sig) {
+        acc.removeZone(z.id);
+        editor.removeOverlayWidget(z.widget);
+        zones.delete(k);
+      }
+    }
+    for (const [k, w] of want) {
+      if (zones.has(k)) continue;
+      const node = w.ed ? editorBox(w.ed) : commentBox(w.c);
+      node.style.width = width + 'px';
+      const height = measure(node);
+      const overlay = wrapZone(node);
+      overlay.style.left = left + 'px';
+      overlay.style.display = 'none';  // until the zone reports a position
+      const widget = { getId: () => 'gitr.comment.' + k, getDomNode: () => overlay, getPosition: () => null };
+      editor.addOverlayWidget(widget);
+      const placeholder = el('div');
+      const zone = { afterLineNumber: w.c.line, heightInPx: height, domNode: placeholder,
+                     onDomNodeTop: (top) => { overlay.style.top = top + 'px'; syncOverlay(z); } };
+      const z = { sig: sigOf(w), zone, node, overlay, placeholder, widget };
+      z.id = acc.addZone(zone);
+      zones.set(k, z);
+      if (w.ed) focus = node;
+    }
+  });
+  if (anchor && anchor <= editor.getModel().getLineCount())
+    editor.setScrollTop(editor.getTopForLineNumber(anchor) + offset);
+  if (focus) requestAnimationFrame(() => focus.querySelector('textarea')?.focus());
+}
+
+function wrapZone(node) {
+  const outer = el('div', 'c-zone', [node]);
+  // Keys typed in a comment must not reach Monaco's keybindings, nor clicks
+  // its cursor handling.
+  for (const t of ['keydown', 'keypress', 'keyup', 'pointerdown', 'mousedown', 'contextmenu'])
+    outer.addEventListener(t, (e) => e.stopPropagation());
+  // Overlay widgets sit outside Monaco's scrollable area, so the wheel over a
+  // comment would otherwise not scroll the diff.
+  outer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? editor.getOption(monaco.editor.EditorOption.lineHeight) : 1;
+    editor.setScrollTop(editor.getScrollTop() + e.deltaY * unit);
+    editor.setScrollLeft(editor.getScrollLeft() + e.deltaX * unit);
+  }, { passive: false });
+  return outer;
+}
+
+// Monaco reports a zone's position only while it is on screen and hides the
+// zone's own node otherwise; the overlay follows that.
+function syncOverlay(z) {
+  z.overlay.style.display = z.placeholder.style.display === 'none' ? 'none' : '';
+}
+function syncOverlays() { for (const z of zones.values()) syncOverlay(z); }
+
+const ZONE_PAD = 8;  // .c-zone padding, top + bottom
+function measure(node) {
+  const m = $('measure');
+  m.append(node);
+  const h = node.offsetHeight;
+  node.remove();
+  return h + ZONE_PAD;
+}
+
+function relayoutZone(node) {
+  for (const z of zones.values()) {
+    if (z.node !== node) continue;
+    z.zone.heightInPx = node.offsetHeight + ZONE_PAD;
+    editor.changeViewZones((acc) => acc.layoutZone(z.id));
+  }
+}
+
+function commentBox(c) {
+  const head = el('div', 'c-head', [
+    el('span', 'c-kind', `${KIND_MARK[c.kind]} ${c.kind}`),
+    c.orphan ? el('span', 'c-flag', 'orphaned: line no longer in the diff') : null,
+    !c.orphan && c.moved ? el('span', 'c-flag', 'moved') : null,
+  ].filter(Boolean));
+  const parts = [head];
+  if (c.orphan) parts.push(el('div', 'c-quote', c.lineText));
+  parts.push(el('div', 'c-text', c.text));
+  const box = el('div', 'c-box c-' + c.kind, parts);
+  box.title = 'click to edit';
+  box.addEventListener('click', () => openEditor(c.line, c));
+  return box;
+}
+
+function editorBox(ed) {
+  const ta = el('textarea', 'c-input');
+  ta.value = ed.text;
+  ta.rows = Math.max(2, ed.text.split('\n').length);
+  ta.placeholder = 'comment (Enter saves, Shift+Enter new line, Esc cancels, Ctrl+1/2/3 kind)';
+  const kinds = el('span', 'c-kinds', Object.keys(KIND_MARK).map((k) => {
+    const b = el('button', 'c-kindbtn c-' + k, `${KIND_MARK[k]} ${k}`);
+    b.dataset.kind = k;
+    b.addEventListener('click', () => setKind(k));
+    return b;
+  }));
+  const setKind = (k) => {
+    ed.kind = k;
+    box.className = 'c-box c-edit c-' + k;
+    kinds.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.kind === k));
+  };
+  const save = async () => {
+    ed.text = ta.value;
+    if (ed.key || ta.value.trim()) await saveComment(ed, ta.value, ed.kind);
+    else cancelEditor();
+  };
+  const buttons = [el('button', '', 'save'), el('button', '', 'cancel')];
+  buttons[0].addEventListener('click', save);
+  buttons[1].addEventListener('click', cancelEditor);
+  if (ed.key) {
+    const del = el('button', 'c-del', 'delete');
+    del.addEventListener('click', () => saveComment(ed, '', ed.kind));
+    buttons.push(del);
+  }
+  const box = el('div', 'c-box c-edit', [ta, el('div', 'c-bar', [kinds, el('span', 'grow'), ...buttons])]);
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); save(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelEditor(); }
+    else if (e.ctrlKey && ['1', '2', '3'].includes(e.key)) {
+      e.preventDefault();
+      setKind(Object.keys(KIND_MARK)[+e.key - 1]);
+    }
+  });
+  ta.addEventListener('input', () => {
+    ed.text = ta.value;
+    ta.rows = Math.max(2, ta.value.split('\n').length);
+    relayoutZone(box);
+  });
+  setKind(ed.kind);
+  return box;
+}
+
+function openEditor(ln, existing) {
+  hideMenu();
+  const c = existing || commentAt(ln);
+  // An open editor with unsaved text keeps the focus rather than losing it.
+  if (editing && editing.text.trim() && editing.text !== editing.orig) {
+    const z = zones.get(keyStr(editing));
+    z?.node.querySelector('textarea')?.focus();
+    flash('finish or cancel the open comment first');
+    return;
+  }
+  editing = c ? { line: c.line, key: c.key, file: c.file, kind: c.kind, text: c.text, orig: c.text }
+              : { line: ln, key: null, file: null, kind: 'note', text: '', orig: '' };
+  renderZones(false);
+}
+
+function cancelEditor() {
+  editing = null;
+  renderZones(false);
+  editor.focus();
+}
+
+function showMenu(ln, x, y) {
+  const c = commentAt(ln);
+  const m = $('cmenu');
+  m.textContent = '';
+  const item = (label, fn, cls) => {
+    const it = el('div', 'c-item' + (cls ? ' ' + cls : ''), label);
+    it.addEventListener('click', () => { hideMenu(); fn(); });
+    m.append(it);
+  };
+  item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c));
+  m.append(el('div', 'c-sep'));
+  for (const [text, kind] of PRESETS)
+    item(`${KIND_MARK[kind]} ${text}`, () => saveComment(c || { line: ln }, text, kind), 'c-' + kind);
+  if (c) {
+    m.append(el('div', 'c-sep'));
+    item('Delete comment', () => saveComment(c, '', c.kind));
+  }
+  const wrap = $('editor-wrap').getBoundingClientRect();
+  m.hidden = false;
+  m.style.left = Math.min(x - wrap.left, wrap.width - m.offsetWidth - 4) + 'px';
+  m.style.top = Math.min(y - wrap.top, wrap.height - m.offsetHeight - 4) + 'px';
+}
+
+function hideMenu() { $('cmenu').hidden = true; }
+
+async function copyForAgent() {
+  if (!shown) return;
+  try {
+    const r = await api('/api/export', { wt: shown.wt, id: doc.id });
+    await navigator.clipboard.writeText(r.text);
+    flash(`copied ${r.count} comment${r.count === 1 ? '' : 's'} for an agent`);
+  } catch (e) { flash('copy failed: ' + e.message); }
+}
+
+async function clearComments() {
+  if (!shown || !totalComments) return;
+  if (!confirm(`Delete all comments of ${shown.wt}?\n\nreview.json is first moved to a .bak file beside it.`)) return;
+  try {
+    editing = null;
+    applyComments(await post('/api/comments/clear', { wt: shown.wt, id: doc.id }));
+  } catch (e) { flash(e.message); }
+}
+
+let flashTimer = 0;
+function flash(msg) {
+  const t = $('timing');
+  if (!flashTimer) t.dataset.saved = t.textContent;
+  t.textContent = msg;
+  t.classList.add('flash');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    t.textContent = t.dataset.saved;
+    t.classList.remove('flash');
+    flashTimer = 0;
+  }, 4000);
+}
+
 // --change detection -----------------------------------------------------
 
 async function pollChanges() {
-  if (!shown || document.hidden || !$('changed').hidden) return;
+  if (!shown || document.hidden) return;
   // A load started while the request was out replaces the doc, so its
   // answer no longer applies.
   const gen = wordGen, fp = doc.fingerprint;
   try {
     const r = await api('/api/fingerprint', shown);
-    if (gen === wordGen && r.fingerprint !== fp) $('changed').hidden = false;
+    if (gen !== wordGen) return;
+    if (r.fingerprint !== fp) $('changed').hidden = false;
+    // review.json written by a gitr window (or another tab)
+    if (r.review !== commentStamp && !editing) loadComments(gen);
   } catch { /* transient; next poll retries */ }
-}
-
-// --preferences ----------------------------------------------------------
-
-// Per-browser view settings; storage can be unavailable (private windows),
-// in which case the defaults apply.
-function loadPref(key, dflt) {
-  try {
-    const v = localStorage.getItem('gitr.' + key);
-    return v === null ? dflt : JSON.parse(v);
-  } catch { return dflt; }
-}
-
-function savePref(key, value) {
-  try { localStorage.setItem('gitr.' + key, JSON.stringify(value)); } catch { /* not persisted */ }
 }
 
 // --dom helper -----------------------------------------------------------

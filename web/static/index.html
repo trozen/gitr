@@ -27,10 +27,17 @@
       <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
       <span id="mergebase" class="dim"></span>
       <span id="changed" hidden>worktree changed <button id="reload">reload</button></span>
+      <span id="review">
+        <span id="ccount" class="dim"></span>
+        <button id="copy-agent" title="Copy all comments as text for a coding agent (also kept in .gitr/review.md)">copy for agent</button>
+        <button id="clear-comments" title="Delete all comments of this worktree (review.json is backed up first)">clear</button>
+      </span>
     </header>
     <div id="editor-wrap">
       <div id="editor"></div>
       <div id="progress" hidden></div>
+      <div id="cmenu" hidden></div>
+      <div id="measure"></div>
     </div>
     <footer id="statusbar"><span id="stats"></span><span id="timing" class="dim"></span></footer>
   </main>

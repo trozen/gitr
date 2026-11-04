@@ -143,7 +143,11 @@ whole diff in one read-only document as in gitr.
       systemd user unit (`systemctl --user`, with `loginctl enable-linger`
       so it survives logout) rather than self-daemonizing; plain
       `gitr serve` stays the foreground mode the unit runs
-- [ ] Keyboard navigation (n / p / Tab)
+- [ ] Keyboard navigation (n / p / Tab), including next / previous comment
+      and `c` to comment on the cursor line
+- [ ] Comments panel in the sidebar: every comment in diff order with
+      file:line, kind and its first line; click to jump. Comments on files
+      not in the current diff listed at the end
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
 - [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
 - [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks

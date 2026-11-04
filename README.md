@@ -36,7 +36,11 @@ repositories are (e.g. a remote machine with agents working in worktrees).
 ```bash
 python3 web/server.py ~/dev/repo-a ~/dev/repo-b    # http://127.0.0.1:8765/
 python3 web/server.py --port 9000 ~/dev/repo-a
+python3 web/server.py --reload             # restart on changes to server.py / gitr.py
 ```
+
+The page files under `web/static/` are read from disk on every request, so
+changes to them only need a browser refresh.
 
 With no repository arguments the list is read from
 `~/.config/gitr/projects.json`:
@@ -53,8 +57,19 @@ ssh -L 8765:127.0.0.1:8765 remote-host    # then open http://127.0.0.1:8765/
 ```
 
 Pick a worktree on the left; the base defaults to `main` / `master` and can be
-any ref. The page loads Monaco from a CDN, so the browser needs internet
-access. Comments are not supported in the web version yet.
+any ref. The base and the untracked / wrap options are remembered per
+worktree on the server (`~/.local/state/gitr/serve.json`); a worktree opened
+for the first time starts from the ones last used in its project. The page
+loads Monaco from a CDN, so the browser needs internet access.
+
+Comment on a line with the `+` that appears in the gutter on hover, or
+right-click a line for gitr's one-click presets; click a comment to edit it.
+Comments are stored in the worktree's `.gitr/review.json`, the same file a
+gitr window uses, so a review can move between the two. On every change the
+server also writes the agent export to `.gitr/review.md`, so an agent in that
+worktree can be told to read it; "copy for agent" puts the same text on the
+clipboard. Keep `.gitr/` out of commits (e.g. in a global gitignore), or
+agents may commit it.
 
 ## Requirements
 

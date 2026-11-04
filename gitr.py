@@ -307,8 +307,9 @@ class ReviewStore:
     when the count exceeds a threshold).
     """
 
-    def __init__(self) -> None:
-        gitr_dir = _find_gitr_dir()
+    def __init__(self, gitr_dir: 'Path | None' = None) -> None:
+        # gitr serve passes the worktree's .gitr; the window uses the cwd's repo.
+        gitr_dir = gitr_dir or _find_gitr_dir()
         self._gitr_dir = gitr_dir
         self._path = (gitr_dir / 'review.json') if gitr_dir else None
         self._snap_dir = (gitr_dir / 'snapshots') if gitr_dir else None
@@ -342,7 +343,11 @@ class ReviewStore:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps({'files': self._data}, indent=2))
+            # gitr serve and a gitr window may both use this file; a reader
+            # must never see it half written.
+            tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
+            tmp.write_text(json.dumps({'files': self._data}, indent=2))
+            tmp.replace(self._path)
         except OSError:
             pass
 

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -28,11 +29,15 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # gitr imports tkinter at module level; the server never opens a window but
 # still needs Tk installed. Fine for the prototype, split out later.
-from gitr import (_pair_lines_for_word_diff, _word_matcher,  # noqa: E402
-                  parse_diff)
+from gitr import (COMMENT_KINDS, ReviewStore, _diff_side,  # noqa: E402
+                  _ExportItem, _format_export, _match_anchor,
+                  _pair_lines_for_word_diff, _read_text_safe,
+                  _resolve_anchors, _word_matcher, parse_diff)
 
 STATIC_DIR = Path(__file__).resolve().parent / 'static'
 CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'projects.json'
+SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
+                 / 'gitr' / 'serve.json')
 MAX_DOCS = 4  # a huge diff's document is tens of MB
 UNTRACKED_MAX_BYTES = 2 * 1024 * 1024
 TOKEN_RE = re.compile(r'\w+|[^\w\s]|\s+')
@@ -143,11 +148,16 @@ class Doc:
         # (removed line numbers, added line numbers) per run of removed lines
         # followed by added lines; the word-diff pass works on these.
         self.blocks: list[tuple[list[int], list[int]]] = []
+        # Post-image line a comment on this line is stored under (a removed
+        # line uses the position it sits at); 0 where no comment can go.
+        self.anchor_no: list[int] = []
         for df in diff_files:
             self._add_file(df)
 
-    def _push(self, text: str, kind: str, old: 'int | None' = None, new: 'int | None' = None) -> int:
+    def _push(self, text: str, kind: str, old: 'int | None' = None, new: 'int | None' = None,
+              anchor: 'int | None' = None) -> int:
         self.lines.append(text)
+        self.anchor_no.append(anchor or 0)
         self.kinds.append(kind)
         self.old_no.append(old or 0)
         self.new_no.append(new or 0)
@@ -185,10 +195,10 @@ class Doc:
             elif k == 'removed':
                 if add:
                     flush()
-                rem.append(self._push(dl.text, K_REM, old=dl.old_line_no))
+                rem.append(self._push(dl.text, K_REM, old=dl.old_line_no, anchor=dl.new_line_no))
                 dels += 1
             elif k == 'added':
-                ln = self._push(dl.text, K_ADD, new=dl.new_line_no)
+                ln = self._push(dl.text, K_ADD, new=dl.new_line_no, anchor=dl.new_line_no)
                 if rem:
                     add.append(ln)
                 adds += 1
@@ -202,7 +212,8 @@ class Doc:
                 self._push(dl.text, K_META)
             else:
                 flush()
-                self._push(dl.text, K_CTX, old=dl.old_line_no, new=dl.new_line_no)
+                self._push(dl.text, K_CTX, old=dl.old_line_no, new=dl.new_line_no,
+                           anchor=dl.new_line_no)
         flush()
         # git prints only header lines for an empty new or deleted file;
         # without a note the bare header looks like something is missing.
@@ -211,6 +222,16 @@ class Doc:
         self.files.append({'path': df.path, 'oldPath': df.old_path, 'status': df.status,
                            'add': adds, 'del': dels, 'start': start,
                            'end': len(self.lines)})
+
+    def file_at(self, line: int) -> dict:
+        lo, hi = 0, len(self.files)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.files[mid]['start'] <= line:
+                lo = mid + 1
+            else:
+                hi = mid
+        return self.files[lo - 1]
 
     def word_ranges(self, first: int, last: int) -> list[int]:
         """Changed-token column ranges for the blocks starting in
@@ -264,6 +285,9 @@ class State:
     def __init__(self, repos: list[dict]) -> None:
         self.repos = repos
         self._lock = threading.Lock()
+        # review.json is read, changed and written back as a whole
+        self._review_lock = threading.Lock()
+        self._settings_lock = threading.Lock()
         # Last document per (worktree, base): word-diff windows and the
         # change check are served from it without recomputing the diff.
         # Bounded by count, not by worktree, so another tab (or another base on
@@ -277,6 +301,13 @@ class State:
             try:
                 entry['worktrees'] = list_worktrees(r['path'])
                 entry['defaultBase'] = default_base(r['path'])
+                with self._settings_lock:
+                    saved = self._load_settings()
+                entry['settings'] = saved['projects'].get(r['path'])
+                for w in entry['worktrees']:
+                    real = os.path.realpath(w['path'])
+                    w['settings'] = saved['worktrees'].get(real)
+                    w['position'] = saved['positions'].get(real)
             except GitError as e:
                 entry['error'] = str(e)
                 entry['worktrees'] = []
@@ -286,14 +317,69 @@ class State:
     def check_worktree(self, wt: str) -> str:
         """Only worktrees of configured projects may be read, so the server
         cannot be pointed at an arbitrary directory."""
+        return self._find_worktree(wt)[0]
+
+    def _find_worktree(self, wt: str) -> 'tuple[str, str]':
         wt = os.path.realpath(wt)
         for r in self.repos:
             try:
                 if any(os.path.realpath(w['path']) == wt for w in list_worktrees(r['path'])):
-                    return wt
+                    return wt, r['path']
             except GitError:
                 continue
         raise GitError(f'not a configured worktree: {wt}')
+
+    # --view settings: base and options per worktree, and the last ones used
+    # in each project as the start for a worktree seen for the first time.
+
+    def _load_settings(self) -> dict:
+        try:
+            obj = json.loads(SETTINGS_PATH.read_text())
+        except (OSError, ValueError):
+            obj = {}
+        if not isinstance(obj, dict):
+            obj = {}
+        return {'worktrees': dict(obj.get('worktrees') or {}),
+                'projects': dict(obj.get('projects') or {}),
+                'positions': dict(obj.get('positions') or {})}
+
+    def save_settings(self, req: dict) -> dict:
+        wt, repo = self._find_worktree(str(req['wt']))
+        settings = {'base': str(req['base']), 'untracked': bool(req.get('untracked')),
+                    'wrap': bool(req.get('wrap'))}
+        with self._settings_lock:
+            saved = self._load_settings()
+            saved['worktrees'][wt] = settings
+            saved['projects'][repo] = settings
+            self._write_settings(saved)
+        return settings
+
+    def save_position(self, req: dict) -> dict:
+        """Where the view was in a worktree's diff: a file and a line in it.
+        Kept apart from the settings: a new worktree takes its project's last
+        settings, but a position only means something in its own diff."""
+        wt = self.check_worktree(str(req['wt']))
+        pos = req.get('pos')
+        pos = {'file': str(pos['file']), 'at': int(pos.get('at') or 0),
+               'off': int(pos.get('off') or 0)} if isinstance(pos, dict) else None
+        with self._settings_lock:
+            saved = self._load_settings()
+            if pos:
+                saved['positions'][wt] = pos
+            else:
+                saved['positions'].pop(wt, None)
+            self._write_settings(saved)
+        return {'ok': True}
+
+    @staticmethod
+    def _write_settings(saved: dict) -> None:
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = SETTINGS_PATH.with_name(f'.{SETTINGS_PATH.name}.tmp')
+            tmp.write_text(json.dumps(saved, indent=2))
+            tmp.replace(SETTINGS_PATH)
+        except OSError as e:
+            raise GitError(f'cannot save settings to {SETTINGS_PATH}: {e}')
 
     def diff(self, wt: str, base: str, untracked: bool) -> dict:
         wt = self.check_worktree(wt)
@@ -325,15 +411,156 @@ class State:
                        'doc_ms': round((t_doc - t_git) * 1000)},
         }
 
-    def word_ranges(self, wt: str, doc_id: str, first: int, last: int) -> list[int]:
+    def _doc(self, wt: str, doc_id: str) -> 'Doc':
         with self._lock:
             key = f'{os.path.realpath(wt)}\0{doc_id}'
             doc = self._docs.get(key)
             if doc is not None:
                 self._docs.move_to_end(key)
         if doc is None:
-            raise GitError('stale document')
-        return doc.word_ranges(first, last)
+            raise GitError('stale document, reload the diff')
+        return doc
+
+    # --comments: gitr's .gitr/review.json in each worktree, so a review can
+    # move between the web page and a gitr window.
+
+    def comments(self, wt: str, doc_id: str) -> dict:
+        wt = self.check_worktree(wt)
+        doc = self._doc(wt, doc_id)
+        with self._review_lock:
+            store = ReviewStore(Path(wt) / '.gitr')
+            out, items = resolve_comments(wt, doc, store)
+            # A gitr window edits review.json without knowing about review.md.
+            md, js = Path(wt) / '.gitr' / 'review.md', Path(wt) / '.gitr' / 'review.json'
+            if js.exists() and (not md.exists() or md.stat().st_mtime_ns < js.stat().st_mtime_ns):
+                write_review_md(wt, items)
+        return out
+
+    def save_comment(self, wt: str, doc_id: str, req: dict) -> dict:
+        wt = self.check_worktree(wt)
+        doc = self._doc(wt, doc_id)
+        text = str(req.get('text') or '').strip('\n')
+        kind = req.get('kind') if req.get('kind') in COMMENT_KINDS else 'note'
+        with self._review_lock:
+            store = ReviewStore(Path(wt) / '.gitr')
+            if req.get('key'):
+                file = str(req['file'])
+                snap, line_no, side = req['key']
+                entry = next((e for e in store._data.get(file, [])
+                              if e.get('snapshot') == snap and e.get('line_no') == line_no
+                              and e.get('side') == side), None)
+                if entry is None:
+                    raise GitError('comment no longer exists, reload')
+                if text:
+                    store.add(file, snap, line_no, side, entry.get('line_text', ''), text, kind)
+                else:
+                    store.delete(file, snap, line_no, side)
+            elif text:
+                line = int(req['line'])
+                if not 1 <= line <= len(doc.lines) or not doc.anchor_no[line - 1]:
+                    raise GitError('no comment can go on this line')
+                file = doc.file_at(line)['path']
+                anchor, line_text = doc.anchor_no[line - 1], doc.lines[line - 1]
+                current = _read_text_safe(Path(wt) / file)
+                if current is None:
+                    raise GitError(f'{file} cannot be read, so the comment cannot be anchored')
+                # The snapshot is the file as it is now; line numbers from an
+                # older diff would anchor the comment to the wrong line.
+                if line_text[0] != '-':
+                    cur = current.splitlines()
+                    if anchor > len(cur) or cur[anchor - 1] != line_text[1:]:
+                        raise GitError(f'{file} changed since the diff was loaded, reload first')
+                snap = store.write_snapshot(current)
+                if snap is None:
+                    raise GitError(f'cannot write a snapshot to {wt}/.gitr')
+                store.add(file, snap, anchor, _diff_side(KIND_NAMES[doc.kinds[line - 1]]),
+                          line_text, text, kind)
+            out, items = resolve_comments(wt, doc, store)
+            write_review_md(wt, items)
+        return out
+
+    def clear_comments(self, wt: str, doc_id: str) -> dict:
+        wt = self.check_worktree(wt)
+        doc = self._doc(wt, doc_id)
+        with self._review_lock:
+            store = ReviewStore(Path(wt) / '.gitr')
+            if not store.clear(store.backup_path()):
+                raise GitError('could not back up review.json, nothing cleared')
+            out, items = resolve_comments(wt, doc, store)
+            write_review_md(wt, items)
+        return out
+
+    def export(self, wt: str, doc_id: str) -> dict:
+        wt = self.check_worktree(wt)
+        doc = self._doc(wt, doc_id)
+        with self._review_lock:
+            _, items = resolve_comments(wt, doc, ReviewStore(Path(wt) / '.gitr'))
+        return {'text': _format_export(items, list(COMMENT_KINDS)), 'count': len(items)}
+
+    def word_ranges(self, wt: str, doc_id: str, first: int, last: int) -> list[int]:
+        return self._doc(wt, doc_id).word_ranges(first, last)
+
+
+KIND_NAMES = {K_ADD: 'added', K_REM: 'removed', K_CTX: 'context'}
+
+
+def review_stamp(wt: str) -> int:
+    try:
+        return os.stat(os.path.join(wt, '.gitr', 'review.json')).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, list[_ExportItem]]':
+    """Stored comments placed on the document's lines the way a gitr window
+    places them: a comment on a line no longer in the diff goes to the end
+    of its file, marked orphaned. Also returns the agent export items in the
+    same order (files not in this diff last)."""
+    anchors = _resolve_anchors(store, lambda f: _read_text_safe(Path(wt) / f))
+    shown: list[dict] = []
+    items: list[_ExportItem] = []
+
+    def add(a, line: int, line_no: 'int | None', orphan: bool) -> None:
+        shown.append({'line': line, 'file': a.file, 'key': [a.snapshot, a.snap_line_no, a.side],
+                      'kind': a.kind, 'text': a.comment, 'moved': a.moved, 'orphan': orphan,
+                      'lineText': a.line_text})
+        items.append(_ExportItem(a.file, line_no, a.side, a.kind, a.line_text,
+                                 a.comment, a.moved, orphan))
+
+    for f in doc.files:
+        alist = anchors.pop(f['path'], None)
+        if not alist:
+            continue
+        for ln in range(f['start'], f['end'] + 1):
+            no = doc.anchor_no[ln - 1]
+            if no:
+                kind = KIND_NAMES[doc.kinds[ln - 1]]
+                a = _match_anchor(alist, no, _diff_side(kind), doc.lines[ln - 1])
+                if a is not None:
+                    add(a, ln, no, False)
+        for a in alist:
+            if not a.matched:
+                add(a, f['end'], a.target_line_no, True)
+    elsewhere = 0
+    for alist in anchors.values():
+        for a in alist:
+            elsewhere += 1
+            items.append(_ExportItem(a.file, a.target_line_no, a.side, a.kind, a.line_text,
+                                     a.comment, a.moved, True))
+    return {'comments': shown, 'elsewhere': elsewhere, 'stamp': review_stamp(wt)}, items
+
+
+def write_review_md(wt: str, items: 'list[_ExportItem]') -> None:
+    """The agent export as a file, so an agent can be told to read
+    .gitr/review.md instead of being handed the text."""
+    path = Path(wt) / '.gitr' / 'review.md'
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name('.review.md.tmp')
+        tmp.write_text(_format_export(items, list(COMMENT_KINDS)) + '\n')
+        tmp.replace(path)
+    except OSError as e:
+        print(f'gitr serve: cannot write {path}: {e}', file=sys.stderr)
 
 
 def merge_base(wt: str, base: str) -> str:
@@ -387,8 +614,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The page went away mid-request (reload, worktree switch, a
+            # poll cut off); nobody is left to answer.
+            self.close_connection = True
 
     def _json(self, obj, status: int = 200) -> None:
         self._send(status, json.dumps(obj, separators=(',', ':')).encode(), 'application/json')
@@ -416,7 +648,12 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/fingerprint':
                 wt = self.state.check_worktree(q['wt'])
                 mb = merge_base(wt, q['base'])
-                return self._json({'fingerprint': fingerprint(wt, mb, q.get('untracked') == '1')})
+                return self._json({'fingerprint': fingerprint(wt, mb, q.get('untracked') == '1'),
+                                   'review': review_stamp(wt)})
+            if url.path == '/api/comments':
+                return self._json(self.state.comments(q['wt'], q['id']))
+            if url.path == '/api/export':
+                return self._json(self.state.export(q['wt'], q['id']))
         except KeyError as e:
             return self._json({'error': f'missing parameter {e}'}, 400)
         except ValueError as e:
@@ -424,6 +661,38 @@ class Handler(BaseHTTPRequestHandler):
         except GitError as e:
             return self._json({'error': str(e)}, 400)
         self._static(url.path)
+
+    def do_POST(self) -> None:
+        if not self._host_ok():
+            return self._send(HTTPStatus.FORBIDDEN, b'forbidden host', 'text/plain')
+        # A form on another site can post here (the Host is ours then), but
+        # only with a "simple" content type and its own Origin; a JSON body
+        # needs a CORS preflight, which this server never grants.
+        origin = urlparse(self.headers.get('Origin') or '').hostname
+        if (self.headers.get('Content-Type') != 'application/json'
+                or (origin is not None and origin not in ALLOWED_HOSTS)):
+            return self._send(HTTPStatus.FORBIDDEN, b'forbidden', 'text/plain')
+        try:
+            n = int(self.headers.get('Content-Length') or 0)
+            if n > 1 << 20:
+                return self._json({'error': 'request too large'}, 413)
+            req = json.loads(self.rfile.read(n) or b'{}')
+            path = urlparse(self.path).path
+            if path == '/api/comment':
+                return self._json(self.state.save_comment(req['wt'], req['id'], req))
+            if path == '/api/position':
+                return self._json(self.state.save_position(req))
+            if path == '/api/settings':
+                return self._json(self.state.save_settings(req))
+            if path == '/api/comments/clear':
+                return self._json(self.state.clear_comments(req['wt'], req['id']))
+        except KeyError as e:
+            return self._json({'error': f'missing parameter {e}'}, 400)
+        except (ValueError, TypeError) as e:
+            return self._json({'error': f'bad request: {e}'}, 400)
+        except GitError as e:
+            return self._json({'error': str(e)}, 400)
+        self._send(HTTPStatus.NOT_FOUND, b'not found', 'text/plain')
 
     def _static(self, path: str) -> None:
         rel = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -446,12 +715,60 @@ def load_repos(args_repos: list[str]) -> list[dict]:
     return repos
 
 
+RELOAD_CHILD_ENV = 'GITR_SERVE_CHILD'
+
+
+def supervise() -> None:
+    """--reload: run the server in a child process and start a new one when
+    the Python source changes. A separate process rather than re-exec'ing
+    itself, so a save with a syntax error leaves the supervisor waiting for
+    the next save instead of ending it. The page files are read from disk on
+    every request and need no restart."""
+    here = Path(__file__).resolve()
+    watched = [here, here.parent.parent / 'gitr.py']
+
+    def stamp() -> tuple:
+        out = []
+        for p in watched:
+            try:
+                out.append(p.stat().st_mtime_ns)
+            except OSError:
+                out.append(0)
+        return tuple(out)
+
+    cmd = [sys.executable, str(here), *sys.argv[1:]]
+    env = dict(os.environ, **{RELOAD_CHILD_ENV: '1'})
+    # A plain `kill` of the supervisor must not leave the server running.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    child = None
+    try:
+        while True:
+            seen = stamp()
+            child = subprocess.Popen(cmd, env=env)
+            while stamp() == seen:
+                time.sleep(0.5)
+            print('gitr serve: source changed, restarting', file=sys.stderr)
+            child.terminate()
+            child.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+            child.wait()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description='gitr web prototype')
     ap.add_argument('repos', nargs='*', help=f'repositories (default: {CONFIG_PATH})')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8765)
+    ap.add_argument('--reload', action='store_true',
+                    help='restart when server.py or gitr.py changes (for development)')
     a = ap.parse_args()
+    if a.reload and not os.environ.get(RELOAD_CHILD_ENV):
+        return supervise()
     repos = load_repos(a.repos)
     if not repos:
         sys.exit(f'gitr serve: no repositories given and none in {CONFIG_PATH}')

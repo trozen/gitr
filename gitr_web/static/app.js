@@ -42,8 +42,8 @@ let numWidth = 4;
 const worktrees = new Map();   // worktree path -> {p, w} from /api/projects
 let commentDecos, hoverDecos;
 let comments = [];             // resolved comments of the doc on screen, from the server
-let commentStamp = null;
-let totalComments = 0;         // including comments on files not in this diff       // review.json mtime they were read at
+let commentStamp = null;       // review.json mtime they were read at
+let totalComments = 0;         // including comments on files not in this diff
 let editing = null;            // {line, key, file, kind, text} of the open comment editor
 const zones = new Map();       // zone key -> {id, sig, zone}
 
@@ -713,10 +713,11 @@ function initComments() {
     clearTimeout(relayout);
     relayout = setTimeout(() => renderZones(true), 100);
   });
-  editor.onDidScrollChange(() => requestAnimationFrame(syncOverlays));
   addEventListener('mousedown', (e) => { if (!$('cmenu').contains(e.target)) hideMenu(); });
   addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
   editor.onDidScrollChange(hideMenu);
+  $('prev-comment').addEventListener('click', () => jumpComment(-1));
+  $('next-comment').addEventListener('click', () => jumpComment(1));
   $('copy-agent').addEventListener('click', copyForAgent);
   $('clear-comments').addEventListener('click', clearComments);
 }
@@ -776,6 +777,7 @@ function applyComments(r) {
   commentDecos.set(list);
   const perFile = new Map();  // file index -> {n, kind}, kind the most severe
   for (const c of comments) {
+    if (c.elsewhere) continue;
     const i = upperBound(fileStarts, c.line) - 1;
     const f = perFile.get(i) || { n: 0, kind: 'good' };
     f.n++;
@@ -788,9 +790,12 @@ function applyComments(r) {
     cell.textContent = f ? '\u25cf' + f.n : '';
     cell.className = 'n n-cmt' + (f ? ' c-' + f.kind : '');
   });
-  const n = (totalComments = comments.length + (r.elsewhere || 0));
+  const n = (totalComments = comments.length);
   $('ccount').textContent = !doc ? '' : n === 0 ? 'no comments'
     : `${n} comment${n === 1 ? '' : 's'}` + (r.elsewhere ? ` (${r.elsewhere} on files not in this diff)` : '');
+  // With no changes left, the comments on other files are all there is to show.
+  // (the "no changes" note stays in #progress, hidden while they show).
+  if (doc && !doc.files.length) $('progress').hidden = !!r.elsewhere;
   renderZones(false);
 }
 
@@ -804,6 +809,9 @@ function renderZones(all) {
     want.set(keyStr(c), { c, ed });
   }
   if (editing && !editing.key) want.set(keyStr(editing), { c: editing, ed: editing });
+  const elsewhere = comments.filter((c) => c.elsewhere);
+  if (elsewhere.length)
+    want.set('elsewhere', { c: { line: elsewhere[0].line, text: String(elsewhere.length) }, head: true });
   const sigOf = (w) => JSON.stringify([w.c.line, w.c.kind, w.c.text, w.c.moved, w.c.orphan, !!w.ed, width]);
   const anchor = editor.getVisibleRanges()[0]?.startLineNumber;
   const offset = anchor ? editor.getScrollTop() - editor.getTopForLineNumber(anchor) : 0;
@@ -820,7 +828,7 @@ function renderZones(all) {
     }
     for (const [k, w] of want) {
       if (zones.has(k)) continue;
-      const node = w.ed ? editorBox(w.ed) : commentBox(w.c);
+      const node = w.head ? elsewhereHead(+w.c.text) : w.ed ? editorBox(w.ed) : commentBox(w.c);
       node.style.width = width + 'px';
       const height = measure(node);
       const overlay = wrapZone(node);
@@ -829,9 +837,17 @@ function renderZones(all) {
       const widget = { getId: () => 'gitr.comment.' + k, getDomNode: () => overlay, getPosition: () => null };
       editor.addOverlayWidget(widget);
       const placeholder = el('div');
-      const zone = { afterLineNumber: w.c.line, heightInPx: height, domNode: placeholder,
-                     onDomNodeTop: (top) => { overlay.style.top = top + 'px'; syncOverlay(z); } };
-      const z = { sig: sigOf(w), zone, node, overlay, placeholder, widget };
+      // Monaco reports a zone's top before showing its node, and a top far
+      // above the view for a zone off screen; the overlay follows that.
+      // The section of comments on files not in the diff follows everything
+      // else after the last line, an orphan of the last file included.
+      const ordinal = w.head ? 20000 : w.c.elsewhere ? 20001 : undefined;
+      const zone = { afterLineNumber: w.c.line, heightInPx: height, domNode: placeholder, ordinal,
+                     onDomNodeTop: (top) => {
+                       overlay.style.top = top + 'px';
+                       overlay.style.display = top < -100000 ? 'none' : '';
+                     } };
+      const z = { sig: sigOf(w), zone, node, overlay, widget };
       z.id = acc.addZone(zone);
       zones.set(k, z);
       if (w.ed) focus = node;
@@ -840,6 +856,28 @@ function renderZones(all) {
   if (anchor && anchor <= editor.getModel().getLineCount())
     editor.setScrollTop(editor.getTopForLineNumber(anchor) + offset);
   if (focus) requestAnimationFrame(() => focus.querySelector('textarea')?.focus());
+}
+
+const JUMP_CONTEXT = 3;  // lines of the diff left above a comment jumped to
+
+// Comments come from the server in diff order, those on files not in the
+// diff last, as their zones are stacked.
+function jumpComment(dir) {
+  if (!comments.length) return;
+  const lh = editor.getOption(monaco.editor.EditorOption.lineHeight);
+  const tops = [];
+  let line = -1, y = 0;
+  for (const c of comments) {
+    if (c.line !== line) { line = c.line; y = line ? editor.getBottomForLineNumber(line) : 0; }
+    tops.push(Math.max(0, y - JUMP_CONTEXT * lh));
+    y += zones.get(keyStr(c))?.zone.heightInPx || 0;
+  }
+  const now = editor.getScrollTop();
+  const i = dir > 0 ? tops.findIndex((t) => t > now + 1) : tops.findLastIndex((t) => t < now - 1);
+  if (i < 0) return flash(dir > 0 ? 'no more comments below' : 'no more comments above');
+  pinned = null;
+  editor.setScrollTop(tops[i]);
+  flash(`comment ${i + 1} of ${comments.length}`);
 }
 
 function wrapZone(node) {
@@ -859,13 +897,6 @@ function wrapZone(node) {
   return outer;
 }
 
-// Monaco reports a zone's position only while it is on screen and hides the
-// zone's own node otherwise; the overlay follows that.
-function syncOverlay(z) {
-  z.overlay.style.display = z.placeholder.style.display === 'none' ? 'none' : '';
-}
-function syncOverlays() { for (const z of zones.values()) syncOverlay(z); }
-
 const ZONE_PAD = 8;  // .c-zone padding, top + bottom
 function measure(node) {
   const m = $('measure');
@@ -883,11 +914,33 @@ function relayoutZone(node) {
   }
 }
 
+// Marked in the text itself, so the gitr window and the agent export show
+// it too, with no new field in review.json.
+const ACCEPTED = '(accepted)';
+const accepted = (text) => (text.trimEnd().endsWith(ACCEPTED) ? text : text.trimEnd() + ' ' + ACCEPTED);
+
+function elsewhereHead(n) {
+  return el('div', 'c-section', `${n} comment${n === 1 ? '' : 's'} on files not in this diff`);
+}
+
 function commentBox(c) {
+  const action = (label, title, fn, cls) => {
+    const b = el('button', 'c-act' + (cls ? ' ' + cls : ''), label);
+    b.title = title;
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
   const head = el('div', 'c-head', [
     el('span', 'c-kind', `${KIND_MARK[c.kind]} ${c.kind}`),
-    c.orphan ? el('span', 'c-flag', 'orphaned: line no longer in the diff') : null,
+    c.elsewhere ? el('span', 'c-loc', c.lineNo ? `${c.file}:${c.lineNo}` : c.file) : null,
+    c.elsewhere ? null : c.orphan ? el('span', 'c-flag', 'orphaned: line no longer in the diff') : null,
     !c.orphan && c.moved ? el('span', 'c-flag', 'moved') : null,
+    el('span', 'grow'),
+    c.kind === 'good' ? null
+      : action('accept', 'Resolved: make it a good comment', () => saveComment(c, accepted(c.text), 'good'), 'c-good'),
+    action('copy', 'Copy the comment with its location and line, as "copy for agent" does',
+           () => copyText(commentExport(c), `copied the comment on ${c.file}`)),
+    action('delete', 'Delete this comment', () => saveComment(c, '', c.kind), 'c-del'),
   ].filter(Boolean));
   const parts = [head];
   if (c.orphan) parts.push(el('div', 'c-quote', c.lineText));
@@ -1046,6 +1099,20 @@ function commentBlock(c) {
   return lines.map((l, i) => (i ? rest : first) + l).join('\n');
 }
 
+// One item of gitr's agent export (_format_export), without the indent.
+function commentExport(c) {
+  const ref = c.lineNo ? `${c.file}:${c.lineNo}` : c.file;
+  const side = '+-'.includes(c.key[2]) ? ` (${c.key[2]})` : '';
+  const flags = [c.kind, ...(c.orphan ? ['orphaned'] : c.moved ? ['moved'] : [])];
+  const fence = codeFence(c.lineText);
+  return [`${ref}${side} [${flags.join(', ')}]`, `${fence}diff`, c.lineText, fence, c.text, ''].join('\n');
+}
+
+function codeFence(text) {
+  const longest = Math.max(0, ...(text.match(/`+/g) || []).map((r) => r.length));
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
 function copyLines(from, to) {
   const model = editor.getModel();
   const parts = [];
@@ -1056,8 +1123,7 @@ function copyLines(from, to) {
     if (ln < to) for (const c of comments) if (c.line === ln && !c.orphan) parts.push(commentBlock(c));
   }
   let text = parts.join('\n');
-  const longest = Math.max(0, ...(text.match(/`+/g) || []).map((r) => r.length));
-  const fence = '`'.repeat(Math.max(3, longest + 1));
+  const fence = codeFence(text);
   text = `${fence}diff\n${text}\n${fence}`;
   const loc = locationOf(from);
   const n = to - from + 1;

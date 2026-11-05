@@ -144,7 +144,8 @@ whole diff in one read-only document as in gitr.
       so it survives logout) rather than self-daemonizing; plain
       `gitr-serve` stays the foreground mode the unit runs
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
-      and `c` to comment on the cursor line
+      (the top bar arrows do it with the mouse) and `c` to comment on the
+      cursor line
 - [ ] Comments panel in the sidebar: every comment in diff order with
       file:line, kind and its first line; click to jump. Comments on files
       not in the current diff listed at the end

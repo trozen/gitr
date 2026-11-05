@@ -629,10 +629,10 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
     shown: list[dict] = []
     items: list[_ExportItem] = []
 
-    def add(a, line: int, line_no: 'int | None', orphan: bool) -> None:
+    def add(a, line: int, line_no: 'int | None', orphan: bool, elsewhere: bool = False) -> None:
         shown.append({'line': line, 'file': a.file, 'key': [a.snapshot, a.snap_line_no, a.side],
                       'kind': a.kind, 'text': a.comment, 'moved': a.moved, 'orphan': orphan,
-                      'lineText': a.line_text})
+                      'elsewhere': elsewhere, 'lineNo': line_no, 'lineText': a.line_text})
         items.append(_ExportItem(a.file, line_no, a.side, a.kind, a.line_text,
                                  a.comment, a.moved, orphan))
 
@@ -648,12 +648,12 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
         for a in alist:
             if not a.matched:
                 add(a, f['end'], a.target_line_no, True)
+    # Comments on files not in this diff go in a section after the last line.
     elsewhere = 0
-    for alist in anchors.values():
-        for a in alist:
+    for file in sorted(anchors):
+        for a in anchors[file]:
             elsewhere += 1
-            items.append(_ExportItem(a.file, a.target_line_no, a.side, a.kind, a.line_text,
-                                     a.comment, a.moved, True))
+            add(a, len(doc.lines), a.target_line_no, True, True)
     return {'comments': shown, 'elsewhere': elsewhere, 'stamp': review_stamp(wt)}, items
 
 

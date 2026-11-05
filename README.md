@@ -84,6 +84,11 @@ holding it) in a `diff` code fence for pasting into an agent's chat.
 
 Comment on a line with the `+` that appears in the gutter on hover, or
 right-click a line for gitr's one-click presets; click a comment to edit it.
+Each comment has "accept" (it becomes a good comment ending in "(accepted)",
+e.g. once the agent has dealt with it), "copy" (the comment with its location
+and line, as "copy for agent" gives them) and "delete". The arrows next to
+the comment count jump to the next and previous comment. Comments on files not in the current diff are
+listed in a section after its last line.
 Comments are stored in the worktree's `.gitr/review.json`, the same file a
 gitr window uses, so a review can move between the two. On every change the
 server also writes the agent export to `.gitr/review.md`, so an agent in that

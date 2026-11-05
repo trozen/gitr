@@ -44,7 +44,7 @@ SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local'
                  / 'gitr' / 'web.json')
 # Where the prototype (`gitr serve`) kept them; read until web.json exists.
 OLD_SETTINGS_PATH = SETTINGS_PATH.with_name('serve.json')
-MIN_FILE_LINES = 7  # see the padding in Doc._add_file
+MIN_FILE_LINES = 4  # see the padding in Doc._add_file
 MAX_DOCS = 4  # a huge diff's document is tens of MB
 UNTRACKED_MAX_BYTES = 2 * 1024 * 1024
 TOKEN_RE = re.compile(r'\w+|[^\w\s]|\s+')
@@ -236,9 +236,10 @@ class Doc:
             note = _header_only_note(df)
             if note:
                 self._push(note, K_META)
-        # The minimap labels each file with its name in a box ~7 lines tall
-        # (9px font x 1.5 at 2px per line); a shorter file would have the
-        # next file's label drawn over its own.
+        # The minimap labels each file with its name in a box ~6 lines tall
+        # (8px font x 1.5 at 2px per line, app.js); a shorter file would have
+        # the next file's label drawn over its own. 4 lines clear the text
+        # itself and give up only the box's bottom margin.
         while len(self.lines) - start + 1 < MIN_FILE_LINES:
             self._push('', K_META)
         self.files.append({'path': df.path, 'oldPath': df.old_path, 'status': df.status,
@@ -707,7 +708,7 @@ APP_NAME = 'gitr - ' + socket.gethostname().split('.')[0]
 ALLOWED_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
 CONTENT_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
-                 '.css': 'text/css; charset=utf-8', '.png': 'image/png',
+                 '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.ttf': 'font/ttf',
                  '.webmanifest': 'application/manifest+json'}
 
 
@@ -718,11 +719,15 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get('GITR_SERVE_LOG'):
             super().log_message(fmt, *args)
 
-    def _send(self, status: int, body: bytes, ctype: str) -> None:
+    def _send(self, status: int, body: bytes, ctype: str, etag: str | None = None) -> None:
         self.send_response(status)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        if etag:
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('ETag', etag)
+        else:
+            self.send_header('Cache-Control', 'no-store')
         try:
             self.end_headers()
             self.wfile.write(body)
@@ -809,6 +814,15 @@ class Handler(BaseHTTPRequestHandler):
         p = (STATIC_DIR / rel).resolve()
         if STATIC_DIR not in p.parents or not p.is_file():
             return self._send(HTTPStatus.NOT_FOUND, b'not found', 'text/plain')
+        # Revalidated on every load, so an edited page file shows on refresh,
+        # but the 4 MB Monaco bundle is not sent again through the tunnel.
+        st = p.stat()
+        etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header('ETag', etag)
+            self.end_headers()
+            return
         body = p.read_bytes()
         # The machine's name goes into the window title and the installed
         # app's name: apps installed from two machines (one through a
@@ -819,7 +833,7 @@ class Handler(BaseHTTPRequestHandler):
             manifest = json.loads(body)
             manifest['name'] = manifest['short_name'] = APP_NAME
             body = json.dumps(manifest, indent=2).encode()
-        self._send(200, body, CONTENT_TYPES.get(p.suffix, 'application/octet-stream'))
+        self._send(200, body, CONTENT_TYPES.get(p.suffix, 'application/octet-stream'), etag)
 
 
 def load_repos(args_repos: list[str]) -> list[dict]:

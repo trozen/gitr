@@ -2,13 +2,8 @@
 // gitr web prototype: one Monaco document holds the whole diff; per-line
 // metadata comes from the server alongside the text.
 
-const MONACO = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
-// Monaco's workers must come from our origin; a data: URL that imports the
-// CDN script is the documented workaround for loading Monaco from a CDN.
-window.MonacoEnvironment = {
-  getWorkerUrl: () => 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
-    `self.MonacoEnvironment={baseUrl:'${MONACO}/'};importScripts('${MONACO}/vs/base/worker/workerMain.js');`),
-};
+// The bundle's worker sits next to it (monaco/build.sh).
+window.MonacoEnvironment = { getWorkerUrl: () => 'monaco/editor.worker.js' };
 
 const DECO_MARGIN = 3000;      // lines decorated above and below the viewport
 const WORD_WINDOW = 4000;      // lines per word-diff request
@@ -21,13 +16,16 @@ const FILE_MINIMAP = '#bd93f9';
 // File bands show through Monaco's 70% label box; hunk rows have no label,
 // so they get 30% alpha to come out equally strong.
 const HUNK_MINIMAP = '#bd93f94d';
-// The label box is 1.5 x the 9px label font tall, at 2px per minimap row.
-const MINIMAP_LABEL_ROWS = 6;
+// The label box is 1.5 x the label font tall, at 2px per minimap row. The
+// font is below Monaco's 9px default so that short files need less padding
+// (server.py MIN_FILE_LINES).
+const MINIMAP_LABEL_PX = 8;
+const MINIMAP_LABEL_ROWS = 5;
 
 const $ = (id) => document.getElementById(id);
 const timing = (window.__gitrTiming = {});
 
-let monaco, editor, decos, wordDecos, fileDecos;
+let editor, decos, wordDecos, fileDecos;
 let doc = null;                // current diff payload
 let fileStarts = [];           // sorted 1-based start line per file
 let fileRows = [];             // DOM rows parallel to doc.files
@@ -48,9 +46,6 @@ let commentStamp = null;
 let totalComments = 0;         // including comments on files not in this diff       // review.json mtime they were read at
 let editing = null;            // {line, key, file, kind, text} of the open comment editor
 const zones = new Map();       // zone key -> {id, sig, zone}
-
-require.config({ paths: { vs: MONACO + '/vs' } });
-require(['vs/editor/editor.main'], (m) => { monaco = m; init(); });
 
 // --setup ----------------------------------------------------------------
 
@@ -97,9 +92,9 @@ function init() {
     // Big agent diffs are exactly the case here; without this Monaco turns
     // tokenization (our colours) off above 20 MB / 300k lines.
     largeFileOptimizations: false,
-    automaticLayout: true, fontSize: 13, lineHeight: 19, scrollBeyondLastLine: true,
+    automaticLayout: true, fontSize: 14, lineHeight: 20, scrollBeyondLastLine: true,
     minimap: { enabled: true, renderCharacters: true, size: 'proportional', scale: 1, maxColumn: 120,
-               showSlider: 'always' },
+               showSlider: 'always', sectionHeaderFontSize: MINIMAP_LABEL_PX },
     lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 16,
     glyphMargin: false, folding: true, showFoldingControls: 'mouseover',
     foldingMaximumRegions: 200000,
@@ -386,8 +381,8 @@ function markHeadersInMinimap() {
     // Monaco draws a section label on a box of 70% minimap background and
     // offers no option to change it; colouring the rows underneath tints
     // that box, which keeps the label and still marks the file.
-    // One decoration per row: Monaco 0.52 paints the full-width row of a
-    // multi-line minimap decoration only for its first line.
+    // One decoration per row: Monaco (0.52 and 0.57 alike) does not paint
+    // a multi-line minimap decoration evenly across its rows.
     const last = Math.min(f.start + MINIMAP_LABEL_ROWS - 1, f.end);
     for (let ln = f.start; ln <= last; ln++)
       list.push({ range: new monaco.Range(ln, 1, ln, 1),
@@ -1133,3 +1128,5 @@ function el(tag, cls, content) {
   else if (content != null) e.textContent = content;
   return e;
 }
+
+init();

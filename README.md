@@ -42,7 +42,10 @@ gitr-serve --port 9000 ~/dev/repo-a
 From a checkout, without installing: `python3 gitr_web/server.py`, with
 `--reload` to restart on changes to `gitr_web/server.py` or `gitr.py`. The
 page files under `gitr_web/static/` are read from disk on every request, so
-changes to them only need a browser refresh.
+changes to them only need a browser refresh. The Monaco bundle under
+`gitr_web/static/monaco/` is built and committed; to move to another Monaco
+version, change it in `monaco/package.json` and run
+`cd monaco && npm install && npm run build` (Node is needed for that only).
 
 With no repository arguments the list is read from
 `~/.config/gitr/projects.json`:
@@ -71,8 +74,8 @@ the remote one); each app is named after its server's hostname.
 Pick a worktree on the left; the base defaults to `main` / `master` and can be
 any ref. The base and the untracked / wrap options are remembered per
 worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
-for the first time starts from the ones last used in its project. The page
-loads Monaco from a CDN, so the browser needs internet access.
+for the first time starts from the ones last used in its project. Monaco is
+bundled in the package, so the page needs no internet access.
 
 As in gitr, "collapse re-indent" shows a removed and added line that differ
 only in whitespace as one dimmed `~` line, and the right-click menu copies

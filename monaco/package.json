@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "description": "Builds the Monaco bundle gitr-serve ships in gitr_web/static/monaco/",
+  "scripts": {"build": "sh build.sh"},
+  "devDependencies": {"monaco-editor": "0.57.0", "esbuild": "0.25.12"}
+}

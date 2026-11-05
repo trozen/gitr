@@ -163,8 +163,8 @@ whole diff in one read-only document as in gitr.
          (`--app=URL`, else a browser tab via `webbrowser`), exit when the
          window closes (page heartbeat). Stdlib only: no embedded web view.
       2. Parity with the Tk window (keyboard navigation, comments panel,
-         word-diff and line-number modes) and Monaco bundled instead of
-         loaded from a CDN, so it works offline. Check the start-up time
+         word-diff and line-number modes); Monaco is already bundled, so it
+         works offline. Check the start-up time
          (a browser window vs Tk's) is acceptable.
       3. `gitr` launches it; the Tk window stays behind `gitr --tk` until
          it is no longer used, then goes.
@@ -175,6 +175,9 @@ whole diff in one read-only document as in gitr.
       lines (empty files, pure renames, one-line changes): Monaco draws
       each label on a box about 7 minimap rows tall. Fixed by padding every
       file to at least 7 lines.
+- [x] Sticky headers broke when the top of the view was inside a long
+      wrapped line that ends a file or hunk (a Monaco 0.52 bug). Fixed by
+      moving to Monaco 0.57, bundled with esbuild (`monaco/`).
 
 ---
 

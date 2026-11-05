@@ -48,6 +48,6 @@ Everything lives in `gitr.py`. The flow is:
 ## Constraints
 
 - **No non-ASCII characters** anywhere in the source (no Unicode arrows, box-drawing chars, etc.).
-- Single file, no dependencies beyond stdlib. Do not add packages. (`gitr_web/` is the separate web command; its page loads Monaco from a CDN.)
+- Single file, no dependencies beyond stdlib. Do not add packages. (`gitr_web/` is the separate web command; its page uses Monaco, bundled by `monaco/build.sh` into `gitr_web/static/monaco/`, which is generated and committed: do not edit it by hand.)
 - `tkinter` is imported optionally in `gitr.py`: gitr-serve and `--export` must work without it. Keep Tk out of module-level code (annotations are not evaluated, via `from __future__ import annotations`).
 - Colour scheme is Catppuccin Mocha (hex values in the `C` dict).

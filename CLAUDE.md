@@ -41,8 +41,13 @@ Everything lives in `gitr.py`. The flow is:
 6. The diff panel is rendered skeleton-first (`_render_diff_panel`): the whole document is emitted synchronously as plain lines, queued via `_emit` (which merges adjacent same-tag segments because Tk's insert cost is per tagged segment) with `_cur_line` tracking line numbers, so file positions, gutter numbers and the minimap are final at first paint. Word-diff highlighting is applied afterwards in place, in timed chunks starting from the visible region (`_word_diff_step`, using `Text.replace` so the view never moves). Parsing and the initial render run after the window is up, behind a progress label that replaces the diff widget (`_show_progress`) and is refreshed every 100 ms; the same label covers reloads and re-renders. Comments are added, edited and removed incrementally (`_shift_lines` keeps every line-keyed record consistent); only word-diff toggles, reload and clear-all re-render. Each comment has a kind (note / good / bad) that sets its colour and text marker everywhere it appears (the agent export and terminal dump spell the kind out instead); the kinds and the context menu's one-click presets are the hard-coded `COMMENT_KINDS` and `COMMENT_PRESETS` tables near the top of the file.
 7. The minimap is VS Code style: fixed pixels per line, one column per character, scrolling with the document when the diff is taller than the canvas. Only the visible band is rasterised, as a binary PPM handed to `PhotoImage(data=...)`, with per-line pixel rows cached in `_mm_rows`.
 
+### gitr-serve
+
+`gitr_web/` is a second command from the same package: a stdlib HTTP server (`server.py`) serving a Monaco-based page (`static/`) for many repos and their worktrees. It imports gitr's parser, `ReviewStore`, anchor matching and export from `gitr.py`, so `.gitr/review.json` stays shared with the window. The whole diff is one Monaco document plus per-line metadata (`Doc`); word-diff ranges are fetched in windows. Run from a checkout with `python3 gitr_web/server.py --reload`.
+
 ## Constraints
 
 - **No non-ASCII characters** anywhere in the source (no Unicode arrows, box-drawing chars, etc.).
-- Single file, no dependencies beyond stdlib. Do not add packages.
+- Single file, no dependencies beyond stdlib. Do not add packages. (`gitr_web/` is the separate web command; its page uses Monaco, bundled by `monaco/build.sh` into `gitr_web/static/monaco/`, which is generated and committed: do not edit it by hand.)
+- `tkinter` is imported optionally in `gitr.py`: gitr-serve and `--export` must work without it. Keep Tk out of module-level code (annotations are not evaluated, via `from __future__ import annotations`).
 - Colour scheme is Catppuccin Mocha (hex values in the `C` dict).

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """gitr - lightweight Git diff viewer"""
 
+# Annotations stay unevaluated, so the few naming Tk types do not need
+# tkinter at import time (see the import below).
+from __future__ import annotations
+
 import argparse
 import bisect
 import difflib
@@ -15,14 +19,21 @@ import sys
 import textwrap
 import time
 import zlib
-import tkinter as tk
 from collections import deque
 from itertools import accumulate
-from tkinter import font as tkfont
-from tkinter import messagebox
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Only the window needs Tk. gitr-serve imports this module for the parser and
+# the review store on machines that may lack python3-tk, and --export
+# never opens a window.
+try:
+    import tkinter as tk
+    from tkinter import font as tkfont
+    from tkinter import messagebox
+except ImportError:
+    tk = tkfont = messagebox = None
 
 _CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'config.json'
 
@@ -309,8 +320,9 @@ class ReviewStore:
     when the count exceeds a threshold).
     """
 
-    def __init__(self) -> None:
-        gitr_dir = _find_gitr_dir()
+    def __init__(self, gitr_dir: 'Path | None' = None) -> None:
+        # gitr-serve passes the worktree's .gitr; the window uses the cwd's repo.
+        gitr_dir = gitr_dir or _find_gitr_dir()
         self._gitr_dir = gitr_dir
         self._path = (gitr_dir / 'review.json') if gitr_dir else None
         self._snap_dir = (gitr_dir / 'snapshots') if gitr_dir else None
@@ -344,7 +356,11 @@ class ReviewStore:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps({'files': self._data}, indent=2))
+            # gitr-serve and a gitr window may both use this file; a reader
+            # must never see it half written.
+            tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
+            tmp.write_text(json.dumps({'files': self._data}, indent=2))
+            tmp.replace(self._path)
         except OSError:
             pass
 
@@ -441,6 +457,8 @@ class ReviewStore:
 _FILEHEADER_PREFIXES = (
     'diff ', 'index ', '--- ', '+++ ',
     'new file', 'deleted file', 'old mode', 'new mode', 'rename ',
+    # a renamed or copied file with changes (copies only with git diff -C)
+    'similarity index ', 'dissimilarity index ', 'copy from ', 'copy to ',
 )
 
 
@@ -456,13 +474,17 @@ def _classify(line: str) -> str:
     return 'context'
 
 
-_HUNK_RE = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
+_HUNK_RE = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
 def parse_diff(text: str) -> list[DiffFile]:
     files: list[DiffFile] = []
     current: Optional[DiffFile] = None
     cur_old = cur_new = 0  # next line numbers within the active hunk
+    # Lines the active hunk still holds, from its header. Inside a hunk only
+    # the first character decides the kind: a removed "-- x" reads "--- x"
+    # and must not be taken for a file header.
+    left_old = left_new = 0
 
     for raw in text.splitlines():
         if raw.startswith('diff --git '):
@@ -472,15 +494,25 @@ def parse_diff(text: str) -> list[DiffFile]:
             path = raw[b_idx + 3:] if b_idx != -1 else 'unknown'
             current = DiffFile(path)
             cur_old = cur_new = 0
+            left_old = left_new = 0
         if current is not None:
-            kind = _classify(raw)
+            if (left_old > 0 or left_new > 0) and raw[:1] in ('+', '-', ' ', ''):
+                kind = {'+': 'added', '-': 'removed'}.get(raw[:1], 'context')
+                if kind != 'added':
+                    left_old -= 1
+                if kind != 'removed':
+                    left_new -= 1
+            else:
+                kind = _classify(raw)
             new_no: Optional[int] = None
             old_no: Optional[int] = None
             if kind == 'hunk':
                 m = _HUNK_RE.match(raw)
                 if m:
                     cur_old = int(m.group(1))
-                    cur_new = int(m.group(2))
+                    cur_new = int(m.group(3))
+                    left_old = int(m.group(2) or 1)
+                    left_new = int(m.group(4) or 1)
             elif kind == 'context':
                 old_no, new_no = cur_old, cur_new
                 cur_old += 1
@@ -504,6 +536,9 @@ def parse_diff(text: str) -> list[DiffFile]:
                 elif raw.startswith('rename from '):
                     current.status = 'R'
                     current.old_path = raw[len('rename from '):]
+                elif raw.startswith('copy from '):
+                    current.status = 'C'
+                    current.old_path = raw[len('copy from '):]
                 elif raw.startswith('index '):
                     current.index = raw
 
@@ -937,7 +972,9 @@ def _use_dark_appearance(root: tk.Tk) -> None:
         pass  # Tk older than 8.6.10
 
 
-class _FlatButton(tk.Label):
+# The base is evaluated at import, and this module must import without Tk
+# (gitr-serve, --export); the class is only used once a window exists.
+class _FlatButton(tk.Label if tk is not None else object):
     """tk.Button stand-in for aqua, where tk.Button is a native control that
     ignores bg/fg and draws a light push button over the dark UI."""
 
@@ -1689,6 +1726,7 @@ class App:
         self._diff.tag_configure('status_M',    foreground=C['status_M'])
         self._diff.tag_configure('status_D',    foreground=C['status_D'])
         self._diff.tag_configure('status_R',    foreground=C['status_R'])
+        self._diff.tag_configure('status_C',    foreground=C['status_R'])
         self._diff.tag_configure('hover',       background=self._ruler_bg)
         self._diff.tag_configure('hover_line',  background=_blend(C['topbar_bg'], 0.72))
         self._diff.tag_configure('repaint',     background=C['bg'])
@@ -1701,6 +1739,7 @@ class App:
         self._flist.tag_configure('status_M',  foreground=C['status_M'])
         self._flist.tag_configure('status_D',  foreground=C['status_D'])
         self._flist.tag_configure('status_R',  foreground=C['status_R'])
+        self._flist.tag_configure('status_C',  foreground=C['status_R'])
         self._flist.tag_configure('stats',     foreground=C['subdued'])
         self._flist.tag_configure('dir',       foreground=C['subdued'])
         for _kind, (_col, _m) in COMMENT_KINDS.items():
@@ -4688,6 +4727,9 @@ def main() -> None:
         print('gitr: no changes')
         sys.exit(0)
 
+    if tk is None:
+        sys.exit('gitr: the window needs tkinter (e.g. the python3-tk package); '
+                 '--export works without it')
     root = tk.Tk()
     cwd = Path(os.getcwd())
     try:

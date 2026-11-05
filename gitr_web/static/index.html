@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gitr</title>
+<link rel="stylesheet" href="monaco/editor.css">
+<link rel="stylesheet" href="app.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/favicon-32.png">
+<meta name="theme-color" content="#191a21">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <section id="projects-section">
+      <h2>Projects</h2>
+      <div id="projects" class="list"></div>
+    </section>
+    <section id="files-section">
+      <h2>Changed files <span id="files-count"></span></h2>
+      <div id="files" class="list"></div>
+    </section>
+  </aside>
+  <div id="sash"></div>
+  <main id="main">
+    <header id="topbar">
+      <span id="crumb">no worktree selected</span>
+      <label class="base">base <input id="base" spellcheck="false" size="14"></label>
+      <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
+      <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
+      <label class="opt" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> collapse re-indent</label>
+      <span id="mergebase" class="dim"></span>
+      <span id="changed" hidden>worktree changed <button id="reload">reload</button></span>
+      <span id="removed" hidden>worktree removed</span>
+      <span id="review">
+        <span id="ccount" class="dim"></span>
+        <span class="nav"><button id="prev-comment" title="Previous comment">&#8593;</button><button id="next-comment" title="Next comment">&#8595;</button></span>
+        <button id="copy-agent" title="Copy all comments as text for a coding agent (also kept in .gitr/review.md)">copy for agent</button>
+        <button id="clear-comments" title="Delete all comments of this worktree (review.json is backed up first)">clear</button>
+      </span>
+    </header>
+    <div id="editor-wrap">
+      <div id="editor"></div>
+      <div id="progress" hidden></div>
+      <div id="cmenu" hidden></div>
+      <div id="measure"></div>
+    </div>
+    <footer id="statusbar"><span id="stats"></span><span id="timing" class="dim"></span></footer>
+  </main>
+</div>
+<script src="monaco/editor.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

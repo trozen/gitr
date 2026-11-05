@@ -1,0 +1,172 @@
+/* Colours follow gitr's C dict (Dracula). */
+:root {
+  --bg: #282a36;
+  --bg-side: #21222c;
+  --bg-bar: #191a21;
+  --fg: #f8f8f2;
+  --dim: #6272a4;
+  --sel: #44475a;
+  --add: #50fa7b;
+  --rem: #ff5555;
+  --hunk: #ffb86c;
+  --file: #bd93f9;
+  --ren: #ff79c6;
+  --note: #f1fa8c;
+  /* Diff backgrounds are translucent tints: Monaco paints line decorations
+     over the selection, so an opaque colour would hide it. */
+  --add-bg: rgba(80, 250, 123, .06);
+  --rem-bg: rgba(255, 85, 85, .06);
+  --add-hi: rgba(80, 250, 123, .22);
+  --rem-hi: rgba(255, 85, 85, .25);
+  --head-bg: rgba(189, 147, 249, .18);  /* = HEADER_BG in app.js over --bg */
+  --file-line: rgba(189, 147, 249, .6);
+  --font: 13px/1.4 system-ui, sans-serif;
+  --mono: 13px "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: var(--font); }
+button { font: inherit; color: var(--fg); background: var(--sel); border: 1px solid var(--dim);
+         border-radius: 3px; padding: 0 8px; cursor: pointer; }
+button:hover { background: color-mix(in srgb, var(--sel) 75%, var(--fg)); border-color: var(--fg); }
+button:active { background: var(--bg); transform: translateY(1px); }
+.dim { color: var(--dim); }
+
+#app { display: flex; height: 100vh; }
+#sidebar { width: 340px; min-width: 180px; display: flex; flex-direction: column;
+           background: var(--bg-side); overflow: hidden; }
+#sash { width: 4px; cursor: col-resize; background: var(--bg-bar); }
+#sash:hover, #sash.drag { background: var(--dim); }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+     text-transform: uppercase; color: var(--dim); }
+#projects-section { max-height: 40%; display: flex; flex-direction: column; border-bottom: 1px solid var(--bg-bar); }
+#files-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.list { overflow: auto; flex: 1; padding-bottom: 8px; }
+
+.row { display: flex; align-items: baseline; gap: 6px; padding: 1px 12px; white-space: nowrap;
+       cursor: pointer; user-select: none; }
+.row:hover { background: #2c2e3a; }
+.row.active { background: var(--sel); }
+.row .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.project { font-weight: 600; cursor: default; }
+.project:hover { background: none; }
+.wt { padding-left: 24px; }
+.wt .branch { color: var(--file); }
+.err { color: var(--rem); padding: 1px 24px; }
+
+.file .st { font: var(--mono); width: 1ch; text-align: center; }
+.st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R, .st-C { color: var(--ren); }
+.file .name.st-D { text-decoration: line-through; }
+.file .namecell { display: flex; align-items: baseline; min-width: 0; }
+.file .namecell .name { overflow: hidden; text-overflow: ellipsis; }
+.file .namecell .n-cmt { flex: none; margin-left: 6px; }
+.file .n { font: 12px monospace; }
+/* Tree: VS Code's 8px indent per level with a guide line, and a chevron
+   (drawn, the source stays ASCII) that points down when open. */
+#files .row { padding-left: 8px; gap: 0; }
+#files .row > .n, #files .row > .st { margin-left: 6px; }
+#files .guide { align-self: stretch; flex: none; width: 12px; margin-left: 4px; border-left: 1px solid #ffffff14; }
+.chev, .chev-space { flex: none; width: 16px; align-self: center; }
+.chev::before { content: ""; display: block; width: 5px; height: 5px; margin: 0 0 3px 4px;
+  border: solid var(--fg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .8; }
+.dir.collapsed .chev::before { transform: rotate(-45deg); margin: 1px 0 1px 3px; }
+#files .row.dir { color: var(--fg); }
+.n-add { color: var(--add); } .n-rem { color: var(--rem); }
+
+#topbar { display: flex; align-items: center; gap: 14px; padding: 4px 12px; background: var(--bg-bar);
+          white-space: nowrap; overflow: hidden; }
+#crumb { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+#base { font: var(--mono); font-size: 12px; background: var(--bg); color: var(--fg);
+        border: 1px solid var(--sel); padding: 1px 4px; }
+#changed { color: var(--note); }
+#removed { color: var(--rem); }
+.opt { display: flex; align-items: center; gap: 4px; color: var(--dim); }
+#editor-wrap { flex: 1; position: relative; min-height: 0; }
+#editor { position: absolute; inset: 0; }
+#progress { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            background: var(--bg); color: var(--dim); font-size: 15px; z-index: 10; white-space: pre; }
+#statusbar { display: flex; justify-content: space-between; padding: 2px 12px; font-size: 12px;
+             background: var(--bg-bar); }
+
+/* Monaco decorations */
+.l-add { background: var(--add-bg); }
+.l-rem { background: var(--rem-bg); }
+/* A file header is a two-line tinted band (name, first hunk) with a line
+   above it; any later hunk header, as in gitr, only a thin line above (on
+   the gutter too, across the view). */
+.l-file, .l-file2 { background: var(--head-bg); }
+.l-file { border-top: 1px solid var(--file-line); }
+.l-head { border-top: 1px solid var(--dim); }
+/* The sticky header's first line is always a file header: the files are the
+   outermost folding regions. */
+.monaco-editor .sticky-widget .sticky-line-content[data-sticky-line-index="0"],
+.monaco-editor .sticky-widget .sticky-line-number[data-sticky-line-index="0"] {
+  border-top: 1px solid var(--file-line);
+}
+.w-add { background: var(--add-hi); border-radius: 2px; }
+.w-rem { background: var(--rem-hi); border-radius: 2px; }
+/* lineNumber() pads with spaces to form the old / new columns */
+.monaco-editor .line-numbers { white-space: pre; }
+
+/* Review comments */
+#review { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+#review .nav { display: flex; }
+#review .nav button { padding: 0 6px; }
+#review .nav button:first-child { border-radius: 3px 0 0 3px; border-right: none; }
+#review .nav button:last-child { border-radius: 0 3px 3px 0; }
+.n-cmt { color: var(--c); }
+#timing.flash { color: var(--note); }
+/* Gutter column between the line numbers and the code: "+" on hover, a
+   kind-coloured bar where a comment is. */
+.monaco-editor .c-add { cursor: pointer; }
+.monaco-editor .c-add::before { content: "+"; display: block; width: 14px; height: 14px; margin: 3px 0 0 1px;
+  border-radius: 3px; background: var(--file); color: var(--bg); font: bold 13px/14px monospace;
+  text-align: center; }
+.monaco-editor .c-mark { cursor: pointer; }
+.monaco-editor .c-mark::before { content: ""; display: block; width: 4px; height: 100%; margin-left: 6px;
+  border-radius: 2px; background: var(--c); }
+.c-note { --c: #f1fa8c; } .c-good { --c: #8be9fd; } .c-bad { --c: #ff79c6; }
+.c-zone { padding: 4px 0; font: var(--font); }
+.c-box { box-sizing: border-box; border-left: 3px solid var(--c); border-radius: 3px; padding: 4px 10px;
+  background: color-mix(in srgb, var(--c) 20%, var(--bg-side)); color: var(--fg); cursor: pointer; }
+.c-head { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.c-head .grow { flex: 1; }
+.c-loc { font: var(--mono); font-size: 12px; color: var(--fg); }
+.c-act { font-size: 11px; line-height: 16px; padding: 0 6px; background: none; border-color: transparent; }
+.c-act:hover, .c-kindbtn:hover { border-color: currentColor; background: rgba(255, 255, 255, .08); }
+.c-act:active, .c-kindbtn:active { background: rgba(255, 255, 255, .18); }
+.c-act.c-good { color: var(--c); }
+.c-section { padding: 2px 10px; background: var(--head-bg); border-top: 1px solid var(--file-line);
+  color: #fff; font: var(--mono); font-weight: bold; }
+.c-kind { color: var(--c); font: bold 11px monospace; }
+.c-flag { color: var(--dim); font-style: italic; }
+.c-quote { font: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+.c-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.c-edit { cursor: default; }
+.c-input { display: block; width: 100%; resize: none; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--sel); border-radius: 3px; padding: 4px 6px; font: var(--font); }
+.c-input:focus { outline: none; border-color: var(--c); }
+.c-bar { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.c-bar .grow { flex: 1; }
+.c-kinds { display: flex; gap: 4px; }
+.c-kindbtn { color: var(--c); background: none; border-color: transparent; font: 11px monospace; }
+.c-kindbtn.on { border-color: var(--c); }
+.c-del { color: var(--rem); }
+#measure { position: absolute; visibility: hidden; left: 0; top: 0; pointer-events: none; }
+#cmenu { position: absolute; z-index: 20; min-width: 160px; padding: 4px 0; background: var(--bg-side);
+  border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
+#cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }
+#cmenu .c-item:hover { background: var(--sel); }
+#cmenu .c-item.c-note, #cmenu .c-item.c-good, #cmenu .c-item.c-bad { color: var(--c); font-family: monospace; }
+#cmenu .c-sep { height: 1px; margin: 4px 0; background: var(--sel); }
+.c-zone { position: absolute; }
+
+/* Scrollbars outside the editor (sidebar lists) look like Monaco's: 14px,
+   no track, translucent square thumb. These are its vs-dark defaults. */
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(121, 121, 121, .4); }
+::-webkit-scrollbar-thumb:hover { background: rgba(100, 100, 100, .7); }
+::-webkit-scrollbar-thumb:active { background: rgba(191, 191, 191, .4); }

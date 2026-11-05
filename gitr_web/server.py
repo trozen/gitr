@@ -742,7 +742,8 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self) -> bool:
         # Binding to localhost does not stop DNS rebinding: a page from another
         # site can resolve its own name to 127.0.0.1 and read the API. The Host
-        # header still carries that name, so only loopback names are served.
+        # header still carries that name, so only loopback names are served,
+        # plus the names given with --allow-host.
         host = (self.headers.get('Host') or '').rsplit(':', 1)[0].strip('[]').lower()
         return host in ALLOWED_HOSTS
 
@@ -836,10 +837,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, CONTENT_TYPES.get(p.suffix, 'application/octet-stream'), etag)
 
 
+def read_config() -> dict:
+    return json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+
+
 def load_repos(args_repos: list[str]) -> list[dict]:
-    items: list = list(args_repos)
-    if not items and CONFIG_PATH.exists():
-        items = json.loads(CONFIG_PATH.read_text()).get('projects', [])
+    items: list = list(args_repos) or read_config().get('projects', [])
     repos = []
     for it in items:
         path = it if isinstance(it, str) else it['path']
@@ -909,7 +912,19 @@ def config_template(args_repos: list[str]) -> str:
         except GitError:
             pass
     projects: list = paths or ['~/dev/repo-a', {'path': '~/dev/repo-b', 'name': 'b'}]
-    return json.dumps({'projects': projects}, indent=2)
+    return json.dumps({'projects': projects, 'allow_hosts': tailscale_names()}, indent=2)
+
+
+def tailscale_names() -> list[str]:
+    """This machine's name on the tailnet, the one `tailscale serve` is
+    reached by, if Tailscale runs here."""
+    try:
+        out = subprocess.run(['tailscale', 'status', '--json'], capture_output=True,
+                             text=True, timeout=3).stdout
+        name = json.loads(out)['Self']['DNSName'].rstrip('.')
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return []
+    return [name] if name else []
 
 
 def main() -> None:
@@ -917,6 +932,10 @@ def main() -> None:
     ap.add_argument('repos', nargs='*', help=f'repositories (default: {CONFIG_PATH})')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=4487)  # "gitr" on a phone keypad
+    ap.add_argument('--allow-host', action='append', default=[], metavar='NAME',
+                    help='also answer to this host name, e.g. the machine\'s name under '
+                         '`tailscale serve` (repeatable; added to "allow_hosts" in '
+                         f'{CONFIG_PATH.name}); the server still listens on --host')
     ap.add_argument('--reload', action='store_true',
                     help='restart when server.py or gitr.py changes (for development)')
     ap.add_argument('--print-config', action='store_true',
@@ -937,8 +956,13 @@ def main() -> None:
                  f'  create it with: gitr-serve --print-config [repo ...] > {CONFIG_PATH}')
     Handler.state = State(repos)
     ALLOWED_HOSTS.add(a.host.lower())
+    # Machine settings: they apply also when the repos come from the command line.
+    allow = [*read_config().get('allow_hosts', []), *a.allow_host]
+    ALLOWED_HOSTS.update(h.lower().rstrip('.') for h in allow)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f'gitr-serve: http://{a.host}:{a.port}/', file=sys.stderr)
+    for h in allow:
+        print(f'  also answering as {h}', file=sys.stderr)
     width = max(len(r['name']) for r in repos)
     for r in repos:
         print(f"  {r['name']:<{width}}  {tilde(r['path'])}", file=sys.stderr)

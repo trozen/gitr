@@ -21,6 +21,16 @@ const HUNK_MINIMAP = '#bd93f94d';
 // (server.py MIN_FILE_LINES).
 const MINIMAP_LABEL_PX = 8;
 const MINIMAP_LABEL_ROWS = 5;
+const FONT_MIN = 8, FONT_MAX = 28;
+// The CSS variable each size sets; the diff's goes to Monaco instead.
+const FONTS = [
+  { key: 'diff', label: 'Diff', def: 15 },
+  { key: 'comments', label: 'Comments', def: 13, css: '--comment-px' },
+  { key: 'sidebar', label: 'Sidebar', def: 13, css: '--sidebar-px' },
+  { key: 'bars', label: 'Top and status bar', def: 13, css: '--bar-px' },
+];
+// Per browser rather than per worktree: the right size depends on the screen.
+const SETTINGS_KEY = 'gitr.settings';
 
 const $ = (id) => document.getElementById(id);
 const timing = (window.__gitrTiming = {});
@@ -92,7 +102,7 @@ function init() {
     // Big agent diffs are exactly the case here; without this Monaco turns
     // tokenization (our colours) off above 20 MB / 300k lines.
     largeFileOptimizations: false,
-    automaticLayout: true, fontSize: 14, lineHeight: 20, scrollBeyondLastLine: true,
+    automaticLayout: true, ...fontOptions(fontSize('diff')), scrollBeyondLastLine: true,
     minimap: { enabled: true, renderCharacters: true, size: 'proportional', scale: 1, maxColumn: 120,
                showSlider: 'always', sectionHeaderFontSize: MINIMAP_LABEL_PX },
     lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 16,
@@ -128,6 +138,7 @@ function init() {
     if (shown) saveSettings(shown.wt, shown.base);
   });
   initSash();
+  initSettings();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
   setInterval(refreshProjects, PROJECTS_MS);
@@ -140,12 +151,65 @@ function initSash() {
   sash.addEventListener('mousedown', (e) => {
     e.preventDefault();
     sash.classList.add('drag');
-    const move = (ev) => { side.style.width = Math.max(180, ev.clientX) + 'px'; };
+    const move = (ev) => { side.style.width = Math.max(180, ev.clientX - side.getBoundingClientRect().left) + 'px'; };
     const up = () => { sash.classList.remove('drag');
       removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
     addEventListener('mousemove', move);
     addEventListener('mouseup', up);
   });
+}
+
+let prefs = {};
+try { prefs = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) { /* blocked or bad */ }
+
+const clampFont = (px) => Math.min(FONT_MAX, Math.max(FONT_MIN, px));
+
+function fontSize(key) {
+  const px = prefs.fonts?.[key];
+  return Number.isFinite(px) ? clampFont(px) : FONTS.find((f) => f.key === key).def;
+}
+
+// The 14 / 20 ratio tuned earlier; 15 gets 21.
+const fontOptions = (px) => ({ fontSize: px, lineHeight: Math.round(px * 10 / 7) });
+
+function applyFont(f) {
+  const px = fontSize(f.key);
+  if (!f.css) editor.updateOptions(fontOptions(px));
+  else document.documentElement.style.setProperty(f.css, px + 'px');
+  if (f.out) f.out.textContent = px;
+}
+
+function setFont(f, px) {
+  const fonts = { ...prefs.fonts };
+  px = clampFont(px);
+  if (px === f.def) delete fonts[f.key]; else fonts[f.key] = px;
+  prefs = { ...prefs, fonts };
+  applyFont(f);
+  // Comment boxes have fixed zone heights, measured at their font size.
+  if (f.key === 'comments') renderZones(true);
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(prefs)); }
+  catch (e) { /* storage blocked: the size lasts for this page only */ }
+}
+
+function initSettings() {
+  const panel = $('settings'), btn = $('settings-btn');
+  for (const f of FONTS) {
+    const down = el('button', null, '-'), up = el('button', null, '+');
+    const reset = el('button', null, 'reset');
+    down.title = 'Smaller'; up.title = 'Larger'; reset.title = `Back to ${f.def}`;
+    f.out = el('span', 'size');
+    down.addEventListener('click', () => setFont(f, fontSize(f.key) - 1));
+    up.addEventListener('click', () => setFont(f, fontSize(f.key) + 1));
+    reset.addEventListener('click', () => setFont(f, f.def));
+    $('font-rows').append(el('div', 'set-row', [el('span', 'grow', f.label), down, f.out, up, reset]));
+    applyFont(f);
+  }
+  const show = (on) => { panel.hidden = !on; btn.classList.toggle('on', on); };
+  btn.addEventListener('click', () => show(panel.hidden));
+  addEventListener('mousedown', (e) => {
+    if (!panel.contains(e.target) && !btn.contains(e.target)) show(false);
+  });
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') show(false); });
 }
 
 async function api(path, params) {

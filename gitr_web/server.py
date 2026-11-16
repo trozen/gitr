@@ -860,7 +860,8 @@ def supervise() -> None:
     the Python source changes. A separate process rather than re-exec'ing
     itself, so a save with a syntax error leaves the supervisor waiting for
     the next save instead of ending it. The page files are read from disk on
-    every request and need no restart."""
+    every request and need no restart, only a browser reload, which is
+    printed."""
     here = Path(__file__).resolve()
     watched = [here, Path(gitr.__file__).resolve()]
 
@@ -873,17 +874,38 @@ def supervise() -> None:
                 out.append(0)
         return tuple(out)
 
+    def page_stamp() -> dict:
+        out = {}
+        for p in STATIC_DIR.rglob('*'):
+            try:
+                if p.is_file():
+                    out[p] = p.stat().st_mtime_ns
+            except OSError:
+                pass
+        return out
+
     cmd = [sys.executable, str(here), *sys.argv[1:]]
     env = dict(os.environ, **{RELOAD_CHILD_ENV: '1'})
     # A plain `kill` of the supervisor must not leave the server running.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    # Shows when an installed copy, not the checkout being edited, is watched.
+    print(f"gitr-serve: --reload watching {', '.join(tilde(str(p)) for p in watched)} "
+          f"and the page in {tilde(str(STATIC_DIR))}", file=sys.stderr)
     child = None
     try:
         while True:
             seen = stamp()
             child = subprocess.Popen(cmd, env=env)
+            pages = page_stamp()
             while stamp() == seen:
                 time.sleep(0.5)
+                now = page_stamp()
+                if now != pages:
+                    changed = sorted(str(p.relative_to(STATIC_DIR)) for p in now.keys() | pages.keys()
+                                     if now.get(p) != pages.get(p))
+                    print(f"gitr-serve: page changed ({', '.join(changed)}), reload the browser",
+                          file=sys.stderr)
+                    pages = now
             print('gitr-serve: source changed, restarting', file=sys.stderr)
             child.terminate()
             child.wait()
@@ -961,6 +983,8 @@ def main() -> None:
     ALLOWED_HOSTS.update(h.lower().rstrip('.') for h in allow)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f'gitr-serve: http://{a.host}:{a.port}/', file=sys.stderr)
+    found = '' if CONFIG_PATH.exists() else ' (not found)'
+    print(f'  config {tilde(str(CONFIG_PATH))}{found}', file=sys.stderr)
     for h in allow:
         print(f'  also answering as {h}', file=sys.stderr)
     width = max(len(r['name']) for r in repos)

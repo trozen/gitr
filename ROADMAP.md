@@ -143,6 +143,19 @@ whole diff in one read-only document as in gitr.
       systemd user unit (`systemctl --user`, with `loginctl enable-linger`
       so it survives logout) rather than self-daemonizing; plain
       `gitr-serve` stays the foreground mode the unit runs
+- [x] Font sizes (diff, comments, sidebar, top and status bar) in a
+      settings popup, from the gear at the bottom of an activity bar left
+      of the sidebar (as in VS Code); kept per browser
+- [ ] Project switcher as a popup from the top bar instead of a list in
+      the sidebar, so the file list keeps the full height
+- [ ] Keep each project's state across switches: the loaded diff, scroll
+      position and open editors stay as they were, so a project that
+      needs a reload still shows the pre-reload diff on return (with its
+      banner) until reload is clicked
+- [ ] Changes since the last reload: on reload, mark the lines that differ
+      from the previous load (per file, the old diff text against the
+      new one), so after an agent's follow-up only the new work stands
+      out; the marks clear on the next reload
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line
@@ -157,6 +170,13 @@ whole diff in one read-only document as in gitr.
       merges included. Use it to pick the review base (any commit, not just
       a branch) and to narrow the head side (e.g. review up to `HEAD^^`
       instead of the working tree)
+- [ ] Phone view (Android, as an installed web app over `tailscale serve`):
+      Monaco is not supported on mobile browsers and our comment controls
+      need hover and right-click, so a separate light page rather than the
+      desktop one squeezed: the diff from the same API drawn as plain HTML,
+      one file at a time with a file picker, tap a line to comment, the
+      comment boxes with accept / copy / delete as on the desktop. Same
+      `review.json`, so a review moves between phone and desktop
 - [ ] Replace the Tk window with the web view: `gitr` becomes a launcher
       for a one-diff `gitr-serve`, so there is one UI to maintain. Steps:
       1. A one-diff mode in gitr-serve: refs or a piped patch (also outside

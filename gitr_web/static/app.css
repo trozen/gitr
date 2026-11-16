@@ -21,7 +21,12 @@
   --head-bg: rgba(189, 147, 249, .18);  /* = HEADER_BG in app.js over --bg */
   --file-line: rgba(189, 147, 249, .6);
   --font: 13px/1.4 system-ui, sans-serif;
-  --mono: 13px "JetBrains Mono", "DejaVu Sans Mono", monospace;
+  --mono: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+  /* Set from the settings popup (app.js FONTS); the smaller texts in each
+     area are sized in em so they follow. */
+  --sidebar-px: 13px;
+  --bar-px: 13px;
+  --comment-px: 13px;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -34,12 +39,12 @@ button:active { background: var(--bg); transform: translateY(1px); }
 
 #app { display: flex; height: 100vh; }
 #sidebar { width: 340px; min-width: 180px; display: flex; flex-direction: column;
-           background: var(--bg-side); overflow: hidden; }
+           background: var(--bg-side); overflow: hidden; font-size: var(--sidebar-px); }
 #sash { width: 4px; cursor: col-resize; background: var(--bg-bar); }
 #sash:hover, #sash.drag { background: var(--dim); }
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-spacing: .06em;
      text-transform: uppercase; color: var(--dim); }
 #projects-section { max-height: 40%; display: flex; flex-direction: column; border-bottom: 1px solid var(--bg-bar); }
 #files-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -56,13 +61,13 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .wt .branch { color: var(--file); }
 .err { color: var(--rem); padding: 1px 24px; }
 
-.file .st { font: var(--mono); width: 1ch; text-align: center; }
+.file .st { font-family: var(--mono); width: 1ch; text-align: center; }
 .st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R, .st-C { color: var(--ren); }
 .file .name.st-D { text-decoration: line-through; }
 .file .namecell { display: flex; align-items: baseline; min-width: 0; }
 .file .namecell .name { overflow: hidden; text-overflow: ellipsis; }
 .file .namecell .n-cmt { flex: none; margin-left: 6px; }
-.file .n { font: 12px monospace; }
+.file .n { font-family: monospace; font-size: .92em; }
 /* Tree: VS Code's 8px indent per level with a guide line, and a chevron
    (drawn, the source stays ASCII) that points down when open. */
 #files .row { padding-left: 8px; gap: 0; }
@@ -76,9 +81,9 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 .n-add { color: var(--add); } .n-rem { color: var(--rem); }
 
 #topbar { display: flex; align-items: center; gap: 14px; padding: 4px 12px; background: var(--bg-bar);
-          white-space: nowrap; overflow: hidden; }
+          white-space: nowrap; overflow: hidden; font-size: var(--bar-px); }
 #crumb { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-#base { font: var(--mono); font-size: 12px; background: var(--bg); color: var(--fg);
+#base { font-family: var(--mono); font-size: .92em; background: var(--bg); color: var(--fg);
         border: 1px solid var(--sel); padding: 1px 4px; }
 #changed { color: var(--note); }
 #removed { color: var(--rem); }
@@ -87,7 +92,8 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
 #editor { position: absolute; inset: 0; }
 #progress { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
             background: var(--bg); color: var(--dim); font-size: 15px; z-index: 10; white-space: pre; }
-#statusbar { display: flex; justify-content: space-between; padding: 2px 12px; font-size: 12px;
+#statusbar { display: flex; align-items: center; gap: 12px; padding: 2px 4px 2px 12px;
+             font-size: calc(var(--bar-px) * .92);
              background: var(--bg-bar); }
 
 /* Monaco decorations */
@@ -129,32 +135,49 @@ h2 { margin: 0; padding: 6px 12px; font-size: 11px; font-weight: 600; letter-spa
   border-radius: 2px; background: var(--c); }
 .c-note { --c: #f1fa8c; } .c-good { --c: #8be9fd; } .c-bad { --c: #ff79c6; }
 .c-zone { padding: 4px 0; font: var(--font); }
+/* #measure sizes a comment box before it is placed in its zone */
+.c-zone, #measure { font-size: var(--comment-px); }
 .c-box { box-sizing: border-box; border-left: 3px solid var(--c); border-radius: 3px; padding: 4px 10px;
   background: color-mix(in srgb, var(--c) 20%, var(--bg-side)); color: var(--fg); cursor: pointer; }
-.c-head { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.c-head { display: flex; align-items: center; gap: 10px; font-size: .85em; }
 .c-head .grow { flex: 1; }
-.c-loc { font: var(--mono); font-size: 12px; color: var(--fg); }
-.c-act { font-size: 11px; line-height: 16px; padding: 0 6px; background: none; border-color: transparent; }
+.c-loc { font-family: var(--mono); font-size: 1.1em; color: var(--fg); }
+.c-act { font-size: 1em; line-height: 1.45; padding: 0 6px; background: none; border-color: transparent; }
 .c-act:hover, .c-kindbtn:hover { border-color: currentColor; background: rgba(255, 255, 255, .08); }
 .c-act:active, .c-kindbtn:active { background: rgba(255, 255, 255, .18); }
 .c-act.c-good { color: var(--c); }
 .c-section { padding: 2px 10px; background: var(--head-bg); border-top: 1px solid var(--file-line);
-  color: #fff; font: var(--mono); font-weight: bold; }
-.c-kind { color: var(--c); font: bold 11px monospace; }
+  color: #fff; font-family: var(--mono); font-weight: bold; }
+.c-kind { color: var(--c); font-weight: bold; font-family: monospace; }
 .c-flag { color: var(--dim); font-style: italic; }
-.c-quote { font: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+.c-quote { font-family: var(--mono); font-size: .92em; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
 .c-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .c-edit { cursor: default; }
 .c-input { display: block; width: 100%; resize: none; background: var(--bg); color: var(--fg);
-  border: 1px solid var(--sel); border-radius: 3px; padding: 4px 6px; font: var(--font); }
+  border: 1px solid var(--sel); border-radius: 3px; padding: 4px 6px; font: inherit; }
 .c-input:focus { outline: none; border-color: var(--c); }
 .c-bar { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 .c-bar .grow { flex: 1; }
 .c-kinds { display: flex; gap: 4px; }
-.c-kindbtn { color: var(--c); background: none; border-color: transparent; font: 11px monospace; }
+.c-kindbtn { color: var(--c); background: none; border-color: transparent; font-family: monospace; font-size: .85em; }
 .c-kindbtn.on { border-color: var(--c); }
 .c-del { color: var(--rem); }
 #measure { position: absolute; visibility: hidden; left: 0; top: 0; pointer-events: none; }
+/* An activity bar as in VS Code (48px there), left of the sidebar */
+#activity { flex: none; width: 40px; display: flex; flex-direction: column; align-items: center;
+            padding: 4px 0 8px; background: var(--bg-bar); }
+#activity .grow { flex: 1; }
+#activity button { width: 40px; height: 40px; padding: 0; display: flex; align-items: center;
+                   justify-content: center; color: var(--dim); background: none; border: none;
+                   border-radius: 0; }
+#activity button:hover, #activity button.on { color: var(--fg); background: none; }
+#activity button:active { transform: none; }
+#settings { position: fixed; left: 44px; bottom: 8px; z-index: 30; min-width: 260px; padding-bottom: 8px;
+  background: var(--bg-side); border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
+#settings .set-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; }
+#settings .grow, #statusbar .grow { flex: 1; }
+#settings .set-row button { padding: 0 6px; }
+#settings .size { min-width: 3ch; text-align: center; font-family: var(--mono); }
 #cmenu { position: absolute; z-index: 20; min-width: 160px; padding: 4px 0; background: var(--bg-side);
   border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }

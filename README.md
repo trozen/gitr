@@ -135,3 +135,8 @@ agents may commit it.
 ## Requirements
 
 Python 3.10+, Tkinter (included in most Python distributions). No other dependencies.
+
+## Credits
+
+gitr-serve's icons are from [Codicons](https://github.com/microsoft/vscode-codicons)
+by Microsoft, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

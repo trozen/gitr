@@ -126,9 +126,7 @@ function init() {
   editor.onDidScrollChange(onScroll);
   initComments();
 
-  $('base').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && current) load(current.wt, $('base').value.trim() || current.defaultBase, null, viewPosition());
-  });
+  initBasePicker();
   $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition()));
   $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
   $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
@@ -139,6 +137,7 @@ function init() {
   });
   initSash();
   initSettings();
+  initSwitcher();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
   setInterval(refreshProjects, PROJECTS_MS);
@@ -151,7 +150,9 @@ function initSash() {
   sash.addEventListener('mousedown', (e) => {
     e.preventDefault();
     sash.classList.add('drag');
-    const move = (ev) => { side.style.width = Math.max(180, ev.clientX - side.getBoundingClientRect().left) + 'px'; };
+    // a variable, as the switcher above the sidebar follows its width
+    const move = (ev) => document.documentElement.style.setProperty('--side-w',
+      Math.max(180, ev.clientX - side.getBoundingClientRect().left) + 'px');
     const up = () => { sash.classList.remove('drag');
       removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
     addEventListener('mousemove', move);
@@ -212,6 +213,109 @@ function initSettings() {
   addEventListener('keydown', (e) => { if (e.key === 'Escape') show(false); });
 }
 
+// --base picker -------------------------------------------------------------
+
+function aheadBehind(ahead, behind) {
+  if (ahead == null) return [];
+  const out = [el('span', 'n-add', `+${ahead}`)];
+  if (behind) out.push(' ', el('span', 'n-rem', `-${behind}`));
+  return out;
+}
+
+let baseRefs = null;   // /api/refs for the worktree the picker opened on
+let baseTyped = false; // the list filters only once the user types
+
+function applyBase(name) {
+  hideBasePicker();
+  $('base').blur();
+  if (current) load(current.wt, name.trim() || current.defaultBase, null, viewPosition());
+}
+
+function hideBasePicker() {
+  $('basepop').hidden = true;
+}
+
+async function showBasePicker() {
+  if (!current) return;
+  const pop = $('basepop'), r = $('base').getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + 'px';
+  pop.style.top = r.bottom + 4 + 'px';
+  pop.hidden = false;
+  baseTyped = false;
+  baseRefs = null;
+  renderBaseList();
+  const wt = current.wt;
+  try {
+    const refs = await api('/api/refs', { wt });
+    if (current?.wt === wt) { baseRefs = refs; renderBaseList(); }
+  } catch (e) {
+    $('base-list').textContent = '';
+    $('base-list').append(el('div', 'err', e.message));
+  }
+}
+
+// The default base first, then the upstream (what is not pushed yet), the
+// branches of the project's other worktrees (agents branch off each
+// other's work), and every branch, remote branch and tag, most recent first.
+function baseSections() {
+  const byName = new Map((baseRefs?.refs || []).map((r) => [r.name, r]));
+  const entry = worktrees.get(current.wt);
+  const others = entry ? entry.p.worktrees.filter((w) => w.path !== current.wt && w.branch).map((w) => w.branch) : [];
+  const refs = baseRefs?.refs || [];
+  const sections = [
+    ['default', [current.defaultBase]],
+    ['upstream', baseRefs?.upstream ? [baseRefs.upstream] : []],
+    ['other worktrees', others],
+    ['branches', refs.filter((r) => r.kind === 'branch').map((r) => r.name)],
+    ['remote branches', refs.filter((r) => r.kind === 'remote').map((r) => r.name)],
+    ['tags', refs.filter((r) => r.kind === 'tag').map((r) => r.name)],
+  ];
+  // The worktree's own branch would diff HEAD against itself.
+  const seen = new Set(entry?.w.branch ? [entry.w.branch] : []);
+  return sections.map(([title, names]) => [title, names.filter((n) => !seen.has(n) && seen.add(n))
+    .map((n) => byName.get(n) || { name: n })]);
+}
+
+function renderBaseList() {
+  const box = $('base-list');
+  box.textContent = '';
+  const words = baseTyped ? $('base').value.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  let any = false;
+  for (const [title, refs] of baseSections()) {
+    const rows = refs.filter((r) => words.every((w) => r.name.toLowerCase().includes(w)));
+    if (!rows.length) continue;
+    any = true;
+    box.append(el('h2', null, title));
+    for (const r of rows) {
+      const row = el('div', 'row', [el('span', 'grow ref', r.name), el('span', 'ab', aheadBehind(r.ahead, r.behind))]);
+      row.classList.toggle('active', r.name === current.base);
+      if (r.ahead != null) row.title = `HEAD: ${r.ahead} ahead, ${r.behind} behind`;
+      // mousedown, not click: the field's blur must not close the list first
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); applyBase(r.name); });
+      box.append(row);
+    }
+  }
+  if (!baseRefs) box.append(el('div', 'none', 'loading branches ...'));
+  else if (!any) box.append(el('div', 'none', 'no match; Enter uses it as typed'));
+}
+
+function initBasePicker() {
+  const input = $('base'), pop = $('basepop');
+  input.addEventListener('focus', () => { input.select(); showBasePicker(); });
+  // also when the field already has the focus, e.g. after Enter
+  input.addEventListener('click', () => { if (pop.hidden) showBasePicker(); });
+  input.addEventListener('input', () => { baseTyped = true; if (!pop.hidden) renderBaseList(); });
+  // Enter takes the text as typed: any ref or commit, listed or not.
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') applyBase(input.value);
+    if (e.key === 'Escape') { input.value = current?.base || ''; hideBasePicker(); input.blur(); }
+  });
+  input.addEventListener('blur', () => {
+    hideBasePicker();
+    if (current && input.value !== current.base) input.value = current.base;
+  });
+}
+
 async function api(path, params) {
   const r = await fetch(path + '?' + new URLSearchParams(params));
   const body = await r.json();
@@ -234,6 +338,8 @@ async function loadProjects() {
     const pos = hash.get('file') ? { file: hash.get('file'), at: +hash.get('at') || 0, off: +hash.get('off') || 0 }
                                  : worktrees.get(initial).w.position;
     load(initial, hash.get('base') || st.base, worktrees.get(initial).p.defaultBase, pos);
+  } else {
+    showSwitcher(true);
   }
 }
 
@@ -256,25 +362,85 @@ function renderProjects(projects) {
   const box = $('projects');
   box.textContent = '';
   for (const p of projects) {
-    box.append(el('div', 'row project', [el('span', 'grow', p.name)]));
-    if (p.error) box.append(el('div', 'err', p.error));
+    const group = el('div', 'group', [el('div', 'row project', [el('span', 'grow', p.name)])]);
+    if (p.error) group.append(el('div', 'err', p.error));
     for (const w of p.worktrees) {
-      const label = w.branch || (w.head ? w.head + ' (detached)' : '?');
       const rel = w.path === p.path ? '' : w.path.split('/').pop();
-      const row = el('div', 'row wt', [el('span', 'grow branch', label), el('span', 'dim', rel)]);
+      const row = el('div', 'row wt', [el('span', 'grow branch', wtLabel(w)), el('span', 'dim', rel)]);
       row.title = w.path;
       row.dataset.wt = w.path;
+      row.dataset.hay = [p.name, wtLabel(w), rel].join(' ').toLowerCase();
       row.classList.toggle('active', w.path === current?.wt);
       worktrees.set(w.path, { p, w });
       row.addEventListener('click', () => {
+        showSwitcher(false);
         const st = settingsFor(w.path);
         applyOptions(st);
         load(w.path, st.base, p.defaultBase, w.position);
       });
-      box.append(row);
+      group.append(row);
     }
+    box.append(group);
   }
+  box.append(el('div', 'none', 'no match'));
+  filterSwitcher();
   updateRemoved();
+  updateCrumb();
+}
+
+const wtLabel = (w) => w.branch || (w.head ? w.head + ' (detached)' : '?');
+
+function updateCrumb() {
+  const entry = current && worktrees.get(current.wt);
+  $('crumb-text').textContent = !current ? 'select a worktree'
+    : entry ? `${entry.p.name} \u203a ${wtLabel(entry.w)}` : current.wt;
+  $('crumb').title = (current ? current.wt + '\n' : '') + 'Switch project or worktree';
+}
+
+function showSwitcher(on) {
+  const sw = $('switcher');
+  sw.hidden = !on;
+  $('crumb').classList.toggle('on', on);
+  if (!on) return;
+  const r = $('crumb').getBoundingClientRect();
+  sw.style.width = Math.max(440, r.width - 8) + 'px';
+  sw.style.left = r.left + 4 + 'px';
+  sw.style.top = r.bottom + 2 + 'px';
+  const f = $('switch-filter');
+  f.value = '';
+  filterSwitcher();
+  f.focus();
+  $('projects').querySelector('.wt.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+// Every word typed has to appear in the project name, branch or folder.
+function filterSwitcher() {
+  const words = $('switch-filter').value.toLowerCase().split(/\s+/).filter(Boolean);
+  let any = false;
+  for (const g of $('projects').querySelectorAll('.group')) {
+    let shown = 0;
+    for (const row of g.querySelectorAll('.wt')) {
+      row.hidden = !words.every((w) => row.dataset.hay.includes(w));
+      if (!row.hidden) shown++;
+    }
+    g.hidden = words.length > 0 && !shown;
+    any ||= !g.hidden;
+  }
+  $('projects').querySelector('.none').hidden = any;
+}
+
+function initSwitcher() {
+  const sw = $('switcher'), btn = $('crumb'), f = $('switch-filter');
+  btn.addEventListener('click', () => showSwitcher(sw.hidden));
+  f.addEventListener('input', filterSwitcher);
+  // Enter takes the first match, as in a search field.
+  f.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sw.querySelector('.wt:not([hidden])')?.click();
+  });
+  addEventListener('mousedown', (e) => {
+    if (!sw.contains(e.target) && !btn.contains(e.target)) showSwitcher(false);
+  });
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') showSwitcher(false); });
 }
 
 // What the list shows; settings and positions are not part of it.
@@ -336,7 +502,7 @@ async function load(wt, base, defaultBase, restore) {
   setHash({ wt, base, untracked, ...(restore || {}) });
   document.querySelectorAll('.wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
   $('base').value = base;
-  $('crumb').textContent = wt;
+  updateCrumb();
   $('changed').hidden = true;
   $('removed').hidden = true;
   shown = null;
@@ -346,7 +512,11 @@ async function load(wt, base, defaultBase, restore) {
   try {
     d = await api('/api/diff', { wt, base, untracked, reindent: $('reindent').checked ? '1' : '0' });
   } catch (e) {
-    if (gen === wordGen) showProgress('error: ' + e.message);
+    if (gen === wordGen) {
+      showProgress('error: ' + e.message);
+      $('base').classList.add('bad');
+      $('base').title = e.message;
+    }
     return;
   }
   if (gen !== wordGen) return;
@@ -355,6 +525,8 @@ async function load(wt, base, defaultBase, restore) {
   await nextFrame();
   doc = d;
   shown = { wt, base, untracked };
+  $('base').classList.remove('bad');
+  $('base').title = 'Any branch, tag or commit; click for a list';
   saveSettings(wt, base);  // only a base that loaded is worth remembering
   fileStarts = d.files.map((f) => f.start);
   let maxNo = 1;
@@ -381,7 +553,10 @@ async function load(wt, base, defaultBase, restore) {
                           serverGit: d.timing.git_ms, serverDoc: d.timing.doc_ms,
                           lines: d.kinds.length, files: d.files.length,
                           bytes: d.text.length });
-  $('mergebase').textContent = 'merge-base ' + d.mergeBase;
+  $('mergebase').textContent = '';
+  $('mergebase').append('merge-base ' + d.mergeBase + '  ', ...aheadBehind(d.ahead, d.behind));
+  $('mergebase').title = `HEAD is ${d.ahead} commit${d.ahead === 1 ? '' : 's'} ahead of ${base}` +
+    (d.behind ? `, which has ${d.behind} commit${d.behind === 1 ? '' : 's'} not in HEAD` : '');
   const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
   $('stats').textContent = `${d.files.length} files  +${add} -${del}  ${d.kinds.length} lines`;
   $('timing').textContent = `git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +

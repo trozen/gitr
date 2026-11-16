@@ -146,8 +146,17 @@ whole diff in one read-only document as in gitr.
 - [x] Font sizes (diff, comments, sidebar, top and status bar) in a
       settings popup, from the gear at the bottom of an activity bar left
       of the sidebar (as in VS Code); kept per browser
-- [ ] Project switcher as a popup from the top bar instead of a list in
-      the sidebar, so the file list keeps the full height
+- [x] Project switcher: the top bar spans the window, and its left end,
+      as wide as the activity bar and sidebar below it, is a
+      `project > branch` button opening a popup with the worktrees by
+      project and a filter field; the file list keeps the full height
+- [x] Base picker: the base field lists the default, the upstream, the
+      other worktrees' branches, and all branches and tags with ahead /
+      behind counts; a ref that does not exist marks the field
+- [ ] Wrap and collapse re-indent into the settings popup: they change
+      only how the diff is shown, not what is reviewed. Decide whether
+      they stay per worktree (saved on the server, as now) or become one
+      choice per browser like the font sizes
 - [ ] Keep each project's state across switches: the loaded diff, scroll
       position and open editors stay as they were, so a project that
       needs a reload still shows the pre-reload diff on return (with its

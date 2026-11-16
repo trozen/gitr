@@ -490,6 +490,7 @@ class State:
                    '--src-prefix=a/', '--dst-prefix=b/', mb)
         if untracked:
             text += untracked_diff(wt)
+        ahead, behind = ahead_behind(wt, base)
         t_git = time.perf_counter()
         doc = Doc(parse_diff(text), reindent)
         t_doc = time.perf_counter()
@@ -500,6 +501,7 @@ class State:
                 self._docs.popitem(last=False)
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
+            'ahead': ahead, 'behind': behind,
             'fingerprint': fp,
             'text': '\n'.join(doc.lines), 'kinds': ''.join(doc.kinds),
             'oldNo': doc.old_no, 'newNo': doc.new_no, 'files': doc.files,
@@ -677,6 +679,46 @@ def merge_base(wt: str, base: str) -> str:
     return git(wt, 'merge-base', base, 'HEAD').strip()
 
 
+REFS_PER_KIND = 200  # most recent first; repos with thousands of tags exist
+
+
+def list_refs(wt: str) -> dict:
+    """Branches, remote branches and tags to offer as the base, most recent
+    first, each with how far HEAD is ahead of and behind it."""
+    fields = '%(refname)%00%(refname:short)'
+    roots = ('refs/heads', 'refs/remotes', 'refs/tags')
+    try:
+        # ahead-behind counts every ref in one walk; git 2.41 and newer.
+        out = git(wt, 'for-each-ref', '--sort=-committerdate',
+                  f'--format={fields}%00%(ahead-behind:HEAD)', *roots)
+    except GitError:
+        out = git(wt, 'for-each-ref', '--sort=-committerdate', f'--format={fields}', *roots)
+    kinds = {'refs/heads/': 'branch', 'refs/remotes/': 'remote', 'refs/tags/': 'tag'}
+    refs, per_kind = [], {}
+    for line in out.splitlines():
+        full, short, *ab = line.split('\0')
+        kind = next((k for prefix, k in kinds.items() if full.startswith(prefix)), None)
+        if kind is None or full.endswith('/HEAD') or per_kind.get(kind, 0) >= REFS_PER_KIND:
+            continue
+        per_kind[kind] = per_kind.get(kind, 0) + 1
+        ref = {'name': short, 'kind': kind}
+        if ab and ab[0]:
+            # "<only in ref> <only in HEAD>"
+            behind, ahead = ab[0].split()
+            ref.update(ahead=int(ahead), behind=int(behind))
+        refs.append(ref)
+    try:
+        upstream = git(wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}').strip()
+    except GitError:
+        upstream = None
+    return {'refs': refs, 'upstream': upstream}
+
+
+def ahead_behind(wt: str, base: str) -> tuple[int, int]:
+    behind, ahead = git(wt, 'rev-list', '--left-right', '--count', f'{base}...HEAD').split()
+    return int(ahead), int(behind)
+
+
 def fingerprint(wt: str, merge_base: str, untracked: bool) -> str:
     """Cheap change detector: HEAD, the status listing and the size/mtime of
     every listed path. Agents editing a file change its mtime even when the
@@ -758,6 +800,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/diff':
                 return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1',
                                                   q.get('reindent') == '1'))
+            if url.path == '/api/refs':
+                return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':
                 return self._json(self.state.word_ranges(q['wt'], q['id'],
                                                          int(q['from']), int(q['to'])))

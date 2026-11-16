@@ -27,6 +27,7 @@
   --sidebar-px: 13px;
   --bar-px: 13px;
   --comment-px: 13px;
+  --side-w: 340px;  /* dragged with the sash */
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -37,8 +38,9 @@ button:hover { background: color-mix(in srgb, var(--sel) 75%, var(--fg)); border
 button:active { background: var(--bg); transform: translateY(1px); }
 .dim { color: var(--dim); }
 
-#app { display: flex; height: 100vh; }
-#sidebar { width: 340px; min-width: 180px; display: flex; flex-direction: column;
+#app { display: flex; flex-direction: column; height: 100vh; }
+#work { flex: 1; display: flex; min-height: 0; }
+#sidebar { width: var(--side-w); min-width: 180px; display: flex; flex-direction: column;
            background: var(--bg-side); overflow: hidden; font-size: var(--sidebar-px); }
 #sash { width: 4px; cursor: col-resize; background: var(--bg-bar); }
 #sash:hover, #sash.drag { background: var(--dim); }
@@ -46,7 +48,6 @@ button:active { background: var(--bg); transform: translateY(1px); }
 
 h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-spacing: .06em;
      text-transform: uppercase; color: var(--dim); }
-#projects-section { max-height: 40%; display: flex; flex-direction: column; border-bottom: 1px solid var(--bg-bar); }
 #files-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .list { overflow: auto; flex: 1; padding-bottom: 8px; }
 
@@ -59,7 +60,7 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 .project:hover { background: none; }
 .wt { padding-left: 24px; }
 .wt .branch { color: var(--file); }
-.err { color: var(--rem); padding: 1px 24px; }
+.err { color: var(--rem); padding: 1px 24px; white-space: pre-wrap; }
 
 .file .st { font-family: var(--mono); width: 1ch; text-align: center; }
 .st-A { color: var(--add); } .st-M { color: var(--file); } .st-D { color: var(--rem); } .st-R, .st-C { color: var(--ren); }
@@ -80,11 +81,38 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 #files .row.dir { color: var(--fg); }
 .n-add { color: var(--add); } .n-rem { color: var(--rem); }
 
-#topbar { display: flex; align-items: center; gap: 14px; padding: 4px 12px; background: var(--bg-bar);
+/* Across the whole window: the worktree and its base apply to the file list
+   and the diff alike. */
+#topbar { flex: none; display: flex; align-items: center; gap: 14px; padding: 0 12px 0 0; min-height: 30px;
+          background: var(--bg-bar); border-bottom: 1px solid var(--sel);
           white-space: nowrap; overflow: hidden; font-size: var(--bar-px); }
-#crumb { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+/* Over the activity bar, sidebar and sash, so that its width follows the
+   sidebar's and a longer name never moves the rest of the bar. */
+#crumb { flex: none; align-self: stretch; width: calc(40px + var(--side-w) + 4px); display: flex;
+         align-items: center; gap: 8px; padding: 0 12px; font-weight: 600; text-align: left;
+         background: none; border: none; border-right: 1px solid var(--sel); border-radius: 0; }
+#crumb:hover, #crumb.on { background: var(--sel); }
+#crumb:active { transform: none; }
+#crumb-text { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+/* a drawn chevron pointing down, the source stays ASCII */
+#crumb::after { content: ""; flex: none; width: 5px; height: 5px; margin-bottom: 3px;
+  border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .8; }
+.pop { position: fixed; z-index: 30; max-width: calc(100vw - 16px); max-height: 70vh;
+  display: flex; flex-direction: column; background: var(--bg-side);
+  border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
+#switcher { width: 440px; font-size: var(--sidebar-px); }
+#basepop { width: 380px; padding-top: 4px; font-size: var(--bar-px); }
+#basepop .ref { font-family: var(--mono); font-size: .92em; }
+#basepop .ab { font-family: var(--mono); font-size: .92em; }
+#basepop .row.active { background: var(--sel); }
+#switch-filter { margin: 8px; padding: 3px 6px; font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--sel); border-radius: 3px; }
+#switch-filter:focus { outline: none; border-color: var(--file); }
+.pop .none { padding: 2px 12px 6px; color: var(--dim); }
 #base { font-family: var(--mono); font-size: .92em; background: var(--bg); color: var(--fg);
         border: 1px solid var(--sel); padding: 1px 4px; }
+#base:focus { outline: none; border-color: var(--file); }
+#base.bad { border-color: var(--rem); }
 #changed { color: var(--note); }
 #removed { color: var(--rem); }
 .opt { display: flex; align-items: center; gap: 4px; color: var(--dim); }

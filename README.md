@@ -107,8 +107,14 @@ on different local ports (e.g. `ssh -L 4488:127.0.0.1:4487 remote-host` for
 the remote one) or one of them through Tailscale; each app is named after its
 server's hostname.
 
-Pick a worktree on the left; the base defaults to `main` / `master` and can be
-any ref. The base and the untracked / wrap options are remembered per
+Pick a worktree with the `project > branch` button at the top left; the
+base defaults to `main` / `master` and can be any ref. Clicking the base
+field lists the default, the branch's upstream, the branches of the
+project's other worktrees, and all branches and tags, each with how many
+commits HEAD is ahead of (and behind) it; typing filters the list, and
+Enter takes the text as typed (a commit hash, `HEAD~3`). The counts for the
+current base are also shown next to the merge-base. The base and the
+untracked / wrap options are remembered per
 worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
 for the first time starts from the ones last used in its project. Monaco is
 bundled in the package, so the page needs no internet access.

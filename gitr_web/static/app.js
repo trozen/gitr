@@ -138,6 +138,7 @@ function init() {
   initSash();
   initSettings();
   initSwitcher();
+  initViews();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
   setInterval(refreshProjects, PROJECTS_MS);
@@ -188,8 +189,59 @@ function setFont(f, px) {
   applyFont(f);
   // Comment boxes have fixed zone heights, measured at their font size.
   if (f.key === 'comments') renderZones(true);
+  savePrefs();
+}
+
+function savePrefs() {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(prefs)); }
-  catch (e) { /* storage blocked: the size lasts for this page only */ }
+  catch (e) { /* storage blocked: the choice lasts for this page only */ }
+}
+
+// --left pane views: changed files or comments -----------------------------
+
+function setView(view) {
+  for (const b of document.querySelectorAll('#activity .view')) b.classList.toggle('on', b.dataset.view === view);
+  $('files-section').hidden = view !== 'files';
+  $('comments-section').hidden = view !== 'comments';
+  if (prefs.view !== view) { prefs = { ...prefs, view }; savePrefs(); }
+}
+
+function initViews() {
+  for (const b of document.querySelectorAll('#activity .view')) b.addEventListener('click', () => setView(b.dataset.view));
+  setView(prefs.view === 'comments' ? 'comments' : 'files');
+}
+
+// In diff order under their files, as the zones are stacked; comments on
+// files not in the diff at the end.
+function renderCommentList() {
+  const box = $('comment-list');
+  box.textContent = '';
+  $('comments-count').textContent = comments.length ? `(${comments.length})` : '';
+  if (!doc) return;
+  if (!comments.length) { box.append(el('div', 'empty', 'no comments')); return; }
+  let file = null, elsewhere = false;
+  comments.forEach((c, i) => {
+    if (c.elsewhere && !elsewhere) {
+      elsewhere = true;
+      box.append(el('div', 'row cl-head', 'on files not in this diff'));
+    }
+    if (c.file !== file) {
+      file = c.file;
+      const head = el('div', 'row cl-file', [el('span', 'grow', file)]);
+      head.title = file;
+      box.append(head);
+    }
+    const first = c.text.split('\n')[0];
+    const flag = c.orphan ? 'orphaned' : c.moved ? 'moved' : '';
+    const row = el('div', 'row cmt c-' + c.kind, [
+      el('span', 'c-kind', KIND_MARK[c.kind]), el('span', 'txt', first),
+      ...(flag ? [el('span', 'flag', flag)] : []),
+      el('span', 'ln', c.lineNo ? String(c.lineNo) : ''),
+    ]);
+    row.title = c.text;
+    row.addEventListener('click', () => scrollToComment(i));
+    box.append(row);
+  });
 }
 
 function initSettings() {
@@ -207,6 +259,13 @@ function initSettings() {
   }
   const show = (on) => { panel.hidden = !on; btn.classList.toggle('on', on); };
   btn.addEventListener('click', () => show(panel.hidden));
+  // An installed app has no browser reload button.
+  $('reload-app').addEventListener('click', () => {
+    // The hash brings back the worktree and the scroll position at once,
+    // without waiting for the debounced update.
+    if (shown) setHash({ ...shown, ...(viewPosition() || {}) });
+    location.reload();
+  });
   addEventListener('mousedown', (e) => {
     if (!panel.contains(e.target) && !btn.contains(e.target)) show(false);
   });
@@ -1036,6 +1095,7 @@ function applyComments(r) {
   // (the "no changes" note stays in #progress, hidden while they show).
   if (doc && !doc.files.length) $('progress').hidden = !!r.elsewhere;
   renderZones(false);
+  renderCommentList();
 }
 
 // Zones are keyed so that only changed boxes are re-created; re-creating
@@ -1101,8 +1161,7 @@ const JUMP_CONTEXT = 3;  // lines of the diff left above a comment jumped to
 
 // Comments come from the server in diff order, those on files not in the
 // diff last, as their zones are stacked.
-function jumpComment(dir) {
-  if (!comments.length) return;
+function commentTops() {
   const lh = editor.getOption(monaco.editor.EditorOption.lineHeight);
   const tops = [];
   let line = -1, y = 0;
@@ -1111,6 +1170,17 @@ function jumpComment(dir) {
     tops.push(Math.max(0, y - JUMP_CONTEXT * lh));
     y += zones.get(keyStr(c))?.zone.heightInPx || 0;
   }
+  return tops;
+}
+
+function scrollToComment(i) {
+  pinned = null;
+  editor.setScrollTop(commentTops()[i]);
+}
+
+function jumpComment(dir) {
+  if (!comments.length) return;
+  const tops = commentTops();
   const now = editor.getScrollTop();
   const i = dir > 0 ? tops.findIndex((t) => t > now + 1) : tops.findLastIndex((t) => t < now - 1);
   if (i < 0) return flash(dir > 0 ? 'no more comments below' : 'no more comments above');

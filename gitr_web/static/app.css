@@ -200,11 +200,25 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
                    border-radius: 0; }
 #activity button:hover, #activity button.on { color: var(--fg); background: none; }
 #activity button:active { transform: none; }
+/* the open view: VS Code's bar along the button's left edge */
+#activity button.view.on { box-shadow: inset 2px 0 0 var(--fg); color: var(--fg); }
+#comments-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#comments-count { font-weight: normal; }
+.cl-file { color: var(--file); padding-left: 12px; margin-top: 4px; }
+.cl-file .grow { direction: rtl; text-align: left; }  /* ellipsis eats the start of a long path */
+.cl-head { color: var(--dim); padding-left: 12px; margin-top: 6px; font-style: italic; }
+.cmt { padding-left: 24px; }
+.cmt .c-kind { flex: none; }
+.cmt .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.cmt .ln { flex: none; color: var(--dim); font-family: var(--mono); font-size: .92em; }
+.cmt .flag { flex: none; color: var(--dim); font-style: italic; }
+.empty { padding: 4px 12px; color: var(--dim); }
 #settings { position: fixed; left: 44px; bottom: 8px; z-index: 30; min-width: 260px; padding-bottom: 8px;
   background: var(--bg-side); border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #settings .set-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; }
 #settings .grow, #statusbar .grow { flex: 1; }
 #settings .set-row button { padding: 0 6px; }
+#settings .reload-row { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--sel); }
 #settings .size { min-width: 3ch; text-align: center; font-family: var(--mono); }
 #cmenu { position: absolute; z-index: 20; min-width: 160px; padding: 4px 0; background: var(--bg-side);
   border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }

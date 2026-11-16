@@ -168,9 +168,16 @@ whole diff in one read-only document as in gitr.
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line
-- [ ] Comments panel in the sidebar: every comment in diff order with
-      file:line, kind and its first line; click to jump. Comments on files
-      not in the current diff listed at the end
+- [x] Comments panel in the sidebar, picked with the activity bar (files /
+      comments): every comment in diff order under its file, with kind,
+      first line and line number; click to jump. Comments on files not in
+      the current diff listed at the end
+- [ ] Multi-repo projects: a project directory that is not a git repo but
+      holds several (e.g. a workspace with one checkout per service). To
+      decide: list the sub-repos as separate entries under the project, or
+      review them as one combined diff with the repo name prefixed to each
+      path (one base per sub-repo, comments still in each repo's `.gitr/`);
+      and how agent worktrees map when each sub-repo has its own
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
 - [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
 - [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks

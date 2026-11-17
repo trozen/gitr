@@ -119,6 +119,11 @@ worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
 for the first time starts from the ones last used in its project. Monaco is
 bundled in the package, so the page needs no internet access.
 
+When the worktree changes, a "worktree changed" note with a reload button
+appears in the top bar (the view never re-renders by itself). It says what
+a reload would bring, compared with the diff on screen: the new commits,
+and how many changed lines would appear and go, in how many files.
+
 As in gitr, "collapse re-indent" shows a removed and added line that differ
 only in whitespace as one dimmed `~` line, and the right-click menu copies
 the file path, `path:line`, or `path:line` with the line (or the selection
@@ -132,7 +137,10 @@ and line, as "copy for agent" gives them) and "delete". The arrows next to
 the comment count jump to the next and previous comment. Comments on files
 not in the current diff are listed in a section after its last line. The
 icons at the top of the left bar switch the sidebar between the changed
-files and a list of all comments by file; clicking a comment scrolls to it.
+files and a list of all comments by file; clicking a comment scrolls to it,
+and its x (on hover) deletes it. The file list's header has collapse all and
+expand all, and "Reveal in file list" in the right-click menu shows the
+file of that line in the list, opening its folders.
 Comments are stored in the worktree's `.gitr/review.json`, the same file a
 gitr window uses, so a review can move between the two. On every change the
 server also writes the agent export to `.gitr/review.md`, so an agent in that

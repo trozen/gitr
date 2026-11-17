@@ -14,13 +14,15 @@
 <div id="app">
 <header id="topbar">
   <button id="crumb" title="Switch project or worktree"><span id="crumb-text">select a worktree</span></button>
-  <label class="base">base <input id="base" spellcheck="false" size="14" autocomplete="off"
+  <div id="bar-items">
+  <label class="base">base <input id="base" type="search" role="combobox" aria-autocomplete="list" aria-controls="base-list"
+    aria-expanded="false" spellcheck="false" size="14" autocomplete="off"
     title="Any branch, tag or commit; click for a list"></label>
   <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
   <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
   <label class="opt" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> collapse re-indent</label>
   <span id="mergebase" class="dim"></span>
-  <span id="changed" hidden>worktree changed <button id="reload">reload</button></span>
+  <span id="changed" hidden>worktree changed<span id="changed-what"></span> <button id="reload">reload</button></span>
   <span id="removed" hidden>worktree removed</span>
   <span id="review">
     <span id="ccount" class="dim"></span>
@@ -28,6 +30,7 @@
     <button id="copy-agent" title="Copy all comments as text for a coding agent (also kept in .gitr/review.md)">copy for agent</button>
     <button id="clear-comments" title="Delete all comments of this worktree (review.json is backed up first)">clear</button>
   </span>
+  </div>
 </header>
 <div id="work">
   <nav id="activity">
@@ -46,11 +49,14 @@
   </nav>
   <aside id="sidebar">
     <section id="files-section">
-      <h2>Changed files <span id="files-count"></span></h2>
+      <h2>Changed files <span id="files-count"></span><span class="grow"></span>
+        <button id="collapse-all" class="h-act" title="Collapse all folders"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M14 4.27051C14.5999 4.62053 15 5.26009 15 6V11C15 13.21 13.21 15 11 15H6C5.26009 15 4.62053 14.5999 4.27051 14H11C12.65 14 14 12.65 14 11V4.27051Z"/><path d="M9.5 7C9.776 7 10 7.224 10 7.5C10 7.776 9.776 8 9.5 8H5.5C5.224 8 5 7.776 5 7.5C5 7.224 5.224 7 5.5 7H9.5Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M11 2C12.103 2 13 2.897 13 4V11C13 12.103 12.103 13 11 13H4C2.897 13 2 12.103 2 11V4C2 2.897 2.897 2 4 2H11ZM4 3C3.449 3 3 3.449 3 4V11C3 11.552 3.449 12 4 12H11C11.551 12 12 11.552 12 11V4C12 3.449 11.551 3 11 3H4Z"/></svg></button>
+        <button id="expand-all" class="h-act" title="Expand all folders"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M15 6V11C15 13.21 13.21 15 11 15H6C5.26 15 4.62 14.6 4.27 14H11C12.65 14 14 12.65 14 11V4.27C14.6 4.62 15 5.26 15 6ZM11 13H4C2.897 13 2 12.103 2 11V4C2 2.897 2.897 2 4 2H11C12.103 2 13 2.897 13 4V11C13 12.103 12.103 13 11 13ZM4 12H11C11.551 12 12 11.552 12 11V4C12 3.449 11.551 3 11 3H4C3.449 3 3 3.449 3 4V11C3 11.552 3.449 12 4 12ZM9.5 7H8V5.5C8 5.224 7.776 5 7.5 5C7.224 5 7 5.224 7 5.5V7H5.5C5.224 7 5 7.224 5 7.5C5 7.776 5.224 8 5.5 8H7V9.5C7 9.776 7.224 10 7.5 10C7.776 10 8 9.776 8 9.5V8H9.5C9.776 8 10 7.776 10 7.5C10 7.224 9.776 7 9.5 7Z"/></svg></button></h2>
       <div id="files" class="list"></div>
     </section>
     <section id="comments-section" hidden>
-      <h2>Comments <span id="comments-count"></span></h2>
+      <h2>Comments <span id="comments-count"></span><span class="grow"></span>
+        <button id="clear-all" class="h-act" title="Delete all comments of this worktree (review.json is backed up first)"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M13.5004 12.0004C13.7762 12.0006 14.0004 12.2245 14.0004 12.5004C14.0002 12.7761 13.7761 13.0002 13.5004 13.0004H2.50037C2.22449 13.0004 2.00056 12.7762 2.00037 12.5004C2.00037 12.2244 2.22437 12.0004 2.50037 12.0004H13.5004Z"/><path d="M13.5004 9.00037C13.7762 9.00056 14.0004 9.22449 14.0004 9.50037C14.0002 9.77608 13.7761 10.0002 13.5004 10.0004H2.50037C2.22449 10.0004 2.00056 9.7762 2.00037 9.50037C2.00037 9.22437 2.22437 9.00037 2.50037 9.00037H13.5004Z"/><path d="M13.5004 6.00037C13.7762 6.00056 14.0004 6.22449 14.0004 6.50037C14.0002 6.77608 13.7761 7.00017 13.5004 7.00037H7.50037C7.22449 7.00037 7.00056 6.7762 7.00037 6.50037C7.00037 6.22437 7.22437 6.00037 7.50037 6.00037H13.5004Z"/><path d="M5.50037 0.999023C5.63295 0.999115 5.76009 1.05179 5.85388 1.14551C5.94777 1.23939 6.00037 1.36722 6.00037 1.5C6.00027 1.63265 5.94769 1.75971 5.85388 1.85352L3.7074 4L5.85388 6.14551C5.94777 6.23939 6.00037 6.36722 6.00037 6.5C6.00027 6.63265 5.94769 6.75971 5.85388 6.85352C5.76008 6.94732 5.63302 6.99991 5.50037 7C5.36759 7 5.23976 6.9474 5.14587 6.85352L3.00037 4.70703L0.853882 6.85352C0.760077 6.94732 0.633017 6.99991 0.500366 7C0.36759 7 0.239761 6.9474 0.145874 6.85352C0.0521583 6.75972 -0.000519052 6.63258 -0.000610352 6.5C-0.000610354 6.36722 0.0519875 6.23939 0.145874 6.14551L2.29333 4L0.145874 1.85352C0.0521583 1.75972 -0.000519119 1.63258 -0.000610352 1.5C-0.000610351 1.36722 0.0519874 1.23939 0.145874 1.14551C0.239761 1.05162 0.36759 0.999023 0.500366 0.999023C0.63295 0.999115 0.76009 1.05179 0.853882 1.14551L3.00037 3.29297L5.14587 1.14551C5.23976 1.05162 5.36759 0.999023 5.50037 0.999023Z"/><path d="M13.5004 3.00037C13.7762 3.00056 14.0004 3.22449 14.0004 3.50037C14.0002 3.77608 13.7761 4.00017 13.5004 4.00037H7.50037C7.22449 4.00037 7.00056 3.7762 7.00037 3.50037C7.00037 3.22437 7.22437 3.00037 7.50037 3.00037H13.5004Z"/></svg></button></h2>
       <div id="comment-list" class="list"></div>
     </section>
   </aside>
@@ -73,7 +79,7 @@
   </main>
 </div>
 </div>
-<div id="basepop" class="pop" hidden><div id="base-list" class="list"></div></div>
+<div id="basepop" class="pop" hidden><div id="base-list" class="list" role="listbox"></div></div>
 <div id="switcher" class="pop" hidden>
   <input id="switch-filter" placeholder="filter by project, branch or folder" spellcheck="false" autocomplete="off">
   <div id="projects" class="list"></div>

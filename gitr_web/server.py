@@ -12,6 +12,7 @@ separately in line windows so the first paint never waits for them.
 """
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -483,16 +484,15 @@ class State:
         mb = merge_base(wt, base)
         # Taken before the diff: an edit landing while the diff runs then
         # shows up as a change instead of hiding in the baseline.
+        head = git(wt, 'rev-parse', 'HEAD').strip()
         fp = fingerprint(wt, mb, untracked)
-        # parse_diff finds paths by the a/ b/ prefixes, which diff.noprefix
-        # or diff.mnemonicPrefix in the user's config would change.
-        text = git(wt, 'diff', '--no-color', '--no-ext-diff',
-                   '--src-prefix=a/', '--dst-prefix=b/', mb)
-        if untracked:
-            text += untracked_diff(wt)
+        text = diff_text(wt, mb, untracked)
         ahead, behind = ahead_behind(wt, base)
         t_git = time.perf_counter()
-        doc = Doc(parse_diff(text), reindent)
+        diff_files = parse_diff(text)
+        doc = Doc(diff_files, reindent)
+        doc.head = head
+        doc.changed_lines = changed_lines(diff_files)
         t_doc = time.perf_counter()
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
@@ -508,6 +508,37 @@ class State:
             'timing': {'git_ms': round((t_git - t0) * 1000),
                        'doc_ms': round((t_doc - t_git) * 1000)},
         }
+
+    def changes(self, wt: str, doc_id: str, base: str, untracked: bool) -> dict:
+        """What a reload would bring, measured against the loaded diff: the
+        commits HEAD moved by, and the changed lines (the diff's + and -
+        lines) that would appear or go, per file."""
+        wt = self.check_worktree(wt)
+        doc = self._doc(wt, doc_id)
+        mb = merge_base(wt, base)
+        head = git(wt, 'rev-parse', 'HEAD').strip()
+        now = changed_lines(parse_diff(diff_text(wt, mb, untracked)))
+        commits, rewritten = 0, False
+        if head != doc.head:
+            try:
+                git(wt, 'merge-base', '--is-ancestor', doc.head, head)
+                commits = int(git(wt, 'rev-list', '--count', f'{doc.head}..{head}'))
+            except GitError:
+                # A rebase or reset: no count of new commits means anything.
+                rewritten = True
+        files = add = rem = 0
+        for path in doc.changed_lines.keys() | now.keys():
+            a, b = doc.changed_lines.get(path, []), now.get(path, [])
+            if a == b:
+                continue
+            files += 1
+            sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+            for op, i1, i2, j1, j2 in sm.get_opcodes():
+                if op != 'equal':
+                    rem += i2 - i1
+                    add += j2 - j1
+        return {'commits': commits, 'rewritten': rewritten,
+                'files': files, 'add': add, 'del': rem}
 
     def _doc(self, wt: str, doc_id: str) -> 'Doc':
         with self._lock:
@@ -714,6 +745,23 @@ def list_refs(wt: str) -> dict:
     return {'refs': refs, 'upstream': upstream}
 
 
+def diff_text(wt: str, merge_base: str, untracked: bool) -> str:
+    # parse_diff finds paths by the a/ b/ prefixes, which diff.noprefix
+    # or diff.mnemonicPrefix in the user's config would change.
+    text = git(wt, 'diff', '--no-color', '--no-ext-diff',
+               '--src-prefix=a/', '--dst-prefix=b/', merge_base)
+    if untracked:
+        text += untracked_diff(wt)
+    return text
+
+
+def changed_lines(diff_files) -> dict[str, list[str]]:
+    """The + and - lines of each file, without context or line numbers, so
+    an edit elsewhere in the file that only shifts a hunk is no change."""
+    return {f.path: [l.text for l in f.lines if l.kind in ('added', 'removed')]
+            for f in diff_files}
+
+
 def ahead_behind(wt: str, base: str) -> tuple[int, int]:
     behind, ahead = git(wt, 'rev-list', '--left-right', '--count', f'{base}...HEAD').split()
     return int(ahead), int(behind)
@@ -810,6 +858,9 @@ class Handler(BaseHTTPRequestHandler):
                 mb = merge_base(wt, q['base'])
                 return self._json({'fingerprint': fingerprint(wt, mb, q.get('untracked') == '1'),
                                    'review': review_stamp(wt)})
+            if url.path == '/api/changes':
+                return self._json(self.state.changes(q['wt'], q['id'], q['base'],
+                                                     q.get('untracked') == '1'))
             if url.path == '/api/comments':
                 return self._json(self.state.comments(q['wt'], q['id']))
             if url.path == '/api/export':

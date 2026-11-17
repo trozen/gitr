@@ -93,6 +93,10 @@ function init() {
       'editor.selectionBackground': '#5a5f8a', 'editor.inactiveSelectionBackground': '#4d5175',
       'minimapSlider.background': '#6272a450', 'minimapSlider.hoverBackground': '#6272a470',
       'minimapSlider.activeBackground': '#6272a490',
+      // Monaco skips the minimap decorations on the lines it marks as
+      // selected, and a right-click puts the cursor on the line it comments:
+      // the comment's mark would not show. No selection marks keeps them.
+      'minimap.selectionHighlight': '#00000000',
       'minimap.background': '#21222c', 'editorStickyScroll.background': HEADER_BG,
       'editorStickyScrollHover.background': HEADER_BG,
     },
@@ -207,6 +211,8 @@ function setView(view) {
 }
 
 function initViews() {
+  $('collapse-all').addEventListener('click', () => collapseAll(true));
+  $('expand-all').addEventListener('click', () => collapseAll(false));
   for (const b of document.querySelectorAll('#activity .view')) b.addEventListener('click', () => setView(b.dataset.view));
   setView(prefs.view === 'comments' ? 'comments' : 'files');
 }
@@ -223,20 +229,22 @@ function renderCommentList() {
   comments.forEach((c, i) => {
     if (c.elsewhere && !elsewhere) {
       elsewhere = true;
-      box.append(el('div', 'row cl-head', 'on files not in this diff'));
+      box.append(el('div', 'row cl-head', [el('span', 'chev-space'), el('span', 'grow', 'on files not in this diff')]));
     }
     if (c.file !== file) {
       file = c.file;
-      const head = el('div', 'row cl-file', [el('span', 'grow', file)]);
+      const head = el('div', 'row cl-file', [el('span', 'chev-space'), el('span', 'grow', file)]);
       head.title = file;
       box.append(head);
     }
     const first = c.text.split('\n')[0];
     const flag = c.orphan ? 'orphaned' : c.moved ? 'moved' : '';
     const row = el('div', 'row cmt c-' + c.kind, [
+      el('span', 'guide'), el('span', 'chev-space'),
       el('span', 'c-kind', KIND_MARK[c.kind]), el('span', 'txt', first),
       ...(flag ? [el('span', 'flag', flag)] : []),
       el('span', 'ln', c.lineNo ? String(c.lineNo) : ''),
+      closeButton(c),
     ]);
     row.title = c.text;
     row.addEventListener('click', () => scrollToComment(i));
@@ -292,6 +300,7 @@ function applyBase(name) {
 
 function hideBasePicker() {
   $('basepop').hidden = true;
+  $('base').setAttribute('aria-expanded', 'false');
 }
 
 async function showBasePicker() {
@@ -300,6 +309,7 @@ async function showBasePicker() {
   pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + 'px';
   pop.style.top = r.bottom + 4 + 'px';
   pop.hidden = false;
+  $('base').setAttribute('aria-expanded', 'true');
   baseTyped = false;
   baseRefs = null;
   renderBaseList();
@@ -347,6 +357,7 @@ function renderBaseList() {
     box.append(el('h2', null, title));
     for (const r of rows) {
       const row = el('div', 'row', [el('span', 'grow ref', r.name), el('span', 'ab', aheadBehind(r.ahead, r.behind))]);
+      row.setAttribute('role', 'option');
       row.classList.toggle('active', r.name === current.base);
       if (r.ahead != null) row.title = `HEAD: ${r.ahead} ahead, ${r.behind} behind`;
       // mousedown, not click: the field's blur must not close the list first
@@ -367,7 +378,8 @@ function initBasePicker() {
   // Enter takes the text as typed: any ref or commit, listed or not.
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') applyBase(input.value);
-    if (e.key === 'Escape') { input.value = current?.base || ''; hideBasePicker(); input.blur(); }
+    // preventDefault: a search field's own Escape would empty it first
+    if (e.key === 'Escape') { e.preventDefault(); input.value = current?.base || ''; hideBasePicker(); input.blur(); }
   });
   input.addEventListener('blur', () => {
     hideBasePicker();
@@ -563,6 +575,9 @@ async function load(wt, base, defaultBase, restore) {
   $('base').value = base;
   updateCrumb();
   $('changed').hidden = true;
+  $('changed-what').textContent = '';
+  changesFp = null;
+  changesAt = 0;
   $('removed').hidden = true;
   shown = null;
   showProgress(`loading diff against ${base} ...`);
@@ -780,6 +795,14 @@ async function fetchWords(gen) {
 // A tree like gitr's (and VS Code's compact folders): a directory holding
 // only one subdirectory shares its row ("web/static"), and siblings are in
 // diff order, so the list reads in the order the diff scrolls.
+function closeButton(c) {
+  const b = el('button', 'cl-del');
+  b.title = 'Delete this comment';
+  b.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.70701 8.00001L12.353 4.35401C12.548 4.15901 12.548 3.84201 12.353 3.64701C12.158 3.45201 11.841 3.45201 11.646 3.64701L8.00001 7.29301L4.35401 3.64701C4.15901 3.45201 3.84201 3.45201 3.64701 3.64701C3.45201 3.84201 3.45201 4.15901 3.64701 4.35401L7.29301 8.00001L3.64701 11.646C3.45201 11.841 3.45201 12.158 3.64701 12.353C3.74501 12.451 3.87301 12.499 4.00101 12.499C4.12901 12.499 4.25701 12.45 4.35501 12.353L8.00101 8.70701L11.647 12.353C11.745 12.451 11.873 12.499 12.001 12.499C12.129 12.499 12.257 12.45 12.355 12.353C12.55 12.158 12.55 11.841 12.355 11.646L8.70901 8.00001H8.70701Z"/></svg>';
+  b.addEventListener('click', (e) => { e.stopPropagation(); saveComment(c, '', c.kind); });
+  return b;
+}
+
 function buildTree(files) {
   const node = () => ({ dirs: new Map(), files: [], first: Infinity });
   const root = node();
@@ -840,6 +863,7 @@ function renderFiles() {
       row.title = path;
       const kids = el('div', 'kids');
       const entry = { path, row, kids };
+      dirEntries.push(entry);
       row.addEventListener('click', () => {
         if (collapsed.has(path)) collapsed.delete(path); else collapsed.add(path);
         showCollapsed(entry, collapsed.has(path));
@@ -850,6 +874,7 @@ function renderFiles() {
       walk(d, depth + 1, path + '/', kids, [...ancestors, entry]);
     }
   };
+  dirEntries = [];
   const frag = document.createDocumentFragment();
   walk(buildTree(doc.files), 0, '', frag, []);
   box.append(frag);
@@ -859,6 +884,29 @@ function renderFiles() {
 function showCollapsed(entry, isCollapsed) {
   entry.row.classList.toggle('collapsed', isCollapsed);
   entry.kids.hidden = isCollapsed;
+}
+
+let dirEntries = [];
+function collapseAll(on) {
+  if (!shown) return;
+  const collapsed = collapsedDirs.get(shown.wt);
+  for (const d of dirEntries) {
+    if (on) collapsed.add(d.path); else collapsed.delete(d.path);
+    showCollapsed(d, on);
+  }
+  setActive(activeFile, true);
+}
+
+function revealFile(i) {
+  setView('files');
+  const collapsed = collapsedDirs.get(shown.wt);
+  for (const d of fileDirs[i]) { collapsed.delete(d.path); showCollapsed(d, false); }
+  setActive(activeFile, true);
+  const row = fileRows[i];
+  row.scrollIntoView({ block: 'center' });
+  row.classList.remove('reveal');
+  void row.offsetWidth;  // restarts the animation on a second reveal
+  row.classList.add('reveal');
 }
 
 function jumpToFile(i) {
@@ -1018,6 +1066,7 @@ function initComments() {
   $('next-comment').addEventListener('click', () => jumpComment(1));
   $('copy-agent').addEventListener('click', copyForAgent);
   $('clear-comments').addEventListener('click', clearComments);
+  $('clear-all').addEventListener('click', clearComments);
 }
 
 function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
@@ -1348,7 +1397,10 @@ function showMenu(ln, x, y) {
     }
     m.append(el('div', 'c-sep'));
   }
-  const path = doc.files[Math.max(0, upperBound(fileStarts, ln) - 1)].path;
+  const fi = Math.max(0, upperBound(fileStarts, ln) - 1);
+  const path = doc.files[fi].path;
+  item('Reveal in file list', () => revealFile(fi));
+  m.append(el('div', 'c-sep'));
   const loc = locationOf(ln);
   item(`Copy "${path}"`, () => copyText(path, `copied ${path}`));
   if (loc !== path) item(`Copy "${loc}"`, () => copyText(loc, `copied ${loc}`));
@@ -1488,10 +1540,44 @@ async function pollChanges() {
   try {
     const r = await api('/api/fingerprint', shown);
     if (gen !== wordGen) return;
-    if (r.fingerprint !== fp) $('changed').hidden = false;
+    if (r.fingerprint !== fp) {
+      $('changed').hidden = false;
+      // Each summary runs a whole git diff; while an agent keeps editing,
+      // at most one per CHANGES_MS. A later poll catches up with the last.
+      if (r.fingerprint !== changesFp && Date.now() - changesAt >= CHANGES_MS) {
+        changesFp = r.fingerprint;
+        changesAt = Date.now();
+        showChanges(gen);
+      }
+    }
     // review.json written by a gitr window (or another tab)
     if (r.review !== commentStamp && !editing) loadComments(gen);
   } catch { /* transient; next poll retries */ }
+}
+
+// Measured against the loaded diff, not the base: what a reload would add.
+const CHANGES_MS = 15000;
+let changesFp = null, changesAt = 0;
+async function showChanges(gen) {
+  let r;
+  try { r = await api('/api/changes', { ...shown, id: doc.id }); } catch { return; }
+  if (gen !== wordGen) return;
+  const what = $('changed-what');
+  what.textContent = '';
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const parts = [];
+  if (r.rewritten) parts.push(el('span', null, 'history rewritten'));
+  else if (r.commits) parts.push(el('span', null, plural(r.commits, 'commit')));
+  if (r.files) {
+    parts.push(el('span', null, [el('span', 'n-add', '+' + r.add), ' ', el('span', 'n-rem', '-' + r.del),
+                                 ` in ${plural(r.files, 'file')}`]));
+  } else if (!parts.length) parts.push(el('span', null, 'diff unchanged'));
+  what.append(': ');
+  parts.forEach((p, i) => what.append(...(i ? [', ', p] : [p])));
+  $('changed').title = 'Since this diff was loaded: '
+    + (r.rewritten ? 'HEAD was rebased or reset; ' : r.commits ? `${plural(r.commits, 'new commit')}; ` : '')
+    + (r.files ? `${plural(r.add, 'changed line')} would appear and ${r.del} go, in ${plural(r.files, 'file')}`
+               : 'the diff itself is the same');
 }
 
 // --dom helper -----------------------------------------------------------

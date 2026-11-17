@@ -48,6 +48,19 @@ button:active { background: var(--bg); transform: translateY(1px); }
 
 h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-spacing: .06em;
      text-transform: uppercase; color: var(--dim); }
+h2 { display: flex; align-items: center; gap: 4px; }
+h2 .grow { flex: 1; }
+.h-act, .cl-del { background: none; border: 0; padding: 2px; color: var(--dim); cursor: pointer;
+                  display: flex; border-radius: 3px; }
+/* Taller than the title text; must not make this header taller than the
+   comments one, or switching the pane moves the titles. */
+.h-act { margin: -4px 0; }
+.h-act:hover, .cl-del:hover { color: var(--fg); background: var(--sel); }
+.cl-del { align-self: center; padding: 0; visibility: hidden; }
+.cl-del svg { width: 1.1em; height: 1.1em; }
+.cmt:hover .cl-del { visibility: visible; }
+.row.reveal { animation: reveal 1.5s ease-out; }
+@keyframes reveal { from { background: var(--file-line); } }
 #files-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .list { overflow: auto; flex: 1; padding-bottom: 8px; }
 
@@ -71,9 +84,12 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 .file .n { font-family: monospace; font-size: .92em; }
 /* Tree: VS Code's 8px indent per level with a guide line, and a chevron
    (drawn, the source stays ASCII) that points down when open. */
-#files .row { padding-left: 8px; gap: 0; }
+/* The comments list follows the file tree's indents. */
+#files .row, #comment-list .row { padding-left: 8px; gap: 0; }
+#comment-list .row > .c-kind { margin-right: 6px; }
+#comment-list .row > .flag, #comment-list .row > .ln, #comment-list .row > .cl-del { margin-left: 6px; }
 #files .row > .n, #files .row > .st { margin-left: 6px; }
-#files .guide { align-self: stretch; flex: none; width: 12px; margin-left: 4px; border-left: 1px solid #ffffff14; }
+.guide { align-self: stretch; flex: none; width: 12px; margin-left: 4px; border-left: 1px solid #ffffff14; }
 .chev, .chev-space { flex: none; width: 16px; align-self: center; }
 .chev::before { content: ""; display: block; width: 5px; height: 5px; margin: 0 0 3px 4px;
   border: solid var(--fg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .8; }
@@ -83,9 +99,12 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 
 /* Across the whole window: the worktree and its base apply to the file list
    and the diff alike. */
-#topbar { flex: none; display: flex; align-items: center; gap: 14px; padding: 0 12px 0 0; min-height: 30px;
+#topbar { flex: none; display: flex; align-items: stretch; min-height: 30px;
           background: var(--bg-bar); border-bottom: 1px solid var(--sel);
-          white-space: nowrap; overflow: hidden; font-size: var(--bar-px); }
+          white-space: nowrap; font-size: var(--bar-px); }
+/* Wraps onto more lines when the window is too narrow for it. */
+#bar-items { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center;
+             column-gap: 14px; row-gap: 2px; padding: 3px 12px 3px 14px; }
 /* Over the activity bar, sidebar and sash, so that its width follows the
    sidebar's and a longer name never moves the rest of the bar. */
 #crumb { flex: none; align-self: stretch; width: calc(40px + var(--side-w) + 4px); display: flex;
@@ -111,6 +130,10 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 .pop .none { padding: 2px 12px 6px; color: var(--dim); }
 #base { font-family: var(--mono); font-size: .92em; background: var(--bg); color: var(--fg);
         border: 1px solid var(--sel); padding: 1px 4px; }
+/* A search field (so that password managers leave it alone), drawn as the
+   plain text field it was. */
+#base { -webkit-appearance: none; appearance: none; }
+#base::-webkit-search-cancel-button, #base::-webkit-search-decoration { -webkit-appearance: none; display: none; }
 #base:focus { outline: none; border-color: var(--file); }
 #base.bad { border-color: var(--rem); }
 #changed { color: var(--note); }
@@ -204,10 +227,9 @@ h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-sp
 #activity button.view.on { box-shadow: inset 2px 0 0 var(--fg); color: var(--fg); }
 #comments-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #comments-count { font-weight: normal; }
-.cl-file { color: var(--file); padding-left: 12px; margin-top: 4px; }
+.cl-file { color: var(--fg); }
 .cl-file .grow { direction: rtl; text-align: left; }  /* ellipsis eats the start of a long path */
-.cl-head { color: var(--dim); padding-left: 12px; margin-top: 6px; font-style: italic; }
-.cmt { padding-left: 24px; }
+.cl-head { color: var(--dim); font-style: italic; }
 .cmt .c-kind { flex: none; }
 .cmt .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .cmt .ln { flex: none; color: var(--dim); font-family: var(--mono); font-size: .92em; }

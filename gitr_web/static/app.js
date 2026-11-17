@@ -142,6 +142,7 @@ function init() {
   initSash();
   initSettings();
   initSwitcher();
+  initQuickOpen();
   initViews();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
@@ -512,6 +513,158 @@ function initSwitcher() {
     if (!sw.contains(e.target) && !btn.contains(e.target)) showSwitcher(false);
   });
   addEventListener('keydown', (e) => { if (e.key === 'Escape') showSwitcher(false); });
+}
+
+// --go to file (Ctrl+P, as VS Code's quick open) ----------------------------
+
+// Every query character in order (spaces ignored), scored as VS Code does
+// roughly: runs of consecutive characters and the starts of words count,
+// and a match inside the file name beats one spread over the folders.
+// Returns the score and the matched positions in path, or null.
+function fuzzyMatch(query, path) {
+  const q = query.toLowerCase().replace(/\s+/g, '');
+  if (!q) return { score: 0, hits: [] };
+  const p = path.toLowerCase();
+  const nameStart = path.lastIndexOf('/') + 1;
+  const wordStart = (i) => i === 0 || '/._- '.includes(path[i - 1]) ||
+    (path[i] !== p[i] && path[i - 1] === p[i - 1]);  // camelCase hump
+  // Greedy from each place the first character occurs; the best wins.
+  let best = null;
+  for (let start = p.indexOf(q[0]); start !== -1; start = p.indexOf(q[0], start + 1)) {
+    const hits = [start];
+    let i = start + 1;
+    for (let k = 1; k < q.length; k++) {
+      // prefer the next word start holding the character, else the next one
+      let at = -1;
+      for (let j = i; j < p.length; j++) {
+        if (p[j] !== q[k]) continue;
+        if (j === i || wordStart(j)) { at = j; break; }
+        if (at === -1) at = j;
+      }
+      if (at === -1) return best;
+      hits.push(at);
+      i = at + 1;
+    }
+    let score = 0;
+    hits.forEach((h, n) => {
+      score += 1;
+      if (n && h === hits[n - 1] + 1) score += 5;
+      if (wordStart(h)) score += 3;
+      if (h >= nameStart) score += 2;
+    });
+    if (hits[0] === nameStart) score += 6;
+    score -= (hits[hits.length - 1] - hits[0]) * 0.05;  // tighter is better
+    if (!best || score > best.score) best = { score, hits };
+  }
+  return best;
+}
+
+let qoItems = [], qoSel = 0;
+const QO_MAX = 300;
+
+function showQuickOpen(on) {
+  const qo = $('quickopen');
+  if (!on) { qo.hidden = true; return; }
+  if (!doc || !doc.files.length) return;
+  const r = $('editor-wrap').getBoundingClientRect();
+  const w = Math.min(600, r.width - 40);
+  qo.style.width = w + 'px';
+  qo.style.left = r.left + (r.width - w) / 2 + 'px';
+  qo.style.top = r.top + 6 + 'px';
+  qo.hidden = false;
+  const input = $('qo-input');
+  input.value = '';
+  renderQuickOpen();
+  input.focus();
+}
+
+function highlighted(text, hits, offset) {
+  const out = [];
+  let plain = '';
+  for (let i = 0; i < text.length; i++) {
+    if (hits.has(i + offset)) {
+      if (plain) { out.push(plain); plain = ''; }
+      out.push(el('span', 'hl', text[i]));
+    } else plain += text[i];
+  }
+  if (plain) out.push(plain);
+  return out;
+}
+
+function renderQuickOpen() {
+  const q = $('qo-input').value;
+  qoItems = [];
+  doc.files.forEach((f, i) => {
+    const m = fuzzyMatch(q, f.path);
+    if (m) qoItems.push({ i, ...m });
+  });
+  // Unfiltered, the diff's own order; filtered, the best first.
+  if (q.trim()) qoItems.sort((a, b) => b.score - a.score || a.i - b.i);
+  qoSel = 0;
+  const box = $('qo-list');
+  box.textContent = '';
+  const perFile = commentsPerFile();
+  for (const [n, it] of qoItems.slice(0, QO_MAX).entries()) {
+    const f = doc.files[it.i];
+    const cut = f.path.lastIndexOf('/') + 1;
+    const hits = new Set(it.hits);
+    const c = perFile.get(it.i);
+    const row = el('div', 'row' + (n === qoSel ? ' sel' : ''), [
+      el('span', 'qo-name st-' + f.status, highlighted(f.path.slice(cut), hits, cut)),
+      // rtl keeps the end of a long folder path; the bdi stops it
+      // reordering the slashes
+      el('span', 'qo-dir', [el('bdi', null, highlighted(f.path.slice(0, Math.max(0, cut - 1)), hits, 0))]),
+      c ? el('span', 'n c-' + c.kind, '\u25cf' + c.n) : null,
+      el('span', 'n n-add', f.add ? '+' + f.add : ''),
+      el('span', 'n n-rem', f.del ? '-' + f.del : ''),
+      el('span', 'st st-' + f.status, f.status),
+    ].filter(Boolean));
+    row.setAttribute('role', 'option');
+    row.title = f.path;
+    // mousedown: a click would blur the field first, which closes the popup
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); openQuickItem(n); });
+    box.append(row);
+  }
+  if (!qoItems.length) box.append(el('div', 'none', 'no matching file'));
+}
+
+function moveQuickSel(d) {
+  const rows = $('qo-list').querySelectorAll('.row');
+  if (!rows.length) return;
+  rows[qoSel]?.classList.remove('sel');
+  qoSel = (qoSel + d + rows.length) % rows.length;
+  rows[qoSel].classList.add('sel');
+  rows[qoSel].scrollIntoView({ block: 'nearest' });
+}
+
+function openQuickItem(n) {
+  const it = qoItems[n];
+  showQuickOpen(false);
+  if (!it) return;
+  jumpToFile(it.i);
+  editor.focus();
+}
+
+function initQuickOpen() {
+  const input = $('qo-input');
+  // Capture, so that it works with the focus in Monaco too; it replaces
+  // the browser's print dialog, which this page has no use for.
+  addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      e.stopPropagation();
+      showQuickOpen(true);
+    }
+  }, true);
+  $('go-to-file').addEventListener('click', () => showQuickOpen(true));
+  input.addEventListener('input', renderQuickOpen);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveQuickSel(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); moveQuickSel(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); openQuickItem(qoSel); }
+    else if (e.key === 'Escape') { e.preventDefault(); showQuickOpen(false); editor.focus(); }
+  });
+  input.addEventListener('blur', () => showQuickOpen(false));
 }
 
 // What the list shows; settings and positions are not part of it.
@@ -1100,6 +1253,20 @@ async function saveComment(target, text, kind) {
   } catch (e) { flash(e.message); return false; }
 }
 
+// file index -> {n, kind}, kind the most severe
+function commentsPerFile() {
+  const perFile = new Map();
+  for (const c of comments) {
+    if (c.elsewhere) continue;
+    const i = upperBound(fileStarts, c.line) - 1;
+    const f = perFile.get(i) || { n: 0, kind: 'good' };
+    f.n++;
+    if (SEVERITY[c.kind] > SEVERITY[f.kind]) f.kind = c.kind;
+    perFile.set(i, f);
+  }
+  return perFile;
+}
+
 function applyComments(r) {
   comments = r.comments;
   commentStamp = r.stamp;
@@ -1122,15 +1289,7 @@ function applyComments(r) {
                 options: { overviewRuler: { color: KIND_COLOR[kind], position: T.OverviewRulerLane.Left },
                            minimap: { color: KIND_COLOR[kind], position: T.MinimapPosition.Inline } } });
   commentDecos.set(list);
-  const perFile = new Map();  // file index -> {n, kind}, kind the most severe
-  for (const c of comments) {
-    if (c.elsewhere) continue;
-    const i = upperBound(fileStarts, c.line) - 1;
-    const f = perFile.get(i) || { n: 0, kind: 'good' };
-    f.n++;
-    if (SEVERITY[c.kind] > SEVERITY[f.kind]) f.kind = c.kind;
-    perFile.set(i, f);
-  }
+  const perFile = commentsPerFile();
   fileRows.forEach((row, i) => {
     const f = perFile.get(i);
     const cell = row.querySelector('.n-cmt');
@@ -1400,6 +1559,9 @@ function showMenu(ln, x, y) {
   const fi = Math.max(0, upperBound(fileStarts, ln) - 1);
   const path = doc.files[fi].path;
   item('Reveal in file list', () => revealFile(fi));
+  // Monaco's find widget; it starts from the selected text, if any.
+  item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); });
+  item('Go to file...', () => showQuickOpen(true));
   m.append(el('div', 'c-sep'));
   const loc = locationOf(ln);
   item(`Copy "${path}"`, () => copyText(path, `copied ${path}`));

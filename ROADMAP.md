@@ -165,6 +165,8 @@ whole diff in one read-only document as in gitr.
       from the previous load (per file, the old diff text against the
       new one), so after an agent's follow-up only the new work stands
       out; the marks clear on the next reload
+- [x] Go to file: Ctrl+P opens a VS Code style quick open over the diff,
+      the changed files matched loosely by name, Enter jumps to one
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line
@@ -178,6 +180,16 @@ whole diff in one read-only document as in gitr.
       review them as one combined diff with the repo name prefixed to each
       path (one base per sub-repo, comments still in each repo's `.gitr/`);
       and how agent worktrees map when each sub-repo has its own
+- [ ] Find pane in the sidebar, as VS Code's search view: every match
+      listed under its file, click to jump; maybe filters (only added /
+      removed lines) and the comment texts searched too. For now Monaco's
+      own find widget (Ctrl+F in the diff) does the searching
+- [ ] Less browser outside the diff, so the page acts like an app: there
+      Ctrl+F opens the browser's find (which sees only the diff lines on
+      screen, as Monaco draws no others) and a right-click the browser's
+      menu. To decide: Ctrl+F opening the diff's find from anywhere, and
+      our own menu (or none) in the sidebar and bars, keeping the
+      browser's where text can be selected or typed
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
 - [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
 - [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks

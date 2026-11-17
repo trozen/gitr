@@ -56,6 +56,10 @@ K_FILE, K_HUNK, K_ADD, K_REM, K_CTX, K_META = 'f', 'h', 'a', 'r', 'c', 'm'
 # A removed + added pair that differs only in whitespace, shown once as
 # "~<new text>" (gitr's "collapse re-indented").
 K_REIND = 'i'
+K_COMMIT = 'k'  # the commit header and message before a single commit's diff
+EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+MAX_COMMITS = 500
+UNCOMMITTED = 'uncommitted'  # the commits pane's row for the working tree
 
 
 # --git helpers ---------------------------------------------------------------
@@ -150,8 +154,14 @@ class Doc:
     """The whole diff as one text plus parallel per-line arrays (1-based
     line numbers in the browser map to index line-1 here)."""
 
-    def __init__(self, diff_files, reindent: bool = False) -> None:
+    def __init__(self, diff_files, reindent: bool = False, prefix: 'list[str]' = ()) -> None:
         self.reindent = reindent
+        # How comments find "the file as it is now": the worktree, or for a
+        # single commit's diff the file in that commit. None: the worktree.
+        self.read_file = None
+        # A single commit's (or the uncommitted changes') diff instead of
+        # the whole review; the agent export still comes from the whole one.
+        self.commit: 'str | None' = None
         self.lines: list[str] = []
         self.kinds: list[str] = []
         self.old_no: list[int] = []
@@ -166,6 +176,8 @@ class Doc:
         # Collapsed line -> (the removed line's text, its anchor): a comment
         # stored for either side of the pair belongs on the one shown line.
         self.reindent_src: dict[int, tuple[str, int]] = {}
+        for line in prefix:
+            self._push(line, K_COMMIT)
         for df in diff_files:
             self._add_file(df)
 
@@ -444,12 +456,25 @@ class State:
         wt, repo = self._find_worktree(str(req['wt']))
         settings = {'base': str(req['base']), 'untracked': bool(req.get('untracked')),
                     'wrap': bool(req.get('wrap')), 'reindent': bool(req.get('reindent'))}
+        # A new worktree starts from its project's last settings. A base that
+        # is a branch or tag carries over; a commit (a hash, HEAD~3) belongs
+        # to the worktree it was picked in, so the project keeps its base.
+        is_ref = not settings['base'].startswith('-') and bool(
+            git(wt, 'rev-parse', '--verify', '--quiet', '--symbolic-full-name', settings['base'],
+                ok_codes=(0, 1)).strip())
         with self._settings_lock:
             saved = self._load_settings()
             saved['worktrees'][wt] = settings
-            saved['projects'][repo] = settings
+            project = dict(settings)
+            if not is_ref:
+                old = saved['projects'].get(repo, {}).get('base')
+                if old:
+                    project['base'] = old
+                else:
+                    del project['base']
+            saved['projects'][repo] = project
             self._write_settings(saved)
-        return settings
+        return {'settings': settings, 'project': project}
 
     def save_position(self, req: dict) -> dict:
         """Where the view was in a worktree's diff: a file and a line in it.
@@ -478,7 +503,11 @@ class State:
         except OSError as e:
             raise GitError(f'cannot save settings to {SETTINGS_PATH}: {e}')
 
-    def diff(self, wt: str, base: str, untracked: bool, reindent: bool = False) -> dict:
+    def diff(self, wt: str, base: str, untracked: bool, reindent: bool = False,
+             commit: 'str | None' = None) -> dict:
+        """The review's diff (merge base to the working tree), or with
+        `commit` one commit's diff against its first parent, as git show
+        has it, or the uncommitted changes alone."""
         wt = self.check_worktree(wt)
         t0 = time.perf_counter()
         mb = merge_base(wt, base)
@@ -486,13 +515,37 @@ class State:
         # shows up as a change instead of hiding in the baseline.
         head = git(wt, 'rev-parse', 'HEAD').strip()
         fp = fingerprint(wt, mb, untracked)
-        text = diff_text(wt, mb, untracked)
+        prefix: list[str] = []
+        shown = None
+        if not commit:
+            text = diff_text(wt, mb, untracked)
+        elif commit == UNCOMMITTED:
+            text = diff_text(wt, 'HEAD', untracked)
+            shown = {'hash': UNCOMMITTED}
+        elif '..' in commit:
+            text, prefix, shown, newer = commit_range(wt, commit, untracked)
+        else:
+            sha = verify_commit(wt, commit)
+            parents = git(wt, 'rev-list', '--parents', '-n', '1', sha).split()[1:]
+            # A merge shows what it brought into the branch: its first parent's
+            # side. git show's combined diff is a format parse_diff does not read.
+            text = git(wt, 'diff', '--no-color', '--no-ext-diff', '--src-prefix=a/',
+                       '--dst-prefix=b/', parents[0] if parents else EMPTY_TREE, sha)
+            prefix, shown = commit_header(wt, sha)
         ahead, behind = ahead_behind(wt, base)
         t_git = time.perf_counter()
         diff_files = parse_diff(text)
-        doc = Doc(diff_files, reindent)
+        doc = Doc(diff_files, reindent, prefix)
         doc.head = head
-        doc.changed_lines = changed_lines(diff_files)
+        doc.base, doc.untracked = base, untracked
+        if commit:
+            doc.commit = shown['hash']
+            # comments go on the newer end's files: a commit's, or the worktree's
+            end = newer if '..' in commit else shown['hash']
+            if end != UNCOMMITTED:
+                doc.read_file = blob_reader(wt, end)
+        # What a reload would bring is measured against the whole review.
+        doc.changed_lines = None if commit else changed_lines(diff_files)
         t_doc = time.perf_counter()
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
@@ -501,7 +554,7 @@ class State:
                 self._docs.popitem(last=False)
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
-            'ahead': ahead, 'behind': behind,
+            'ahead': ahead, 'behind': behind, 'commit': shown,
             'fingerprint': fp,
             'text': '\n'.join(doc.lines), 'kinds': ''.join(doc.kinds),
             'oldNo': doc.old_no, 'newNo': doc.new_no, 'files': doc.files,
@@ -515,9 +568,7 @@ class State:
         lines) that would appear or go, per file."""
         wt = self.check_worktree(wt)
         doc = self._doc(wt, doc_id)
-        mb = merge_base(wt, base)
         head = git(wt, 'rev-parse', 'HEAD').strip()
-        now = changed_lines(parse_diff(diff_text(wt, mb, untracked)))
         commits, rewritten = 0, False
         if head != doc.head:
             try:
@@ -526,6 +577,9 @@ class State:
             except GitError:
                 # A rebase or reset: no count of new commits means anything.
                 rewritten = True
+        if doc.changed_lines is None:
+            return {'commits': commits, 'rewritten': rewritten}
+        now = changed_lines(parse_diff(diff_text(wt, merge_base(wt, base), untracked)))
         files = add = rem = 0
         for path in doc.changed_lines.keys() | now.keys():
             a, b = doc.changed_lines.get(path, []), now.get(path, [])
@@ -539,6 +593,19 @@ class State:
                     add += j2 - j1
         return {'commits': commits, 'rewritten': rewritten,
                 'files': files, 'add': add, 'del': rem}
+
+    def commits(self, wt: str, base: str, untracked: bool) -> dict:
+        wt = self.check_worktree(wt)
+        return {'commits': list_commits(wt, base), 'uncommitted': has_uncommitted(wt, untracked),
+                'head': git(wt, 'rev-parse', 'HEAD').strip()}
+
+    def _export_doc(self, wt: str, doc: 'Doc') -> 'Doc':
+        """The agent export (review.md, copy for agent) always describes the
+        whole review, also while a single commit is on screen: its line
+        numbers are the working tree's."""
+        if doc.commit is None:
+            return doc
+        return Doc(parse_diff(diff_text(wt, merge_base(wt, doc.base), doc.untracked)), doc.reindent)
 
     def _doc(self, wt: str, doc_id: str) -> 'Doc':
         with self._lock:
@@ -562,8 +629,13 @@ class State:
             # A gitr window edits review.json without knowing about review.md.
             md, js = Path(wt) / '.gitr' / 'review.md', Path(wt) / '.gitr' / 'review.json'
             if js.exists() and (not md.exists() or md.stat().st_mtime_ns < js.stat().st_mtime_ns):
-                write_review_md(wt, items)
+                write_review_md(wt, self._export_items(wt, doc, store, items))
         return out
+
+    def _export_items(self, wt: str, doc: 'Doc', store: ReviewStore, items: list) -> list:
+        if doc.commit is None:
+            return items
+        return resolve_comments(wt, self._export_doc(wt, doc), store)[1]
 
     def save_comment(self, wt: str, doc_id: str, req: dict) -> dict:
         wt = self.check_worktree(wt)
@@ -590,7 +662,7 @@ class State:
                     raise GitError('no comment can go on this line')
                 file = doc.file_at(line)['path']
                 anchor, side, line_text = line_sides(doc, line)[0]
-                current = _read_text_safe(Path(wt) / file)
+                current = file_reader(wt, doc)(file)
                 if current is None:
                     raise GitError(f'{file} cannot be read, so the comment cannot be anchored')
                 # The snapshot is the file as it is now; line numbers from an
@@ -604,7 +676,7 @@ class State:
                     raise GitError(f'cannot write a snapshot to {wt}/.gitr')
                 store.add(file, snap, anchor, side, line_text, text, kind)
             out, items = resolve_comments(wt, doc, store)
-            write_review_md(wt, items)
+            write_review_md(wt, self._export_items(wt, doc, store, items))
         return out
 
     def clear_comments(self, wt: str, doc_id: str) -> dict:
@@ -615,14 +687,14 @@ class State:
             if not store.clear(store.backup_path()):
                 raise GitError('could not back up review.json, nothing cleared')
             out, items = resolve_comments(wt, doc, store)
-            write_review_md(wt, items)
+            write_review_md(wt, self._export_items(wt, doc, store, items))
         return out
 
     def export(self, wt: str, doc_id: str) -> dict:
         wt = self.check_worktree(wt)
         doc = self._doc(wt, doc_id)
         with self._review_lock:
-            _, items = resolve_comments(wt, doc, ReviewStore(Path(wt) / '.gitr'))
+            _, items = resolve_comments(wt, self._export_doc(wt, doc), ReviewStore(Path(wt) / '.gitr'))
         return {'text': _format_export(items, list(COMMENT_KINDS)), 'count': len(items)}
 
     def word_ranges(self, wt: str, doc_id: str, first: int, last: int) -> list[int]:
@@ -658,7 +730,7 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
     places them: a comment on a line no longer in the diff goes to the end
     of its file, marked orphaned. Also returns the agent export items in the
     same order (files not in this diff last)."""
-    anchors = _resolve_anchors(store, lambda f: _read_text_safe(Path(wt) / f))
+    anchors = _resolve_anchors(store, file_reader(wt, doc))
     shown: list[dict] = []
     items: list[_ExportItem] = []
 
@@ -762,6 +834,140 @@ def changed_lines(diff_files) -> dict[str, list[str]]:
             for f in diff_files}
 
 
+def file_reader(wt: str, doc: 'Doc'):
+    return doc.read_file or (lambda f: _read_text_safe(Path(wt) / f))
+
+
+def blob_reader(wt: str, sha: str):
+    """A file as it is in a commit, for placing comments on that commit's
+    diff; read once per file."""
+    cache: dict[str, 'str | None'] = {}
+
+    def read(path: str) -> 'str | None':
+        if path not in cache:
+            try:
+                cache[path] = git(wt, 'cat-file', 'blob', f'{sha}:{path}')
+            except GitError:
+                cache[path] = None
+        return cache[path]
+    return read
+
+
+def verify_commit(wt: str, rev: str) -> str:
+    if not rev or rev.startswith('-'):
+        raise GitError(f'invalid commit: {rev!r}')
+    try:
+        return git(wt, 'rev-parse', '--verify', '--quiet', rev + '^{commit}').strip()
+    except GitError:
+        raise GitError(f'no commit {rev} in this repository')
+
+
+RANGE_LIST_MAX = 50
+
+
+def commit_range(wt: str, spec: str, untracked: bool) -> 'tuple[str, list[str], dict, str]':
+    """older..newer, both included: the diff from the older commit's first
+    parent to the newer commit (or to the working tree when newer is
+    'uncommitted'), so it holds the changes of every selected commit, and a
+    header listing those commits. Returns the diff text, the header lines,
+    the summary for the page and the newer end."""
+    older, newer = spec.split('..', 1)
+    old_sha = verify_commit(wt, older)
+    parents = git(wt, 'rev-list', '--parents', '-n', '1', old_sha).split()[1:]
+    start = parents[0] if parents else EMPTY_TREE
+    if newer == UNCOMMITTED:
+        text = diff_text(wt, start, untracked)
+        tip = 'HEAD'
+    else:
+        newer = verify_commit(wt, newer)
+        text = git(wt, 'diff', '--no-color', '--no-ext-diff', '--src-prefix=a/',
+                   '--dst-prefix=b/', start, newer)
+        tip = newer
+    log = git(wt, 'log', '--topo-order', '--format=%h %s', tip, *(['--not', start] if parents else []))
+    commits = log.splitlines()
+    n = len(commits)
+    upto = 'the working tree' if newer == UNCOMMITTED else newer[:10]
+    lines = [f'commits {old_sha[:10]} to {upto}: {n} commit{"" if n == 1 else "s"}'
+             + (' and the uncommitted changes' if newer == UNCOMMITTED else ''), '']
+    lines += ['    ' + c for c in commits[:RANGE_LIST_MAX]]
+    if n > RANGE_LIST_MAX:
+        lines.append(f'    ... and {n - RANGE_LIST_MAX} more')
+    lines.append('')
+    return text, lines, {'hash': f'{old_sha}..{newer}', 'range': True, 'count': n,
+                         'from': old_sha, 'to': newer}, newer
+
+
+def commit_header(wt: str, sha: str) -> 'tuple[list[str], dict]':
+    """git show's header (commit, Merge, Author, Date, the message indented)
+    as document lines, and the commit's summary for the page."""
+    out = git(wt, 'show', '-s', '--date=format-local:%Y-%m-%d %H:%M',
+              '--format=%H%x00%P%x00%an <%ae>%x00%ad%x00%cn <%ce>%x00%s%x00%B', sha)
+    h, parents, author, date, committer, subject, body = out.split('\0', 6)
+    lines = [f'commit {h}']
+    if len(parents.split()) > 1:
+        lines.append('Merge: ' + ' '.join(p[:10] for p in parents.split()))
+    lines += [f'Author: {author}', f'Date:   {date}']
+    if committer != author:
+        lines.append(f'Commit: {committer}')
+    lines.append('')
+    lines += ['    ' + l if l else '' for l in body.rstrip('\n').split('\n')]
+    lines.append('')
+    return lines, {'hash': h, 'subject': subject}
+
+
+def list_commits(wt: str, base: str) -> list[dict]:
+    """The commits in base..HEAD in graph order, newest first, then the
+    boundary (the merge base, and anything merged in from base), as gitk
+    lists them. Long ranges are cut at MAX_COMMITS."""
+    if not base or base.startswith('-'):
+        raise GitError(f'invalid base: {base!r}')
+    out = git(wt, 'log', '--boundary', '--topo-order', '--decorate=full',
+              f'--max-count={MAX_COMMITS + 1}',
+              '--format=%m%x00%H%x00%P%x00%an%x00%ae%x00%at%x00%D%x00%s%x00%b%x1e',
+              f'{base}..HEAD', '--')
+    commits = []
+    for rec in out.split('\x1e'):
+        rec = rec.lstrip('\n')
+        if not rec:
+            continue
+        mark, h, parents, an, ae, at, refs, subject, body = rec.split('\0', 8)
+        commits.append({'hash': h, 'parents': parents.split(), 'author': an, 'email': ae,
+                        'time': int(at), 'refs': parse_refs(refs), 'subject': subject,
+                        'body': body.strip()[:4000], 'boundary': mark == '-'})
+    inside = [c for c in commits if not c['boundary']]
+    if len(inside) > MAX_COMMITS:
+        # cut: the boundary was not reached, and one commit too many came
+        commits = inside[:MAX_COMMITS]
+        commits[-1]['cut'] = True
+    return commits
+
+
+def parse_refs(decoration: str) -> list[dict]:
+    refs = []
+    for d in filter(None, decoration.split(', ')):
+        head = d.startswith('HEAD -> ')
+        d = d.removeprefix('HEAD -> ')
+        # origin/HEAD only repeats which branch the remote checks out
+        if d.startswith('refs/remotes/') and d.endswith('/HEAD'):
+            continue
+        for prefix, kind in (('tag: refs/tags/', 'tag'), ('refs/heads/', 'branch'),
+                             ('refs/remotes/', 'remote')):
+            if d.startswith(prefix):
+                refs.append({'name': d[len(prefix):], 'kind': kind, 'head': head})
+                break
+    return refs
+
+
+def has_uncommitted(wt: str, untracked: bool) -> bool:
+    status = git(wt, 'status', '--porcelain=v1', '-z',
+                 '--untracked-files=' + ('all' if untracked else 'no'))
+    for entry in filter(None, status.split('\0')):
+        rel = entry[3:]
+        if not (rel == '.gitr' or rel.startswith('.gitr/')):
+            return True
+    return False
+
+
 def ahead_behind(wt: str, base: str) -> tuple[int, int]:
     behind, ahead = git(wt, 'rev-list', '--left-right', '--count', f'{base}...HEAD').split()
     return int(ahead), int(behind)
@@ -847,7 +1053,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.projects())
             if url.path == '/api/diff':
                 return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1',
-                                                  q.get('reindent') == '1'))
+                                                  q.get('reindent') == '1', q.get('commit') or None))
+            if url.path == '/api/commits':
+                return self._json(self.state.commits(q['wt'], q['base'], q.get('untracked') == '1'))
             if url.path == '/api/refs':
                 return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':

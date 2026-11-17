@@ -86,6 +86,10 @@ with the ability to attach persistent local comments to specific diff lines.
 - [ ] Color theme override via `config.json`
 - [ ] Keyboard shortcut help (`?`)
 - [ ] Export diff as HTML
+- [ ] Comments from the command line: `gitr` options to add, remove and
+      list comments (e.g. `gitr --comment path:line "text" [--kind bad]`,
+      `--comments` to list them with ids, `--delete-comment ID`), on the
+      same `.gitr/review.json`, so an agent or a script can review too
 
 ### Annotation storage format
 
@@ -167,6 +171,17 @@ whole diff in one read-only document as in gitr.
       out; the marks clear on the next reload
 - [x] Go to file: Ctrl+P opens a VS Code style quick open over the diff,
       the changed files matched loosely by name, Enter jumps to one
+- [ ] Ctrl+P lists the projects and worktrees too (as a second group
+      below the files, or behind a prefix), so one popup goes anywhere
+- [ ] Project switcher: up / down arrows move through the filtered
+      worktrees, Enter opens the selected one (now Enter takes the first)
+- [ ] Base picker: recent commits of the branch as well (short hash,
+      subject, age), so a base a few commits back is a click away rather
+      than a typed `HEAD~3`
+- [ ] Notice when `.gitr/review.json` changes from outside (a gitr window,
+      another tab, an agent or the CLI): the comments already reload on
+      their own, silently; say so, e.g. "comments updated: 2 added, 1
+      removed", and mark the new ones for a while
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line
@@ -194,10 +209,20 @@ whole diff in one read-only document as in gitr.
 - [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
 - [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks
 - [ ] Per-file syntax highlighting in the combined view
-- [ ] Commit graph view for a worktree: all commits leading to its checkout,
-      merges included. Use it to pick the review base (any commit, not just
-      a branch) and to narrow the head side (e.g. review up to `HEAD^^`
-      instead of the working tree)
+- [x] Commits pane: base..HEAD as a graph, as gitk draws it (merges, the
+      boundary, branch and tag labels, uncommitted changes on top); a
+      click shows that commit alone, as git show does (header and message
+      before the diff; a merge against its first parent), with comments
+      placed on that commit's version of each file; the agent export stays
+      the whole review's
+- [x] Commits pane ranges: shift-click a second commit to see the commits
+      between the two combined (from the older one's first parent to the
+      newer one, or to the working tree), listed before the diff
+- [x] Commit rows' right-click menu: copy hash or subject, a range to the
+      shown commit, and "use as base" (review the changes after a commit)
+- [ ] Comment marks in the commits pane: per commit, the comments on lines
+      it changed (found with blame on the commented lines), so it shows
+      which commits have been reviewed and which not yet
 - [ ] Phone view (Android, as an installed web app over `tailscale serve`):
       Monaco is not supported on mobile browsers and our comment controls
       need hover and right-click, so a separate light page rather than the

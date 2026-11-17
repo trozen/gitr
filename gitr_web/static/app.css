@@ -55,6 +55,7 @@ h2 .grow { flex: 1; }
 /* Taller than the title text; must not make this header taller than the
    comments one, or switching the pane moves the titles. */
 .h-act { margin: -4px 0; }
+.h-act.on { color: var(--fg); background: var(--sel); box-shadow: inset 0 0 0 1px var(--file); }
 .h-act:hover, .cl-del:hover { color: var(--fg); background: var(--sel); }
 .cl-del { align-self: center; padding: 0; visibility: hidden; }
 .cl-del svg { width: 1.1em; height: 1.1em; }
@@ -238,6 +239,34 @@ h2 .grow { flex: 1; }
 #activity button:active { transform: none; }
 /* the open view: VS Code's bar along the button's left edge */
 #activity button.view.on { box-shadow: inset 2px 0 0 var(--fg); color: var(--fg); }
+#commits-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#commit-list .row { padding-left: 8px; gap: 6px; align-items: center; }
+#commit-list .row.active { background: var(--sel); }
+/* over the row's padding too, so the lines of adjacent rows meet */
+#commit-list svg.graph { flex: none; margin: -1px 0; overflow: visible; }
+#commit-list .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#commit-list .age { flex: none; color: var(--dim); font-size: .92em; }
+#commit-list .boundary .subj { color: var(--dim); }
+#commit-list .uncommitted .subj { font-style: italic; }
+#commit-list .all .subj { font-weight: 600; }
+#commit-list .all .what { flex: none; color: var(--dim); font-size: .92em; }
+#commit-list .cut { padding: 4px 12px; color: var(--dim); font-style: italic; }
+/* all of a row's labels together leave the subject most of the row */
+#commit-list .refs { flex: 0 1 auto; max-width: 40%; min-width: 0; display: flex; gap: 4px; overflow: hidden; }
+.ref-label { flex: 0 1 auto; min-width: 2.5em; font-size: .85em; line-height: 1.3; padding: 0 4px;
+  border-radius: 3px; color: var(--bg); overflow: hidden; text-overflow: ellipsis; }
+.ref-label.k-branch { background: var(--add); }
+.ref-label.k-branch.head { font-weight: 700; }
+.ref-label.k-tag { background: var(--note); }
+.ref-label.k-remote { background: var(--hunk); }
+#commit-shown { display: flex; align-items: center; gap: 4px; padding: 0 0 0 8px; border-radius: 3px;
+  background: var(--sel); max-width: 40ch; }
+#commit-shown-text { overflow: hidden; text-overflow: ellipsis; }
+#commit-shown-text .hash { font-family: var(--mono); font-size: .92em; color: var(--hunk); }
+#commit-shown.gone #commit-shown-text { color: var(--rem); }
+#commit-all { padding: 0 6px; background: none; border: none; color: var(--dim); }
+#commit-all:hover { color: var(--fg); }
+.l-commit { background: rgba(139, 233, 253, .05); }
 #comments-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #comments-count { font-weight: normal; }
 .cl-file { color: var(--fg); }
@@ -255,7 +284,7 @@ h2 .grow { flex: 1; }
 #settings .set-row button { padding: 0 6px; }
 #settings .reload-row { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--sel); }
 #settings .size { min-width: 3ch; text-align: center; font-family: var(--mono); }
-#cmenu { position: absolute; z-index: 20; min-width: 160px; padding: 4px 0; background: var(--bg-side);
+#cmenu { position: fixed; z-index: 40; min-width: 160px; padding: 4px 0; background: var(--bg-side);
   border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }
 #cmenu .c-item:hover { background: var(--sel); }

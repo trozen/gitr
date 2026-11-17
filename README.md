@@ -116,7 +116,8 @@ Enter takes the text as typed (a commit hash, `HEAD~3`). The counts for the
 current base are also shown next to the merge-base. The base and the
 untracked / wrap options are remembered per
 worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
-for the first time starts from the ones last used in its project. Monaco is
+for the first time starts from the ones last used in its project (a base
+that is a commit rather than a branch or tag stays with its worktree). Monaco is
 bundled in the package, so the page needs no internet access.
 
 When the worktree changes, a "worktree changed" note with a reload button
@@ -146,6 +147,18 @@ selected text. Ctrl+P (or the magnifier in the file list's header, or "Go
 to file..." in the right-click menu) opens a list of the changed files to
 jump to, as in VS Code: type parts of the name (`srvpy` finds `server.py`), pick with the
 arrows and Enter or a click.
+The third icon of the left bar shows the commits between the base and
+HEAD as a graph, as gitk draws them, with uncommitted changes on top.
+Clicking one shows only that commit, as `git show` does (a merge against
+its first parent). Shift-clicking a second commit (or the compare icon in
+the pane's header, then two clicks) shows the commits from one to the
+other combined, both included (from the older one's parent;
+"Uncommitted changes" can be the newer end). The "All changes" row at the
+top of the list, or the x on the note in the top bar, goes back to the
+whole review. Right-clicking a commit copies its hash or subject, or makes
+it the base, to review only what came after it. Comments can be read and written there too; they are
+placed on that commit's version of the file, and the agent export always
+describes the whole review.
 Comments are stored in the worktree's `.gitr/review.json`, the same file a
 gitr window uses, so a review can move between the two. On every change the
 server also writes the agent export to `.gitr/review.md`, so an agent in that

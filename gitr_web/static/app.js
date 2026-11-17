@@ -131,9 +131,9 @@ function init() {
   initComments();
 
   initBasePicker();
-  $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition()));
-  $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
-  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition()));
+  $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
+  $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
+  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
   $('wrap').checked = true;
   $('wrap').addEventListener('change', () => {
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
@@ -194,6 +194,8 @@ function setFont(f, px) {
   applyFont(f);
   // Comment boxes have fixed zone heights, measured at their font size.
   if (f.key === 'comments') renderZones(true);
+  // the graph is drawn in pixels of the row height
+  if (f.key === 'sidebar') renderCommits();
   savePrefs();
 }
 
@@ -204,10 +206,12 @@ function savePrefs() {
 
 // --left pane views: changed files or comments -----------------------------
 
+const VIEWS = ['files', 'comments', 'commits'];
+
 function setView(view) {
   for (const b of document.querySelectorAll('#activity .view')) b.classList.toggle('on', b.dataset.view === view);
-  $('files-section').hidden = view !== 'files';
-  $('comments-section').hidden = view !== 'comments';
+  for (const v of VIEWS) $(v + '-section').hidden = view !== v;
+  if (view === 'commits' && commitsUndrawn) renderCommits();
   if (prefs.view !== view) { prefs = { ...prefs, view }; savePrefs(); }
 }
 
@@ -215,7 +219,9 @@ function initViews() {
   $('collapse-all').addEventListener('click', () => collapseAll(true));
   $('expand-all').addEventListener('click', () => collapseAll(false));
   for (const b of document.querySelectorAll('#activity .view')) b.addEventListener('click', () => setView(b.dataset.view));
-  setView(prefs.view === 'comments' ? 'comments' : 'files');
+  setView(VIEWS.includes(prefs.view) ? prefs.view : 'files');
+  $('commit-all').addEventListener('click', () => selectCommit(null));
+  $('range-mode').addEventListener('click', () => setRangeMode(rangeMode ? null : 'first'));
 }
 
 // In diff order under their files, as the zones are stacked; comments on
@@ -296,7 +302,9 @@ let baseTyped = false; // the list filters only once the user types
 function applyBase(name) {
   hideBasePicker();
   $('base').blur();
-  if (current) load(current.wt, name.trim() || current.defaultBase, null, viewPosition());
+  // A new base is a new review: back from a single commit to all changes.
+  if (current) load(current.wt, name.trim() || current.defaultBase, null,
+                    current.commit ? reviewPosition() : viewPosition());
 }
 
 function hideBasePicker() {
@@ -409,7 +417,7 @@ async function loadProjects() {
     applyOptions(st);
     const pos = hash.get('file') ? { file: hash.get('file'), at: +hash.get('at') || 0, off: +hash.get('off') || 0 }
                                  : worktrees.get(initial).w.position;
-    load(initial, hash.get('base') || st.base, worktrees.get(initial).p.defaultBase, pos);
+    load(initial, hash.get('base') || st.base, worktrees.get(initial).p.defaultBase, pos, hash.get('commit'));
   } else {
     showSwitcher(true);
   }
@@ -628,11 +636,15 @@ function renderQuickOpen() {
   if (!qoItems.length) box.append(el('div', 'none', 'no matching file'));
 }
 
-function moveQuickSel(d) {
-  const rows = $('qo-list').querySelectorAll('.row');
+// Arrows wrap around, pages stop at the ends (as in VS Code).
+function moveQuickSel(d, page) {
+  const list = $('qo-list'), rows = list.querySelectorAll('.row');
   if (!rows.length) return;
   rows[qoSel]?.classList.remove('sel');
-  qoSel = (qoSel + d + rows.length) % rows.length;
+  if (page) {
+    const per = Math.max(1, Math.floor(list.clientHeight / rows[0].offsetHeight) - 1);
+    qoSel = Math.max(0, Math.min(rows.length - 1, qoSel + d * per));
+  } else qoSel = (qoSel + d + rows.length) % rows.length;
   rows[qoSel].classList.add('sel');
   rows[qoSel].scrollIntoView({ block: 'nearest' });
 }
@@ -661,10 +673,289 @@ function initQuickOpen() {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); moveQuickSel(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); moveQuickSel(-1); }
+    else if (e.key === 'PageDown') { e.preventDefault(); moveQuickSel(1, true); }
+    else if (e.key === 'PageUp') { e.preventDefault(); moveQuickSel(-1, true); }
     else if (e.key === 'Enter') { e.preventDefault(); openQuickItem(qoSel); }
     else if (e.key === 'Escape') { e.preventDefault(); showQuickOpen(false); editor.focus(); }
   });
   input.addEventListener('blur', () => showQuickOpen(false));
+}
+
+// --commits pane: base..HEAD as a graph, as gitk draws it ------------------
+
+let commitList = null;   // the last /api/commits answer for current wt and base
+let commitsFp = null;    // the fingerprint it was loaded at
+let commitsUndrawn = false;
+const LANE_W = 12;
+const LANE_COLORS = ['#8be9fd', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c'];
+
+async function refreshCommits(gen) {
+  try {
+    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, untracked: shown.untracked });
+    if (gen === wordGen) { commitList = r; renderCommits(); }
+  } catch { /* transient; next poll retries */ }
+}
+
+async function loadCommits(gen) {
+  const at = doc.fingerprint;
+  try {
+    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, untracked: shown.untracked });
+    if (gen !== wordGen) return;
+    commitList = r;
+    commitsFp = at;
+    renderCommits();
+  } catch (e) {
+    if (gen !== wordGen) return;
+    commitList = null;
+    $('commit-list').textContent = '';
+    $('commit-list').append(el('div', 'empty', 'commits: ' + e.message));
+  }
+}
+
+// git lists the boundary (commits outside base..HEAD with a child inside:
+// the merge base, and what merges brought in from the base) after all the
+// rest, so every merge from the base would draw a lane down to the end.
+// Each goes right below its last child instead, closing that lane at once.
+function commitRows() {
+  if (!commitList) return [];
+  const rows = commitList.commits.filter((c) => !c.boundary);
+  const at = new Map(rows.map((c, i) => [c.hash, i]));
+  const below = new Map();  // row index -> boundary commits to put after it
+  for (const b of commitList.commits.filter((c) => c.boundary)) {
+    let last = -1;
+    for (const c of rows) if (c.parents.includes(b.hash)) last = Math.max(last, at.get(c.hash));
+    if (!below.has(last)) below.set(last, []);
+    below.get(last).push(b);
+  }
+  for (const i of [...below.keys()].sort((x, y) => y - x)) rows.splice(i + 1, 0, ...below.get(i));
+  if (commitList.uncommitted)
+    rows.unshift({ hash: 'uncommitted', parents: [commitList.head], subject: 'Uncommitted changes', refs: [] });
+  return rows;
+}
+
+// Lane layout, newest first: each column waits for one commit (the parent
+// of the commit above it in that column). A commit takes the column that
+// waits for it; other columns waiting for it too end in it (a fork); its
+// first parent continues the column, further parents (a merge) take free
+// ones. Parents not in the list (beyond a cut) start no column. A line keeps
+// its colour along its branch, not per column: a new line takes the next.
+function commitGraph(rows) {
+  const present = new Set(rows.map((r) => r.hash));
+  const lanes = [];  // {hash, color} or null
+  let colors = 0;
+  return rows.map((r) => {
+    const before = lanes.map((l) => l && { ...l });
+    let col = lanes.findIndex((l) => l && l.hash === r.hash);
+    const color = col === -1 ? colors++ : lanes[col].color;
+    if (col === -1) { col = lanes.indexOf(null); if (col === -1) col = lanes.length; }
+    for (let i = 0; i < lanes.length; i++) if (lanes[i] && lanes[i].hash === r.hash) lanes[i] = null;
+    const parents = r.boundary ? [] : r.parents.filter((p) => present.has(p));
+    const outs = [];
+    parents.forEach((p, n) => {
+      let j = n === 0 ? col : lanes.findIndex((l) => l && l.hash === p);
+      if (j === -1) {
+        j = lanes.indexOf(null); if (j === -1) j = lanes.length;
+        lanes[j] = { hash: p, color: n === 0 ? color : colors++ };
+      } else if (n === 0) lanes[j] = { hash: p, color };
+      outs.push({ j, color: lanes[j].color });
+    });
+    while (lanes.length && lanes[lanes.length - 1] == null) lanes.pop();
+    return { col, color, before, outs };
+  });
+}
+
+function svgEl(tag, attrs) {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function drawGraph(svg, r, g, width, h) {
+  svg.setAttribute('width', width);
+  svg.setAttribute('height', h);
+  const x = (i) => LANE_W / 2 + i * LANE_W, mid = h / 2;
+  const paint = (c) => LANE_COLORS[c % LANE_COLORS.length];
+  const line = (x1, y1, x2, y2, c) => svg.append(svgEl('path', {
+    d: x1 === x2 ? `M${x1} ${y1}V${y2}` : `M${x1} ${y1}C${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${y2}`,
+    stroke: paint(c), 'stroke-width': 1.5, fill: 'none' }));
+  g.before.forEach((l, i) => {
+    if (l == null) return;
+    if (l.hash === r.hash) line(x(i), 0, x(g.col), mid, l.color);
+    else line(x(i), 0, x(i), h, l.color);
+  });
+  for (const o of g.outs) line(x(g.col), mid, x(o.j), h, o.color);
+  const color = r.hash === 'uncommitted' ? 'var(--note)' : paint(g.color);
+  svg.append(svgEl('circle', { cx: x(g.col), cy: mid, r: 3.5,
+    fill: r.boundary ? 'var(--bg-side)' : color, stroke: color, 'stroke-width': 1.5 }));
+}
+
+function age(sec) {
+  const d = Date.now() / 1000 - sec;
+  for (const [n, unit] of [[31536000, 'y'], [2592000, 'mo'], [604800, 'w'], [86400, 'd'], [3600, 'h'], [60, 'm']])
+    if (d >= n) return Math.floor(d / n) + unit;
+  return 'now';
+}
+
+function renderCommits() {
+  const box = $('commit-list');
+  box.textContent = '';
+  const rows = commitRows();
+  const inside = commitList ? commitList.commits.filter((c) => !c.boundary).length : 0;
+  const cut = commitList?.commits.some((c) => c.cut);
+  $('commits-count').textContent = commitList ? `(${inside}${cut ? '+' : ''})` : '';
+  if (!commitList) return;
+  if (!rows.length) { box.append(el('div', 'empty', 'no commits since the base')); return; }
+  const graph = commitGraph(rows);
+  const lanes = Math.max(1, ...graph.map((g) => Math.max(g.before.length, g.col + 1, ...g.outs.map((o) => o.j + 1))));
+  const width = lanes * LANE_W;
+  // The whole review is one of the choices: the row stays highlighted
+  // while it is shown, and picking it again goes back from a commit.
+  const all = el('div', 'row cm all', [el('span', null), el('span', 'subj', 'All changes'),
+                                       el('span', 'what', 'merge base to the working tree')]);
+  all.firstChild.style.width = width + 'px';
+  all.firstChild.style.flex = 'none';
+  all.title = `The whole review: ${current.base}'s merge base to the working tree`;
+  all.addEventListener('click', () => selectCommit(null));
+  box.append(all);
+  const made = rows.map((r) => {
+    // sized once the row height is known; unsized, an svg is 300 x 150
+    const svg = svgEl('svg', { class: 'graph', width: 0, height: 0 });
+    const labels = (r.refs || []).map((ref) => {
+      const lab = el('span', `ref-label k-${ref.kind}${ref.head ? ' head' : ''}`, ref.name);
+      lab.title = `${ref.kind}${ref.head ? ' (checked out)' : ''}: ${ref.name}`;
+      return lab;
+    });
+    const cls = 'row cm' + (r.boundary ? ' boundary' : '') + (r.hash === 'uncommitted' ? ' uncommitted' : '');
+    const row = el('div', cls, [svg, ...(labels.length ? [el('span', 'refs', labels)] : []),
+                                el('span', 'subj', r.subject),
+                                el('span', 'age', r.time ? age(r.time) : '')]);
+    row.dataset.hash = r.hash;
+    row.title = r.hash === 'uncommitted'
+      ? 'The working tree against HEAD'
+      : `${r.hash}\n${r.author} <${r.email}>\n${new Date(r.time * 1000).toLocaleString()}\n\n${r.subject}` +
+        (r.body ? '\n\n' + r.body : '') +
+        (r.boundary ? '\n\n(not between the base and HEAD: the merge base, or merged in from the base)' : '');
+    row.addEventListener('click', (e) => pickCommit(r.hash, e.shiftKey));
+    row.addEventListener('contextmenu', (e) => { e.preventDefault(); commitMenu(r, e.clientX, e.clientY); });
+    box.append(row);
+    return { row, svg };
+  });
+  if (cut) box.append(el('div', 'cut', `only the newest ${inside} commits are listed`));
+  // Rows are as tall as the sidebar font makes them; the graph is drawn to
+  // fit. A hidden pane has no heights: drawn when it is shown.
+  const h = made[0].row.getBoundingClientRect().height;  // fractional, so lines meet
+  commitsUndrawn = !h;
+  if (!h) return markShownCommit();
+  made.forEach(({ svg }, i) => drawGraph(svg, rows[i], graph[i], width, h));
+  markShownCommit();
+}
+
+// The commits a range holds, as git counts them: reachable from the newer
+// end but not from the older end's first parent.
+function rangeHashes(older, newer) {
+  const byHash = new Map(commitRows().map((r) => [r.hash, r]));
+  const reach = (start) => {
+    const seen = new Set(), todo = start ? [start] : [];
+    while (todo.length) {
+      const h = todo.pop();
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const r = byHash.get(h);
+      if (r && !r.boundary) todo.push(...r.parents);
+    }
+    return seen;
+  };
+  const stop = reach(byHash.get(older)?.parents[0]);
+  return new Set([...reach(newer)].filter((h) => !stop.has(h) && byHash.has(h)));
+}
+
+function markShownCommit() {
+  const box = $('commit-list');
+  box.querySelectorAll('.cm.active').forEach((r) => r.classList.remove('active'));
+  const c = current?.commit;
+  if (!c) { box.querySelector('.cm.all')?.classList.add('active'); return; }
+  const rows = [...box.querySelectorAll('.cm')];
+  const [older, newer] = c.includes('..') ? c.split('..') : [c, c];
+  const marked = c.includes('..') ? rangeHashes(older, newer) : new Set([c]);
+  const hit = rows.filter((r) => marked.has(r.dataset.hash));
+  hit.forEach((r) => r.classList.add('active'));
+  hit[0]?.scrollIntoView({ block: 'nearest' });
+  // an end listed after a refresh no more: rebased away, or HEAD moved past it
+  const missing = !!commitList && ![older, newer].every((h) => rows.some((r) => r.dataset.hash === h));
+  $('commit-shown').classList.toggle('gone', missing);
+  if (missing)
+    $('commit-shown').title = c === 'uncommitted' ? 'There are no uncommitted changes now'
+      : c.includes('..') ? 'An end of this range is no longer between the base and HEAD'
+      : 'This commit is no longer between the base and HEAD';
+}
+
+function showCommitShown(info) {
+  const box = $('commit-shown'), text = $('commit-shown-text');
+  box.hidden = !info;
+  box.classList.remove('gone');
+  text.textContent = '';
+  if (!info) return;
+  if (info.range) {
+    const to = info.to === 'uncommitted' ? 'working tree' : info.to.slice(0, 7);
+    text.append(el('span', 'hash', `${info.from.slice(0, 7)}..${to}`), ` ${info.count} commit${info.count === 1 ? '' : 's'}`);
+    box.title = `Showing ${info.count} commits combined, from ${info.from} to ${info.to === 'uncommitted' ? 'the working tree' : info.to}`;
+  } else if (info.hash.includes('..')) {
+    text.append(el('span', 'hash', info.hash.split('..').map((h) => h === 'uncommitted' ? 'working tree' : h.slice(0, 7)).join('..')));
+  } else if (info.hash === 'uncommitted') {
+    text.append('uncommitted changes');
+    box.title = 'Showing the working tree against HEAD';
+  } else {
+    text.append(el('span', 'hash', info.hash.slice(0, 7)), info.subject ? ' ' + info.subject : '');
+    box.title = `Showing commit ${info.hash}${info.subject ? ': ' + info.subject : ''} against its first parent`;
+  }
+  markShownCommit();
+}
+
+// The review's last position in this worktree, kept while commits are shown.
+function reviewPosition() {
+  return current ? worktrees.get(current.wt)?.w.position : null;
+}
+
+// Click: one commit (again: back to all changes). Shift-click: every
+// commit from the last clicked one to this one, both included; the older
+// end is the one lower in the list.
+let commitAnchor = null;
+// The header button: the next click picks one end (and shows that commit),
+// the one after it the other end, which also ends the mode.
+let rangeMode = null;  // null: off; 'first': waiting for the first end; 'second'
+function setRangeMode(m) {
+  rangeMode = m;
+  $('range-mode').classList.toggle('on', !!m);
+}
+
+function pickCommit(hash, shift) {
+  if (!current) return;
+  // a second click on the shown commit goes back to all changes, but not
+  // while it is the first end of a range
+  const toggle = !rangeMode;
+  if (rangeMode === 'first') rangeMode = 'second';
+  else if (rangeMode === 'second') {
+    if (hash === commitAnchor) return;  // the same end again: still waiting for the other
+    setRangeMode(null);
+    shift = true;
+  }
+  if (shift && commitAnchor && commitAnchor !== hash) {
+    const order = commitRows().map((r) => r.hash);
+    const [a, b] = [order.indexOf(commitAnchor), order.indexOf(hash)];
+    if (a !== -1 && b !== -1) {
+      const older = order[Math.max(a, b)], newer = order[Math.min(a, b)];
+      // the working tree has no parent to start from: it can only be the newer end
+      if (older !== 'uncommitted') return selectCommit(`${older}..${newer}`);
+    }
+  }
+  commitAnchor = hash;
+  selectCommit(toggle && current.commit === hash ? null : hash);
+}
+
+function selectCommit(hash) {
+  if (!hash) { commitAnchor = null; setRangeMode(null); }
+  if (!current) return;
+  load(current.wt, current.base, null, hash ? null : reviewPosition(), hash);
 }
 
 // What the list shows; settings and positions are not part of it.
@@ -712,18 +1003,29 @@ async function saveSettings(wt, base) {
   const st = { base, untracked: $('untracked').checked, wrap: $('wrap').checked,
                reindent: $('reindent').checked };
   const entry = worktrees.get(wt);
-  if (entry) { entry.w.settings = st; entry.p.settings = st; }
-  try { await post('/api/settings', { wt, ...st }); } catch (e) { flash('settings not saved: ' + e.message); }
+  if (entry) entry.w.settings = st;
+  try {
+    // the server decides what the project keeps (not a commit as its base)
+    const r = await post('/api/settings', { wt, ...st });
+    if (entry) entry.p.settings = r.project;
+  } catch (e) { flash('settings not saved: ' + e.message); }
 }
 
 // --loading a diff -------------------------------------------------------
 
-async function load(wt, base, defaultBase, restore) {
+// commit: a single commit's diff (a hash, or 'uncommitted') instead of the
+// whole review; null for the review.
+async function load(wt, base, defaultBase, restore, commit = null) {
   if (shown && shown.wt !== wt) flushPosition();
   const gen = ++wordGen;
   const untracked = $('untracked').checked ? '1' : '0';
-  current = { wt, base, untracked, defaultBase: defaultBase || current?.defaultBase || base };
-  setHash({ wt, base, untracked, ...(restore || {}) });
+  if (current?.wt !== wt || current?.base !== base) commitList = null;
+  current = { wt, base, untracked, defaultBase: defaultBase || current?.defaultBase || base, commit };
+  // a single commit restored from the address is where a shift-click starts
+  if (commit && !commit.includes('..') && !commitAnchor) commitAnchor = commit;
+  const state = { wt, base, untracked, ...(commit ? { commit } : {}) };
+  setHash({ ...state, ...(restore || {}) });
+  showCommitShown(commit ? { hash: commit } : null);
   document.querySelectorAll('.wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
   $('base').value = base;
   updateCrumb();
@@ -737,7 +1039,7 @@ async function load(wt, base, defaultBase, restore) {
   const t0 = performance.now();
   let d;
   try {
-    d = await api('/api/diff', { wt, base, untracked, reindent: $('reindent').checked ? '1' : '0' });
+    d = await api('/api/diff', { ...state, reindent: $('reindent').checked ? '1' : '0' });
   } catch (e) {
     if (gen === wordGen) {
       showProgress('error: ' + e.message);
@@ -751,7 +1053,8 @@ async function load(wt, base, defaultBase, restore) {
   showProgress(`rendering ${d.files.length} files, ${d.kinds.length} lines ...`);
   await nextFrame();
   doc = d;
-  shown = { wt, base, untracked };
+  shown = state;
+  showCommitShown(d.commit);
   $('base').classList.remove('bad');
   $('base').title = 'Any branch, tag or commit; click for a list';
   saveSettings(wt, base);  // only a base that loaded is worth remembering
@@ -773,6 +1076,8 @@ async function load(wt, base, defaultBase, restore) {
   markHeadersInMinimap();
   updateDecorations(true);
   if (d.files.length) hideProgress();
+  else if (commit === 'uncommitted') showProgress('no uncommitted changes');
+  else if (commit) showProgress('this commit changes no files (against its first parent)');
   else showProgress(`no changes against ${base} (merge-base ${d.mergeBase})`);
   await nextFrame();
   const t2 = performance.now();
@@ -791,6 +1096,7 @@ async function load(wt, base, defaultBase, restore) {
   onScroll();
   loadComments(gen);
   fetchWords(gen);
+  loadCommits(gen);
 }
 
 function showProgress(msg) { const p = $('progress'); p.textContent = msg; p.hidden = false; }
@@ -832,7 +1138,7 @@ function foldingRanges() {
 // 'g' is not a server kind: the second line of a file's header band, which
 // is the file's first hunk header (or the empty line of a hunkless file).
 // Only hunk headers further down are drawn as plain separated lines.
-const LINE_CLASS = { a: 'l-add', r: 'l-rem', f: 'l-file', g: 'l-file2', h: 'l-head' };
+const LINE_CLASS = { a: 'l-add', r: 'l-rem', f: 'l-file', g: 'l-file2', h: 'l-head', k: 'l-commit' };
 const MARGIN_CLASS = { f: 'l-file', g: 'l-file2', h: 'l-head' };
 const decoKind = (ln) => {
   const k = doc.kinds[ln - 1];
@@ -1109,6 +1415,7 @@ function scrollToPosition(pos) {
 function flushPosition() {
   clearTimeout(hashTimer);
   clearTimeout(posTimer);
+  if (shown.commit) return;
   const pos = viewPosition();
   const entry = worktrees.get(shown.wt);
   if (entry) entry.w.position = pos;
@@ -1127,6 +1434,8 @@ function saveViewPosition() {
     if (!shown) return;
     const pos = viewPosition();
     setHash({ ...shown, ...(pos || {}) });
+    // A commit's view has positions of its own, not the review's.
+    if (shown.commit) return;
     // Kept per worktree for switching back, here at once; on the server
     // (for the next session) only once scrolling has settled.
     const entry = worktrees.get(shown.wt);
@@ -1545,6 +1854,13 @@ function showMenu(ln, x, y) {
     it.addEventListener('click', () => { hideMenu(); fn(); });
     m.append(it);
   };
+  if (doc.kinds[ln - 1] === 'k') {
+    const h = doc.commit.hash;
+    item(`Copy "${h.slice(0, 10)}"`, () => copyText(h, `copied ${h}`));
+    item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); });
+    item('Go to file...', () => showQuickOpen(true));
+    return placeMenu(m, x, y);
+  }
   if (commentable(ln)) {
     item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c));
     m.append(el('div', 'c-sep'));
@@ -1571,10 +1887,40 @@ function showMenu(ln, x, y) {
   // A file header alone has nothing worth quoting.
   if (n > 1 || doc.kinds[from - 1] !== 'f')
     item(`Copy "${locationOf(from)}" + ${n} line${n === 1 ? '' : 's'}`, () => copyLines(from, to));
-  const wrap = $('editor-wrap').getBoundingClientRect();
+  placeMenu(m, x, y);
+}
+
+// Fixed to the window, so the sidebar's rows can have it too.
+function placeMenu(m, x, y) {
   m.hidden = false;
-  m.style.left = Math.min(x - wrap.left, wrap.width - m.offsetWidth - 4) + 'px';
-  m.style.top = Math.min(y - wrap.top, wrap.height - m.offsetHeight - 4) + 'px';
+  m.style.left = Math.max(4, Math.min(x, innerWidth - m.offsetWidth - 4)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, innerHeight - m.offsetHeight - 4)) + 'px';
+}
+
+function commitMenu(r, x, y) {
+  const m = $('cmenu');
+  m.textContent = '';
+  const item = (label, fn) => {
+    const it = el('div', 'c-item', label);
+    it.addEventListener('click', () => { hideMenu(); fn(); });
+    m.append(it);
+  };
+  const shown = current?.commit && !current.commit.includes('..') ? current.commit : null;
+  const short = (h) => h === 'uncommitted' ? 'uncommitted changes' : h.slice(0, 7);
+  if (r.hash !== 'uncommitted') {
+    item(`Copy "${r.hash.slice(0, 10)}"`, () => copyText(r.hash, `copied ${r.hash}`));
+    item('Copy subject', () => copyText(r.subject, 'copied the subject'));
+    m.append(el('div', 'c-sep'));
+  }
+  if (shown && shown !== r.hash) {
+    item(`Show range to ${short(shown)}`, () => { commitAnchor = shown; pickCommit(r.hash, true); });
+  }
+  if (r.hash !== 'uncommitted') {
+    // the base's merge base with HEAD is the commit itself when it is an ancestor
+    item('Review changes after this commit (use as base)', () => applyBase(r.hash));
+  }
+  if (!m.childElementCount) return;
+  placeMenu(m, x, y);
 }
 
 function hideMenu() { $('cmenu').hidden = true; }
@@ -1702,6 +2048,8 @@ async function pollChanges() {
   try {
     const r = await api('/api/fingerprint', shown);
     if (gen !== wordGen) return;
+    // The list follows the worktree quietly; the diff waits for reload.
+    if (r.fingerprint !== commitsFp && commitList) { commitsFp = r.fingerprint; refreshCommits(gen); }
     if (r.fingerprint !== fp) {
       $('changed').hidden = false;
       // Each summary runs a whole git diff; while an agent keeps editing,
@@ -1733,13 +2081,13 @@ async function showChanges(gen) {
   if (r.files) {
     parts.push(el('span', null, [el('span', 'n-add', '+' + r.add), ' ', el('span', 'n-rem', '-' + r.del),
                                  ` in ${plural(r.files, 'file')}`]));
-  } else if (!parts.length) parts.push(el('span', null, 'diff unchanged'));
-  what.append(': ');
+  } else if (!parts.length && r.files === 0) parts.push(el('span', null, 'diff unchanged'));
+  if (parts.length) what.append(': ');
   parts.forEach((p, i) => what.append(...(i ? [', ', p] : [p])));
   $('changed').title = 'Since this diff was loaded: '
     + (r.rewritten ? 'HEAD was rebased or reset; ' : r.commits ? `${plural(r.commits, 'new commit')}; ` : '')
     + (r.files ? `${plural(r.add, 'changed line')} would appear and ${r.del} go, in ${plural(r.files, 'file')}`
-               : 'the diff itself is the same');
+       : r.files === 0 ? 'the diff itself is the same' : 'the files changed');
 }
 
 // --dom helper -----------------------------------------------------------

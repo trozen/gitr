@@ -73,6 +73,9 @@ h2 .grow { flex: 1; }
 .project { font-weight: 600; cursor: default; }
 .project:hover { background: none; }
 .wt { padding-left: 24px; }
+/* picked with the arrows; the current worktree keeps its own highlight */
+#projects .wt.sel { box-shadow: inset 2px 0 0 var(--file); background: #2c2e3a; }
+#projects .wt.sel.active { background: var(--sel); }
 .wt .branch { color: var(--file); }
 .err { color: var(--rem); padding: 1px 24px; white-space: pre-wrap; }
 
@@ -124,6 +127,8 @@ h2 .grow { flex: 1; }
 #basepop { width: 380px; padding-top: 4px; font-size: var(--bar-px); }
 #basepop .ref { font-family: var(--mono); font-size: .92em; }
 #basepop .ab { font-family: var(--mono); font-size: .92em; }
+#basepop .commit .subj { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+#basepop .commit .ab { color: var(--dim); }
 #basepop .row.active { background: var(--sel); }
 #switch-filter { margin: 8px; padding: 3px 6px; font: inherit; color: var(--fg); background: var(--bg);
   border: 1px solid var(--sel); border-radius: 3px; }
@@ -135,6 +140,8 @@ h2 .grow { flex: 1; }
 #qo-list { padding-bottom: 4px; }
 #qo-list .row { padding: 2px 10px; }
 #qo-list .row.sel { background: var(--sel); }
+#qo-list h2 { padding: 6px 10px 2px; }
+#qo-list .row.current .qo-name::after { content: " (shown)"; color: var(--dim); font-weight: normal; }
 #qo-list .qo-name { flex: none; color: var(--fg); }
 #qo-list .qo-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim);
   font-size: .92em; direction: rtl; text-align: left; }

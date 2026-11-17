@@ -782,6 +782,7 @@ def merge_base(wt: str, base: str) -> str:
     return git(wt, 'merge-base', base, 'HEAD').strip()
 
 
+RECENT_COMMITS = 15
 REFS_PER_KIND = 200  # most recent first; repos with thousands of tags exist
 
 
@@ -814,7 +815,18 @@ def list_refs(wt: str) -> dict:
         upstream = git(wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}').strip()
     except GitError:
         upstream = None
-    return {'refs': refs, 'upstream': upstream}
+    # A base a few commits back: the branch's own line (first parents), so a
+    # merge's side commits do not crowd it out.
+    commits = []
+    try:
+        log = git(wt, 'log', '--first-parent', f'--max-count={RECENT_COMMITS}',
+                  '--format=%h%x00%s%x00%at', 'HEAD')
+        for line in log.splitlines():
+            h, subject, at = line.split('\0')
+            commits.append({'name': h, 'subject': subject, 'time': int(at)})
+    except GitError:
+        pass  # no commits yet
+    return {'refs': refs, 'upstream': upstream, 'commits': commits}
 
 
 def diff_text(wt: str, merge_base: str, untracked: bool) -> str:

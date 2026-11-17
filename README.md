@@ -110,7 +110,8 @@ server's hostname.
 Pick a worktree with the `project > branch` button at the top left; the
 base defaults to `main` / `master` and can be any ref. Clicking the base
 field lists the default, the branch's upstream, the branches of the
-project's other worktrees, and all branches and tags, each with how many
+project's other worktrees, the branch's recent commits (to review only
+what came after one), and all branches and tags, each with how many
 commits HEAD is ahead of (and behind) it; typing filters the list, and
 Enter takes the text as typed (a commit hash, `HEAD~3`). The counts for the
 current base are also shown next to the merge-base. The base and the
@@ -145,8 +146,10 @@ file of that line in the list, opening its folders. "Find..." in the same
 menu (or Ctrl+F in the diff) opens Monaco's find, starting from the
 selected text. Ctrl+P (or the magnifier in the file list's header, or "Go
 to file..." in the right-click menu) opens a list of the changed files to
-jump to, as in VS Code: type parts of the name (`srvpy` finds `server.py`), pick with the
-arrows and Enter or a click.
+jump to, as in VS Code, followed by the worktrees of all projects to
+switch to: type parts of the name (`srvpy` finds `server.py`, `wtag` the
+`agent-1` worktree of `wt`), pick with the arrows and Enter or a click.
+The project switcher takes the arrows and Enter too.
 The third icon of the left bar shows the commits between the base and
 HEAD as a graph, as gitk draws them, with uncommitted changes on top.
 Clicking one shows only that commit, as `git show` does (a merge against

@@ -336,7 +336,7 @@ async function showBasePicker() {
 // branches of the project's other worktrees (agents branch off each
 // other's work), and every branch, remote branch and tag, most recent first.
 function baseSections() {
-  const byName = new Map((baseRefs?.refs || []).map((r) => [r.name, r]));
+  const byName = new Map([...(baseRefs?.commits || []), ...(baseRefs?.refs || [])].map((r) => [r.name, r]));
   const entry = worktrees.get(current.wt);
   const others = entry ? entry.p.worktrees.filter((w) => w.path !== current.wt && w.branch).map((w) => w.branch) : [];
   const refs = baseRefs?.refs || [];
@@ -344,6 +344,7 @@ function baseSections() {
     ['default', [current.defaultBase]],
     ['upstream', baseRefs?.upstream ? [baseRefs.upstream] : []],
     ['other worktrees', others],
+    ['recent commits', (baseRefs?.commits || []).map((c) => c.name)],
     ['branches', refs.filter((r) => r.kind === 'branch').map((r) => r.name)],
     ['remote branches', refs.filter((r) => r.kind === 'remote').map((r) => r.name)],
     ['tags', refs.filter((r) => r.kind === 'tag').map((r) => r.name)],
@@ -360,15 +361,21 @@ function renderBaseList() {
   const words = baseTyped ? $('base').value.toLowerCase().split(/\s+/).filter(Boolean) : [];
   let any = false;
   for (const [title, refs] of baseSections()) {
-    const rows = refs.filter((r) => words.every((w) => r.name.toLowerCase().includes(w)));
+    const hay = (r) => (r.name + ' ' + (r.subject || '')).toLowerCase();
+    const rows = refs.filter((r) => words.every((w) => hay(r).includes(w)));
     if (!rows.length) continue;
     any = true;
     box.append(el('h2', null, title));
     for (const r of rows) {
-      const row = el('div', 'row', [el('span', 'grow ref', r.name), el('span', 'ab', aheadBehind(r.ahead, r.behind))]);
+      // a commit: its hash, subject and age; a ref: its name and counts
+      const row = r.subject != null
+        ? el('div', 'row commit', [el('span', 'ref', r.name), el('span', 'grow subj', r.subject),
+                                   el('span', 'ab', age(r.time))])
+        : el('div', 'row', [el('span', 'grow ref', r.name), el('span', 'ab', aheadBehind(r.ahead, r.behind))]);
       row.setAttribute('role', 'option');
       row.classList.toggle('active', r.name === current.base);
       if (r.ahead != null) row.title = `HEAD: ${r.ahead} ahead, ${r.behind} behind`;
+      if (r.subject != null) row.title = `${r.name} ${r.subject}\nas the base: review the changes after this commit`;
       // mousedown, not click: the field's blur must not close the list first
       row.addEventListener('mousedown', (e) => { e.preventDefault(); applyBase(r.name); });
       box.append(row);
@@ -452,12 +459,7 @@ function renderProjects(projects) {
       row.dataset.hay = [p.name, wtLabel(w), rel].join(' ').toLowerCase();
       row.classList.toggle('active', w.path === current?.wt);
       worktrees.set(w.path, { p, w });
-      row.addEventListener('click', () => {
-        showSwitcher(false);
-        const st = settingsFor(w.path);
-        applyOptions(st);
-        load(w.path, st.base, p.defaultBase, w.position);
-      });
+      row.addEventListener('click', () => { showSwitcher(false); openWorktree(w.path); });
       group.append(row);
     }
     box.append(group);
@@ -466,6 +468,13 @@ function renderProjects(projects) {
   filterSwitcher();
   updateRemoved();
   updateCrumb();
+}
+
+function openWorktree(path) {
+  const { p, w } = worktrees.get(path);
+  const st = settingsFor(path);
+  applyOptions(st);
+  load(path, st.base, p.defaultBase, w.position);
 }
 
 const wtLabel = (w) => w.branch || (w.head ? w.head + ' (detached)' : '?');
@@ -507,15 +516,42 @@ function filterSwitcher() {
     any ||= !g.hidden;
   }
   $('projects').querySelector('.none').hidden = any;
+  // the current worktree while it matches, else the first match
+  const rows = visibleWorktrees();
+  setSwitchSel(rows.find((r) => r.classList.contains('active')) || rows[0]);
+}
+
+function visibleWorktrees() {
+  return [...$('projects').querySelectorAll('.group:not([hidden]) .wt:not([hidden])')];
+}
+
+function setSwitchSel(row) {
+  $('projects').querySelector('.wt.sel')?.classList.remove('sel');
+  row?.classList.add('sel');
+  row?.scrollIntoView({ block: 'nearest' });
+}
+
+// Arrows wrap around, pages stop at the ends, as in the go to file list.
+function moveSwitchSel(d, page) {
+  const rows = visibleWorktrees();
+  if (!rows.length) return;
+  let i = rows.findIndex((r) => r.classList.contains('sel'));
+  if (page) {
+    const list = $('projects');
+    const per = Math.max(1, Math.floor(list.clientHeight / rows[0].offsetHeight) - 1);
+    i = Math.max(0, Math.min(rows.length - 1, i + d * per));
+  } else i = (i + d + rows.length) % rows.length;
+  setSwitchSel(rows[i]);
 }
 
 function initSwitcher() {
   const sw = $('switcher'), btn = $('crumb'), f = $('switch-filter');
   btn.addEventListener('click', () => showSwitcher(sw.hidden));
   f.addEventListener('input', filterSwitcher);
-  // Enter takes the first match, as in a search field.
   f.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sw.querySelector('.wt:not([hidden])')?.click();
+    const move = { ArrowDown: [1], ArrowUp: [-1], PageDown: [1, true], PageUp: [-1, true] }[e.key];
+    if (move) { e.preventDefault(); moveSwitchSel(...move); }
+    else if (e.key === 'Enter') sw.querySelector('.wt.sel')?.click();
   });
   addEventListener('mousedown', (e) => {
     if (!sw.contains(e.target) && !btn.contains(e.target)) showSwitcher(false);
@@ -573,7 +609,7 @@ const QO_MAX = 300;
 function showQuickOpen(on) {
   const qo = $('quickopen');
   if (!on) { qo.hidden = true; return; }
-  if (!doc || !doc.files.length) return;
+  if (!worktrees.size) return;
   const r = $('editor-wrap').getBoundingClientRect();
   const w = Math.min(600, r.width - 40);
   qo.style.width = w + 'px';
@@ -599,20 +635,51 @@ function highlighted(text, hits, offset) {
   return out;
 }
 
+// The changed files, then the worktrees of all projects, matched as
+// "project/branch" so that the branch counts as the name.
 function renderQuickOpen() {
   const q = $('qo-input').value;
-  qoItems = [];
-  doc.files.forEach((f, i) => {
+  const files = [], wts = [];
+  (doc?.files || []).forEach((f, i) => {
     const m = fuzzyMatch(q, f.path);
-    if (m) qoItems.push({ i, ...m });
+    if (m) files.push({ i, ...m });
   });
+  let k = 0;
+  for (const [path, { p, w }] of worktrees) {
+    const key = `${p.name}/${wtLabel(w)}`;
+    const m = fuzzyMatch(q, key);
+    if (m) wts.push({ wt: path, key, k, ...m });
+    k++;
+  }
   // Unfiltered, the diff's own order; filtered, the best first.
-  if (q.trim()) qoItems.sort((a, b) => b.score - a.score || a.i - b.i);
+  if (q.trim()) {
+    files.sort((a, b) => b.score - a.score || a.i - b.i);
+    wts.sort((a, b) => b.score - a.score || a.k - b.k);
+  }
+  qoItems = [...files.slice(0, QO_MAX), ...wts];
   qoSel = 0;
   const box = $('qo-list');
   box.textContent = '';
   const perFile = commentsPerFile();
-  for (const [n, it] of qoItems.slice(0, QO_MAX).entries()) {
+  for (const [n, it] of qoItems.entries()) {
+    if (it.wt) {
+      if (it === wts[0]) box.append(el('h2', null, 'worktrees'));
+      const { p, w } = worktrees.get(it.wt);
+      const cut = p.name.length + 1;
+      const hits = new Set(it.hits);
+      const rel = w.path === p.path ? '' : w.path.split('/').pop();
+      const row = el('div', 'row' + (n === qoSel ? ' sel' : '') + (it.wt === current?.wt ? ' current' : ''), [
+        el('span', 'qo-name', highlighted(wtLabel(w), hits, cut)),
+        el('span', 'qo-dir', [el('bdi', null, highlighted(p.name, hits, 0))]),
+        el('span', 'n', rel),
+      ]);
+      row.setAttribute('role', 'option');
+      row.title = w.path;
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); openQuickItem(n); });
+      box.append(row);
+      continue;
+    }
+    if (n === 0 && wts.length) box.append(el('h2', null, 'changed files'));
     const f = doc.files[it.i];
     const cut = f.path.lastIndexOf('/') + 1;
     const hits = new Set(it.hits);
@@ -633,7 +700,7 @@ function renderQuickOpen() {
     row.addEventListener('mousedown', (e) => { e.preventDefault(); openQuickItem(n); });
     box.append(row);
   }
-  if (!qoItems.length) box.append(el('div', 'none', 'no matching file'));
+  if (!qoItems.length) box.append(el('div', 'none', 'no matching file or worktree'));
 }
 
 // Arrows wrap around, pages stop at the ends (as in VS Code).
@@ -653,6 +720,7 @@ function openQuickItem(n) {
   const it = qoItems[n];
   showQuickOpen(false);
   if (!it) return;
+  if (it.wt) { if (it.wt !== current?.wt) openWorktree(it.wt); return; }
   jumpToFile(it.i);
   editor.focus();
 }

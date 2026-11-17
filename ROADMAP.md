@@ -171,11 +171,16 @@ whole diff in one read-only document as in gitr.
       out; the marks clear on the next reload
 - [x] Go to file: Ctrl+P opens a VS Code style quick open over the diff,
       the changed files matched loosely by name, Enter jumps to one
-- [ ] Ctrl+P lists the projects and worktrees too (as a second group
-      below the files, or behind a prefix), so one popup goes anywhere
-- [ ] Project switcher: up / down arrows move through the filtered
+- [x] Ctrl+P lists the projects and worktrees too (as a second group
+      below the files), so one popup goes anywhere
+- [ ] Ctrl+P prefixes, as VS Code's quick open has them: one that lists
+      only the worktrees (in a big diff they come after up to 300 files
+      when nothing is typed), and maybe `>` for actions (reload, copy for
+      agent, switch view) and `@` for the hunks or comments of the
+      current file; the prefixes are shown as hints when nothing is typed
+- [x] Project switcher: up / down arrows move through the filtered
       worktrees, Enter opens the selected one (now Enter takes the first)
-- [ ] Base picker: recent commits of the branch as well (short hash,
+- [x] Base picker: recent commits of the branch as well (short hash,
       subject, age), so a base a few commits back is a click away rather
       than a typed `HEAD~3`
 - [ ] Notice when `.gitr/review.json` changes from outside (a gitr window,

@@ -20,8 +20,10 @@ git diff main...HEAD | gitr
 git diff HEAD | gitr
 git diff --cached | gitr
 git show HEAD | gitr
-gitr --export master        # review comments as text for a coding agent, no window
-gitr --export --kinds bad,note   # only these kinds
+gitr export master          # review comments as text for a coding agent, no window
+gitr export --kinds bad,note   # only these kinds (gitr --export is the same)
+gitr comments list|add|rm|accept ...   # read and write comments, no window
+gitr serve [repos]          # gitr-serve
 ```
 
 No test suite yet. Syntax check:
@@ -49,5 +51,5 @@ Everything lives in `gitr.py`. The flow is:
 
 - **No non-ASCII characters** anywhere in the source (no Unicode arrows, box-drawing chars, etc.).
 - Single file, no dependencies beyond stdlib. Do not add packages. (`gitr_web/` is the separate web command; its page uses Monaco, bundled by `monaco/build.sh` into `gitr_web/static/monaco/`, which is generated and committed: do not edit it by hand.)
-- `tkinter` is imported optionally in `gitr.py`: gitr-serve and `--export` must work without it. Keep Tk out of module-level code (annotations are not evaluated, via `from __future__ import annotations`).
+- `tkinter` is imported optionally in `gitr.py`: gitr-serve, `gitr export` and `gitr comments` must work without it. Keep Tk out of module-level code (annotations are not evaluated, via `from __future__ import annotations`).
 - Colour scheme is Catppuccin Mocha (hex values in the `C` dict).

@@ -86,10 +86,16 @@ with the ability to attach persistent local comments to specific diff lines.
 - [ ] Color theme override via `config.json`
 - [ ] Keyboard shortcut help (`?`)
 - [ ] Export diff as HTML
-- [ ] Comments from the command line: `gitr` options to add, remove and
-      list comments (e.g. `gitr --comment path:line "text" [--kind bad]`,
-      `--comments` to list them with ids, `--delete-comment ID`), on the
-      same `.gitr/review.json`, so an agent or a script can review too
+- [x] Comments from the command line: `gitr comments list|add|rm|accept`
+      on the same `.gitr/review.json`, so an agent or a script can review
+      too; ids are hashes of the stored key, or path:line. A comment from
+      the CLI is on a line of the current file, so the views match an
+      added and an unchanged line alike
+- [ ] Removed lines from the CLI (`path:-42` against a base) and editing
+      a comment's text (`gitr comments edit`)
+- [ ] Subcommands: `gitr diff|export|comments|serve` are there (plain
+      `gitr` is `gitr diff`); to come: `gitr serve start|stop|status`
+      (see gitr-serve's daemon item) and the viewer as the web page
 
 ### Annotation storage format
 
@@ -122,7 +128,7 @@ or `bad` and defaults to `note` when absent.
 A browser-based gitr for agent work on a remote machine: several projects,
 each with one worktree per agent. A small server runs next to the worktrees
 (stdlib Python, reusing gitr's diff parsing, review store and export, so
-`.gitr/review.json` and `gitr --export` stay the agent contract) and is
+`.gitr/review.json` and `gitr export` stay the agent contract) and is
 reached over an SSH tunnel or Tailscale; the frontend is Monaco, with the
 whole diff in one read-only document as in gitr.
 

@@ -27,6 +27,35 @@ gitr -                       # read stdin explicitly
 gitr -p patch.diff           # read from a patch file
 ```
 
+`gitr diff ...` is the same as `gitr ...`; a ref named like one of gitr's
+commands (`diff`, `export`, `comments`, `serve`, `help`) needs it, or a
+`--` before it: `gitr diff comments`, `gitr -- comments`.
+
+## Comments from the command line
+
+The review comments (the window's and gitr-serve's, in `.gitr/review.json`
+of the repository) can be read and written without a window, so an agent
+or a script can take part in a review:
+
+```bash
+gitr export master                       # all comments as markdown for an agent
+gitr export --kinds bad,note master      # only these kinds (also: gitr --export)
+gitr comments list [--kinds bad] [src/]  # one line each: id, path:line, kind, text
+gitr comments list --full                # with the whole texts (--json for scripts)
+gitr comments add src/foo.py:42 "this leaks the handle" --kind bad
+gitr comments add src/foo.py:42 - < note.txt   # the text from stdin
+gitr comments accept 3f9a2c1             # resolved: a good comment ending in "(accepted)"
+gitr comments rm src/foo.py:42           # by id (any unique prefix) or path:line
+```
+
+A comment from `add` goes on that line of the file as it is in the working
+tree, with no diff involved: the window and gitr-serve show it on that
+line whether their diff has it added or unchanged (a line outside every
+hunk is listed after the diff). `list` gives the lines as they are now,
+flagged when a line's text changed, its file is gone, or it is a removed
+line (a comment from a window or gitr-serve). A line takes one
+comment from `add`; remove the old one first, or edit it in a window.
+
 ## gitr-serve
 
 `gitr-serve` is the same diff view and review in a browser, for several
@@ -37,6 +66,7 @@ and needs no Tk.
 ```bash
 gitr-serve ~/dev/repo-a ~/dev/repo-b         # http://127.0.0.1:4487/
 gitr-serve --port 9000 ~/dev/repo-a
+gitr serve ~/dev/repo-a                      # the same
 ```
 
 From a checkout, without installing: `python3 gitr_web/server.py`, with
@@ -182,10 +212,9 @@ placed on that commit's version of the file, and the agent export always
 describes the whole review and the untracked files (so a comment on a file
 an agent created but did not add keeps its line).
 Comments are stored in the worktree's `.gitr/review.json`, the same file a
-gitr window uses, so a review can move between the two. On every change the
-server also writes the agent export to `.gitr/review.md`, so an agent in that
-worktree can be told to read it; "copy for agent" puts the same text on the
-clipboard. When `review.json` changes from outside the page (a gitr
+gitr window uses, so a review can move between the two. "copy for agent"
+puts the agent export on the clipboard; an agent in the worktree can read
+the same with `gitr export` (or `gitr comments list`, see above). When `review.json` changes from outside the page (a gitr
 window, another tab, an agent), the comments reload by themselves, a note
 in the top bar says how many were added, edited and removed, and the added
 and edited ones are flagged; the note's x clears the flags, which otherwise

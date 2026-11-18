@@ -427,6 +427,7 @@ class State:
         self._docs: OrderedDict[str, Doc] = OrderedDict()
         # (worktree, doc id) -> (base, baseline()), see new_since
         self._baselines: OrderedDict[str, tuple] = OrderedDict()
+        self._md_dropped: set[str] = set()  # worktrees drop_review_md has run for
 
     def projects(self) -> list[dict]:
         out = []
@@ -657,7 +658,7 @@ class State:
                 'head': git(wt, 'rev-parse', 'HEAD').strip()}
 
     def _export_doc(self, wt: str, doc: 'Doc') -> 'Doc':
-        """The agent export (review.md, copy for agent) always describes the
+        """The agent export (copy for agent) always describes the
         whole review and the untracked files, also while a single commit is
         on screen: its line numbers are the working tree's, and a comment on
         a file the agent created but did not add keeps its place."""
@@ -685,16 +686,11 @@ class State:
         doc = self._doc(wt, doc_id)
         with self._review_lock:
             store = ReviewStore(Path(wt) / '.gitr')
-            out, items = resolve_comments(wt, doc, store)
-            # A gitr window edits review.json without knowing about review.md.
-            md, js = Path(wt) / '.gitr' / 'review.md', Path(wt) / '.gitr' / 'review.json'
-            if js.exists() and (not md.exists() or md.stat().st_mtime_ns < js.stat().st_mtime_ns):
-                write_review_md(wt, self._export_items(wt, doc, store, items))
+            out, _ = resolve_comments(wt, doc, store)
+        if wt not in self._md_dropped:
+            self._md_dropped.add(wt)
+            drop_review_md(wt)
         return out
-
-    def _export_items(self, wt: str, doc: 'Doc', store: ReviewStore, items: list) -> list:
-        export = self._export_doc(wt, doc)
-        return items if export is doc else resolve_comments(wt, export, store)[1]
 
     def save_comment(self, wt: str, doc_id: str, req: dict) -> dict:
         wt = self.check_worktree(wt)
@@ -706,9 +702,7 @@ class State:
             if req.get('key'):
                 file = str(req['file'])
                 snap, line_no, side = req['key']
-                entry = next((e for e in store._data.get(file, [])
-                              if e.get('snapshot') == snap and e.get('line_no') == line_no
-                              and e.get('side') == side), None)
+                entry = store.find(file, snap, line_no, side)
                 if entry is None:
                     raise GitError('comment no longer exists, reload')
                 if text:
@@ -734,8 +728,7 @@ class State:
                 if snap is None:
                     raise GitError(f'cannot write a snapshot to {wt}/.gitr')
                 store.add(file, snap, anchor, side, line_text, text, kind)
-            out, items = resolve_comments(wt, doc, store)
-            write_review_md(wt, self._export_items(wt, doc, store, items))
+            out, _ = resolve_comments(wt, doc, store)
         return out
 
     def clear_comments(self, wt: str, doc_id: str) -> dict:
@@ -745,8 +738,7 @@ class State:
             store = ReviewStore(Path(wt) / '.gitr')
             if not store.clear(store.backup_path()):
                 raise GitError('could not back up review.json, nothing cleared')
-            out, items = resolve_comments(wt, doc, store)
-            write_review_md(wt, self._export_items(wt, doc, store, items))
+            out, _ = resolve_comments(wt, doc, store)
         return out
 
     def export(self, wt: str, doc_id: str) -> dict:
@@ -821,17 +813,14 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
     return {'comments': shown, 'elsewhere': elsewhere, 'stamp': review_stamp(wt)}, items
 
 
-def write_review_md(wt: str, items: 'list[_ExportItem]') -> None:
-    """The agent export as a file, so an agent can be told to read
-    .gitr/review.md instead of being handed the text."""
-    path = Path(wt) / '.gitr' / 'review.md'
+def drop_review_md(wt: str) -> None:
+    """Earlier versions kept the agent export in .gitr/review.md; `gitr
+    export` and `gitr comments list` read review.json instead, always
+    current, so a copy left behind would only mislead an agent."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name('.review.md.tmp')
-        tmp.write_text(_format_export(items, list(COMMENT_KINDS)) + '\n')
-        tmp.replace(path)
-    except OSError as e:
-        print(f'gitr-serve: cannot write {path}: {e}', file=sys.stderr)
+        (Path(wt) / '.gitr' / 'review.md').unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def merge_base(wt: str, base: str) -> str:
@@ -1351,7 +1340,7 @@ def load_repos(args_repos: list[str]) -> list[dict]:
 RELOAD_CHILD_ENV = 'GITR_SERVE_CHILD'
 
 
-def supervise() -> None:
+def supervise(argv: list[str]) -> None:
     """--reload: run the server in a child process and start a new one when
     the Python source changes. A separate process rather than re-exec'ing
     itself, so a save with a syntax error leaves the supervisor waiting for
@@ -1370,7 +1359,7 @@ def supervise() -> None:
                 out.append(0)
         return tuple(out)
 
-    cmd = [sys.executable, str(here), *sys.argv[1:]]
+    cmd = [sys.executable, str(here), *argv]
     env = dict(os.environ, **{RELOAD_CHILD_ENV: '1'})
     # A plain `kill` of the supervisor must not leave the server running.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -1453,8 +1442,10 @@ def tailscale_names() -> list[str]:
     return [name] if name else []
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(prog='gitr-serve', description='gitr diff view and review in the browser')
+def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
+    """`gitr-serve`, or `gitr serve` (gitr.main passes its arguments)."""
+    argv = sys.argv[1:] if argv is None else argv
+    ap = argparse.ArgumentParser(prog=prog, description='gitr diff view and review in the browser')
     ap.add_argument('repos', nargs='*', help=f'repositories (default: {CONFIG_PATH})')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=4487)  # "gitr" on a phone keypad
@@ -1467,7 +1458,7 @@ def main() -> None:
     ap.add_argument('--print-config', action='store_true',
                     help=f'print a {CONFIG_PATH.name} for the given repos (or the current one) '
                          f'to stdout, to save as {CONFIG_PATH}')
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.print_config:
         print(config_template(a.repos))
         # stderr, so a redirect to the config file gets the JSON alone
@@ -1475,7 +1466,7 @@ def main() -> None:
               f'gitr-serve --print-config ... > {CONFIG_PATH}', file=sys.stderr)
         return
     if a.reload and not os.environ.get(RELOAD_CHILD_ENV):
-        return supervise()
+        return supervise(argv)
     repos = load_repos(a.repos)
     if not repos:
         sys.exit(f'gitr-serve: no repositories given and none in {CONFIG_PATH}\n'

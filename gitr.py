@@ -20,6 +20,7 @@ import textwrap
 import time
 import zlib
 from collections import deque
+from contextlib import contextmanager
 from itertools import accumulate
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,11 @@ try:
 except ImportError:
     tk = tkfont = messagebox = None
 
+try:
+    import fcntl  # not on Windows: there the store's writes go unlocked
+except ImportError:
+    fcntl = None
+
 _CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'config.json'
 
 
@@ -47,8 +53,14 @@ usage:
   git diff | gitr              # pipe a patch
   gitr -                       # read stdin explicitly
   gitr -p patch.diff           # read from a patch file
-  gitr --export master         # print the review comments for an agent, no window
-  gitr --export --kinds bad,note   # only these kinds (default: all)
+  gitr diff [refs]             # the same; `gitr diff comments` (or
+                               # `gitr -- comments`) for a ref named like a command
+
+  gitr export master           # print the review comments for an agent, no window
+  gitr export --kinds bad,note # only these kinds (default: all); also --export
+  gitr comments list|add|rm|accept ...   # read and write comments, no window
+                               # (gitr comments --help)
+  gitr serve [repos]           # gitr-serve: the review in a browser
 
   GITR_SCALE=2 gitr master   # scale UI up (HiDPI)
 """
@@ -96,6 +108,10 @@ class _CommentEditTarget:
     # whose snapshot will be taken at confirm time.
     existing_snapshot: Optional[str] = None
     existing_snap_line_no: Optional[int] = None
+    # The side and text it is stored with, which can differ from the line it
+    # is shown on (an unchanged-line comment on a + line, _same_line).
+    existing_side: Optional[str] = None
+    existing_line_text: Optional[str] = None
 
 
 @dataclass
@@ -332,6 +348,7 @@ class ReviewStore:
         self._load()
 
     def _load(self) -> None:
+        self._data = {}
         if not (self._path and self._path.exists()):
             return
         try:
@@ -394,33 +411,58 @@ class ReviewStore:
             self._snap_cache[sha] = text
         return text
 
+    @staticmethod
+    def is_entry(e: dict, snapshot: str, line_no: int, side: str) -> bool:
+        """Whether `e` is the comment with this key; an entry without a side
+        is read as ' ' everywhere (_resolve_anchors), so it is matched so."""
+        return (e.get('snapshot') == snapshot and e.get('line_no') == line_no
+                and (e.get('side') or ' ') == (side or ' '))
+
+    def find(self, file: str, snapshot: str, line_no: int, side: str) -> 'dict | None':
+        return next((e for e in self._data.get(file, [])
+                     if self.is_entry(e, snapshot, line_no, side)), None)
+
+    @contextmanager
+    def _writing(self):
+        """Each change goes into the file as it is now, under a lock: a gitr
+        window, gitr-serve and `gitr comments` may all write it, and one
+        that kept its own copy would otherwise undo the others' changes."""
+        lock = None
+        if fcntl is not None and self._gitr_dir is not None:
+            try:
+                self._gitr_dir.mkdir(parents=True, exist_ok=True)
+                lock = open(self._gitr_dir / 'review.lock', 'a')
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            except OSError:
+                lock = None
+        try:
+            self._load()
+            yield
+        finally:
+            if lock is not None:
+                lock.close()  # releases the lock
+
     def add(self, file: str, snapshot: str, line_no: int, side: str,
             line_text: str, comment: str, kind: str = 'note') -> None:
-        entries = self._data.setdefault(file, [])
-        for e in entries:
-            if (e.get('snapshot') == snapshot and e.get('line_no') == line_no
-                    and e.get('side') == side):
-                e['line_text'] = line_text
-                e['comment'] = comment
-                e['kind'] = kind
-                self._save()
-                return
-        entries.append({'snapshot': snapshot, 'line_no': line_no, 'side': side,
-                        'line_text': line_text, 'comment': comment, 'kind': kind})
-        self._save()
+        with self._writing():
+            e = self.find(file, snapshot, line_no, side)
+            if e is not None:
+                e.update(line_text=line_text, comment=comment, kind=kind)
+            else:
+                self._data.setdefault(file, []).append(
+                    {'snapshot': snapshot, 'line_no': line_no, 'side': side,
+                     'line_text': line_text, 'comment': comment, 'kind': kind})
+            self._save()
 
     def delete(self, file: str, snapshot: str, line_no: int, side: str) -> None:
-        entries = self._data.get(file)
-        if not entries:
-            return
-        for i, e in enumerate(entries):
-            if (e.get('snapshot') == snapshot and e.get('line_no') == line_no
-                    and e.get('side') == side):
-                del entries[i]
-                if not entries:
-                    del self._data[file]
-                self._save()
+        with self._writing():
+            e = self.find(file, snapshot, line_no, side)
+            if e is None:
                 return
+            self._data[file].remove(e)
+            if not self._data[file]:
+                del self._data[file]
+            self._save()
 
     def all_entries(self) -> list[tuple[str, dict]]:
         return [(f, e) for f in sorted(self._data) for e in self._data[f]]
@@ -440,16 +482,17 @@ class ReviewStore:
         """Drop every comment, first moving the current file to `backup` so
         a mis-click can be undone by renaming it back. Nothing is dropped
         when that move fails; returns whether the store was cleared."""
-        if not self._data:
+        with self._writing():
+            if not self._data:
+                return True
+            if backup is not None and self._path and self._path.exists():
+                try:
+                    self._path.replace(backup)  # one atomic rename, no partial copy
+                except OSError:
+                    return False
+            self._data.clear()
+            self._save()
             return True
-        if backup is not None and self._path and self._path.exists():
-            try:
-                self._path.replace(backup)  # one atomic rename, no partial copy
-            except OSError:
-                return False
-        self._data.clear()
-        self._save()
-        return True
 
 
 # --diff parsing ------------------------------------------------------------
@@ -756,6 +799,15 @@ def _entry_is_valid(entry: dict) -> bool:
     return bool(entry.get('snapshot') and entry.get('line_no') and entry.get('comment'))
 
 
+def _same_line(side_a: str, side_b: str) -> bool:
+    """Whether two comment sides can name the same diff line. An added and
+    an unchanged line are both a line of the current file, and which one it
+    is depends only on the diff it is seen in: a comment written on a +
+    line (or from `gitr comments add`, which knows no diff) belongs on that
+    line in any diff. A removed line exists only in a diff."""
+    return side_a == side_b or (side_a in '+ ' and side_b in '+ ')
+
+
 def _match_anchor(anchors: list['_ResolvedAnchor'], new_line_no: int, side: str,
                   text: str) -> '_ResolvedAnchor | None':
     """Claim the stored comment for a diff line: the one whose text still
@@ -763,9 +815,10 @@ def _match_anchor(anchors: list['_ResolvedAnchor'], new_line_no: int, side: str,
     exact: '_ResolvedAnchor | None' = None
     loose: '_ResolvedAnchor | None' = None
     for a in anchors:
-        if a.matched or a.target_line_no != new_line_no or a.side != side:
+        if a.matched or a.target_line_no != new_line_no or not _same_line(a.side, side):
             continue
-        if a.line_text == text:
+        # the text without its +/-/space prefix, which is the side again
+        if a.line_text[1:] == text[1:]:
             exact = a
             break
         loose = loose or a
@@ -4158,6 +4211,8 @@ class App:
             file=file, new_line_no=new_line_no, side=side, line_text=line_text,
             existing_snapshot     = anchor.snapshot     if anchor else None,
             existing_snap_line_no = anchor.snap_line_no if anchor else None,
+            existing_side         = anchor.side         if anchor else None,
+            existing_line_text    = anchor.line_text    if anchor else None,
         )
         bar_font = (CFG.font_family, int(CFG.menu_font_size * self._scale))
         frame = tk.Frame(self._diff, bg=C['topbar_bg'])
@@ -4308,14 +4363,15 @@ class App:
             if comment:
                 self._review.add(target.file, target.existing_snapshot,
                                  target.existing_snap_line_no,
-                                 target.side, target.line_text, comment, kind)
+                                 target.existing_side or target.side,
+                                 target.existing_line_text or target.line_text, comment, kind)
                 if anchor is not None:
                     anchor.comment = comment
                     anchor.kind = kind
                     self._embed_comment_frame(line, anchor)
             else:
                 self._review.delete(target.file, target.existing_snapshot,
-                                    target.existing_snap_line_no, target.side)
+                                    target.existing_snap_line_no, target.existing_side or target.side)
                 if anchor is not None:
                     self._remove_comment(anchor)
         elif comment:
@@ -4679,15 +4735,246 @@ def _install_interrupt(root: tk.Tk, app: 'App') -> None:
     heartbeat()
 
 
+# --command line: comments ------------------------------------------------------
+#
+# `gitr comments ...` reads and writes .gitr/review.json without a window,
+# so an agent or a script can take part in a review. A comment is put on a
+# line of the file as it is in the working tree (a snapshot of it, as the
+# window and gitr-serve take), with no diff involved; the views place it on
+# that line whether their diff shows it added or unchanged (_same_line).
+
+_ACCEPTED = '(accepted)'  # gitr-serve's "accept" marks the text the same way
+
+
+def _comment_id(file: str, entry: dict) -> str:
+    """Stable while the comment exists: the key the store finds it by (an
+    edit keeps it), hashed. review.json has no ids of its own."""
+    side = entry.get('side') or ' '  # as ReviewStore.is_entry reads it
+    key = f"{file}\0{entry.get('snapshot')}\0{entry.get('line_no')}\0{side}"
+    return hashlib.sha1(key.encode()).hexdigest()
+
+
+def _cli_repo() -> Path:
+    root = _find_repo_root()
+    if root is None:
+        sys.exit('gitr: not in a git repository (comments live in <repo>/.gitr)')
+    return root
+
+
+def _repo_path(root: Path, arg: str) -> str:
+    """A path as git takes it (relative to the current directory, or
+    absolute) as the repo-relative path review.json keys files by."""
+    # Not resolved: a symlink in the repo is a file of its own to git and the
+    # views, so a comment on it is keyed by its own path.
+    full = os.path.normpath(os.path.join(os.getcwd(), arg))
+    rel = os.path.relpath(full, os.path.normpath(str(root)))
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        sys.exit(f'gitr: {arg} is outside the repository {root}')
+    return '' if rel == '.' else Path(rel).as_posix()
+
+
+@dataclass
+class _CliComment:
+    id: str
+    file: str
+    anchor: '_ResolvedAnchor'
+    changed: bool  # the line's text is no longer the one commented on
+    gone: bool     # the file is gone
+    removed: bool  # on a removed line, which is in no current file
+
+
+def _cli_comments(root: Path, review: 'ReviewStore') -> list[_CliComment]:
+    """Every comment, its line remapped to the current file, in file and
+    line order."""
+    current: dict[str, 'str | None'] = {}
+
+    def read(f: str) -> 'str | None':
+        if f not in current:
+            current[f] = _read_text_safe(root / f)
+        return current[f]
+
+    out = []
+    for file, anchors in _resolve_anchors(review, read).items():
+        text = read(file)
+        lines = text.splitlines() if text is not None else []
+        for a in anchors:
+            entry = {'snapshot': a.snapshot, 'line_no': a.snap_line_no, 'side': a.side}
+            gone, removed = text is None, a.side == '-'
+            changed = not gone and not removed and (a.target_line_no > len(lines)
+                                                    or lines[a.target_line_no - 1] != a.line_text[1:])
+            out.append(_CliComment(_comment_id(file, entry), file, a, changed, gone, removed))
+    out.sort(key=lambda c: (c.file, c.anchor.target_line_no))
+    return out
+
+
+def _cli_line(c: _CliComment, width: int = 0) -> str:
+    loc = f'{c.file}:{c.anchor.target_line_no}'
+    first, *more = c.anchor.comment.splitlines() or ['']
+    flags = [f'+{len(more)} line{"s" if len(more) != 1 else ""}'] if more else []
+    flags += ['file gone'] if c.gone else ['removed line'] if c.removed else ['line changed'] if c.changed else []
+    tail = f'  ({", ".join(flags)})' if flags else ''
+    return f'{c.id[:7]}  {loc:<{width}}  {"[" + c.anchor.kind + "]":<6}  {first}{tail}'
+
+
+def _cli_select(root: Path, review: 'ReviewStore', sel: str) -> _CliComment:
+    """A comment by id (any unique prefix of 4 or more) or by path:line."""
+    found = _cli_comments(root, review)
+    path, sep, line = sel.rpartition(':')
+    if sep and line.isdigit():
+        rel = _repo_path(root, path)
+        hits = [c for c in found if c.file == rel and c.anchor.target_line_no == int(line)]
+        what = f'on {rel}:{line}'
+    else:
+        if len(sel) < 4 or not re.fullmatch(r'[0-9a-f]+', sel):
+            sys.exit(f'gitr: {sel!r} is neither a comment id (4 or more hex digits) nor path:line')
+        hits = [c for c in found if c.id.startswith(sel)]
+        what = f'with id {sel}'
+    if not hits:
+        sys.exit(f'gitr: no comment {what} (gitr comments list shows them)')
+    if len(hits) > 1:
+        sys.exit(f'gitr: {len(hits)} comments {what}, name one by its id:\n'
+                 + '\n'.join('  ' + _cli_line(c) for c in hits))
+    return hits[0]
+
+
+def _comments_list(args: argparse.Namespace) -> None:
+    root = _cli_repo()
+    kinds = _export_kinds(args.kinds)
+    found = [c for c in _cli_comments(root, ReviewStore()) if c.anchor.kind in kinds]
+    if args.paths:
+        prefixes = [_repo_path(root, p) for p in args.paths]
+        found = [c for c in found
+                 if any(not p or c.file == p or c.file.startswith(p.rstrip('/') + '/') for p in prefixes)]
+    if args.json:
+        print(json.dumps([{'id': c.id[:7], 'path': c.file, 'line': c.anchor.target_line_no,
+                           'side': c.anchor.side, 'kind': c.anchor.kind, 'text': c.anchor.comment,
+                           'lineText': c.anchor.line_text, 'changed': c.changed, 'gone': c.gone,
+                           'removed': c.removed}
+                          for c in found], indent=2))
+        return
+    width = max((len(f'{c.file}:{c.anchor.target_line_no}') for c in found), default=0)
+    for c in found:
+        print(_cli_line(c, width))
+        if args.full:
+            for l in c.anchor.comment.splitlines():
+                print('    ' + l)
+
+
+def _comments_add(args: argparse.Namespace) -> None:
+    root = _cli_repo()
+    path, sep, line = args.location.rpartition(':')
+    if not sep or not line.isdigit() or not int(line):
+        sys.exit(f'gitr: {args.location!r} is not path:line (a line of the file as it is now)')
+    rel, n = _repo_path(root, path), int(line)
+    text = sys.stdin.read() if args.text == '-' else args.text
+    text = text.strip('\n')
+    if not text.strip():
+        sys.exit('gitr: the comment is empty')
+    content = _read_text_safe(root / rel)
+    if content is None:
+        sys.exit(f'gitr: cannot read {rel} (comments go on lines of an existing text file)')
+    lines = content.splitlines()
+    if n > len(lines):
+        sys.exit(f'gitr: {rel} has {len(lines)} lines, no line {n}')
+    review = ReviewStore()
+    for c in _cli_comments(root, review):
+        if c.file == rel and c.anchor.target_line_no == n and c.anchor.side != '-':
+            sys.exit(f'gitr: {rel}:{n} already has a comment: {_cli_line(c)}\n'
+                     '  remove it first (gitr comments rm), or edit it in gitr or gitr-serve')
+    snap = review.write_snapshot(content)
+    if snap is None:
+        sys.exit(f'gitr: cannot write a snapshot to {root / ".gitr"}')
+    review.add(rel, snap, n, ' ', ' ' + lines[n - 1], text, args.kind)
+    entry = {'snapshot': snap, 'line_no': n, 'side': ' '}
+    print(f'{_comment_id(rel, entry)[:7]}  {rel}:{n}  [{args.kind}]')
+
+
+def _comments_rm(args: argparse.Namespace) -> None:
+    root = _cli_repo()
+    review = ReviewStore()
+    c = _cli_select(root, review, args.comment)
+    review.delete(c.file, c.anchor.snapshot, c.anchor.snap_line_no, c.anchor.side)
+    print('removed ' + _cli_line(c))
+
+
+def _comments_accept(args: argparse.Namespace) -> None:
+    root = _cli_repo()
+    review = ReviewStore()
+    c = _cli_select(root, review, args.comment)
+    a = c.anchor
+    if a.kind == 'good' and a.comment.rstrip().endswith(_ACCEPTED):
+        print('already accepted: ' + _cli_line(c))
+        return
+    # as gitr-serve's accept: the marker once, whatever the kind was
+    text = a.comment if a.comment.rstrip().endswith(_ACCEPTED) else a.comment.rstrip() + ' ' + _ACCEPTED
+    review.add(c.file, a.snapshot, a.snap_line_no, a.side, a.line_text, text, 'good')
+    a.comment, a.kind = text, 'good'
+    print('accepted ' + _cli_line(c))
+
+
+def _main_comments(argv: list[str]) -> None:
+    kinds = ', '.join(COMMENT_KINDS)
+    p = argparse.ArgumentParser(
+        prog='gitr comments', description='Read and write the review comments of the '
+        'repository you are in (.gitr/review.json, shared with the gitr window and gitr-serve). '
+        'A comment is named by its id (as listed, or any unique prefix of 4 or more '
+        'characters) or by path:line.')
+    sub = p.add_subparsers(dest='action', required=True, metavar='list|add|rm|accept')
+    ls = sub.add_parser('list', help='list the comments, lines as in the current files')
+    ls.add_argument('paths', nargs='*', help='only comments on these files or under these folders')
+    ls.add_argument('--kinds', default='all', help=f'"all" or some of {kinds} (default: all)')
+    ls.add_argument('--full', action='store_true', help='each comment\'s whole text')
+    ls.add_argument('--json', action='store_true', help='as JSON')
+    ls.set_defaults(fn=_comments_list)
+    add = sub.add_parser('add', help='comment on a line of a file as it is now')
+    add.add_argument('location', metavar='path:line')
+    add.add_argument('text', help='the comment; - reads it from stdin')
+    add.add_argument('--kind', choices=list(COMMENT_KINDS), default='note')
+    add.set_defaults(fn=_comments_add)
+    rm = sub.add_parser('rm', help='delete a comment')
+    rm.add_argument('comment', metavar='id|path:line')
+    rm.set_defaults(fn=_comments_rm)
+    acc = sub.add_parser('accept', help=f'resolved: make it a good comment ending in "{_ACCEPTED}"')
+    acc.add_argument('comment', metavar='id|path:line')
+    acc.set_defaults(fn=_comments_accept)
+    args = p.parse_args(argv)
+    args.fn(args)
+
+
+# --command line ------------------------------------------------------------------
+
+# The first argument names one of these, or it is a ref (or an option) of
+# the default command, diff; after `--` everything is a ref.
+COMMANDS = ('diff', 'export', 'comments', 'serve', 'help')
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog='gitr', description=USAGE,
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv and argv[0] in COMMANDS else None
+    rest = argv[1:] if cmd else argv
+    if cmd == 'help':
+        print(USAGE, end='')
+    elif cmd == 'comments':
+        _main_comments(rest)
+    elif cmd == 'serve':
+        # gitr_web is the package beside this module (installed, or in the checkout)
+        from gitr_web import server
+        server.main(rest, prog='gitr serve')
+    elif cmd == 'export':
+        _main_diff(['--export', *rest], prog='gitr export')
+    else:
+        _main_diff(rest)
+
+
+def _main_diff(argv: list[str], prog: str = 'gitr') -> None:
+    parser = argparse.ArgumentParser(prog=prog, description=USAGE,
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--merge-base', action='store_true', dest='merge_base')
     parser.add_argument('-p', '--patch', metavar='FILE', default=None)
     parser.add_argument('--export', action='store_true')
     parser.add_argument('--kinds', default='all', metavar='KINDS')
     parser.add_argument('refs', nargs='*')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.merge_base and not args.refs:
         sys.exit('gitr: --merge-base requires a ref (e.g. gitr --merge-base master)')

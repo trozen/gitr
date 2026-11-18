@@ -64,12 +64,11 @@ with the ability to attach persistent local comments to specific diff lines.
       overlaid and switchable: off (plain file), inline unified, or two
       files side by side. The point is to see the changed lines in the
       context of the whole file, not just the hunks.
-- [ ] Viewed marks: an explicit per-file (maybe per-hunk) "viewed" state set
-      by the user (a key, or a checkbox in the file list, as GitHub and Gerrit
-      do), shown in the file list, the overview strip and the minimap; kept
-      per hunk under a content key so a reload resets only files whose diff
-      changed. A variant worth trying: a file counts as viewed automatically
-      once the view scrolled past its end.
+- [ ] Viewed marks in the Tk window: gitr-serve has them (per hunk under a
+      content key in `.gitr/viewed.json`, set per file or hunk); the window
+      would read and write the same file, shown in the file list, the
+      overview strip and the minimap. A variant worth trying: a file counts
+      as viewed automatically once the view scrolled past its end.
 - [ ] Fog of war (experiment, branch `fog-of-war`): per-line exposure while
       on screen, minimap rows wiping clear after a dwell, seen state per hunk
       in `.gitr/seen.json`. Tried in use: the time-based per-line signal is
@@ -224,7 +223,19 @@ whole diff in one read-only document as in gitr.
       browser's where text can be selected or typed
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
 - [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
-- [ ] Viewed marks, keyed by path and blob hash so a changed file un-marks
+- [x] Viewed marks: a box per file and folder in the file list (and one
+      for all files), in the gutter of each file and hunk header in the
+      diff, and per file or hunk in the right-click menu; kept per hunk in
+      `.gitr/viewed.json` under a key of its + and - lines, so a hunk an
+      agent changed comes back unviewed and one that only moved does not;
+      viewed hunks dimmed, marked in the scrollbar and shaded in the
+      minimap, next / previous hunk not viewed in the list's header, and
+      the reload note counts the viewed files a reload changed. The fold
+      chevrons gave their gutter to the boxes (the folding regions stay,
+      for the sticky headers), and folders in the list fold from their
+      chevron only
+- [ ] Viewed marks: to try in use, collapsing viewed files (Monaco hides
+      lines only through internal API), a key to mark and go to the next
 - [ ] Per-file syntax highlighting in the combined view
 - [x] Commits pane: base..HEAD as a graph, as gitk draws it (merges, the
       boundary, branch and tag labels, uncommitted changes on top); a

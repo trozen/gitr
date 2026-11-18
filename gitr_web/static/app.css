@@ -11,6 +11,8 @@
   --hunk: #ffb86c;
   /* what the last reload or an outside change brought (read by app.js) */
   --new: #ffb86c;
+  /* viewed hunks in the scrollbar and the minimap (read by app.js) */
+  --viewed: #6272a4;
   --file: #bd93f9;
   --ren: #ff79c6;
   --note: #f1fa8c;
@@ -50,7 +52,7 @@ button:active { background: var(--bg); transform: translateY(1px); }
 
 h2 { margin: 0; padding: 6px 12px; font-size: .85em; font-weight: 600; letter-spacing: .06em;
      text-transform: uppercase; color: var(--dim); }
-h2 { display: flex; align-items: center; gap: 4px; }
+h2 { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 h2 .grow { flex: 1; }
 .h-act, .cl-del { background: none; border: 0; padding: 2px; color: var(--dim); cursor: pointer;
                   display: flex; border-radius: 3px; }
@@ -103,6 +105,29 @@ h2 .grow { flex: 1; }
 #files .row.dir { color: var(--fg); }
 /* changed since the last load */
 #files .row.new { box-shadow: inset 3px 0 0 var(--new); }
+/* viewed: a box at the end of each row, ticked, half ticked or empty */
+.vw { flex: none; align-self: center; width: 11px; height: 11px; margin: 0 2px 0 8px;
+      border: 1px solid var(--dim); border-radius: 2px; position: relative; }
+.vw:hover { border-color: var(--fg); }
+#files .row.dir { cursor: default; }
+#files .row.dir .chev { cursor: pointer; align-self: stretch; display: flex; align-items: center; }
+[data-viewed=all] > .vw { background: var(--dim); }
+[data-viewed=all] > .vw::after { content: ""; position: absolute; left: 3px; top: 0; width: 3px; height: 6px;
+  border: solid var(--fg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+[data-viewed=some] > .vw::after { content: ""; position: absolute; left: 2px; right: 2px; top: 4px;
+  height: 1.5px; background: var(--fg); }
+.row[data-viewed=all] > .grow, .row[data-viewed=all] > .n, .row[data-viewed=all] > .st { opacity: .45; }
+.vw-dim { opacity: .45; }
+/* the same box in the diff, in the gutter of a file or hunk header,
+   styled like the comment + of other lines (.c-add) */
+.monaco-editor .vw-gut { cursor: pointer; }
+.monaco-editor .vw-gut::before { content: ""; display: block; width: 14px; height: 14px; margin: 3px 0 0 1px;
+  box-sizing: border-box; border: 1.5px solid var(--file); border-radius: 3px;
+  background-repeat: no-repeat; background-position: center; }
+.monaco-editor .vw-gut.vw-all::before { background-color: var(--file);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M2 5.2 4 7.2 8 2.8' fill='none' stroke='%23282a36' stroke-width='1.8'/%3E%3C/svg%3E"); }
+.monaco-editor .vw-gut.vw-some::before { background-color: var(--file);
+  background-image: linear-gradient(var(--bg), var(--bg)); background-size: 7px 2px; }
 .n-add { color: var(--add); } .n-rem { color: var(--rem); }
 
 /* Across the whole window: the worktree and its base apply to the file list

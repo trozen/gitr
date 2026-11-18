@@ -281,6 +281,38 @@ def _save_window_state(geometry: str, sash_ratio: float, top_line: int) -> None:
         pass
 
 
+@contextmanager
+def _locked(gitr_dir: 'Path | None', name: str):
+    """An exclusive lock on .gitr/<name>, for a read-change-write of a file
+    that a gitr window, gitr-serve and the CLI may all write."""
+    lock = None
+    if fcntl is not None and gitr_dir is not None:
+        try:
+            gitr_dir.mkdir(parents=True, exist_ok=True)
+            lock = open(gitr_dir / name, 'a')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            lock = None
+    try:
+        yield
+    finally:
+        if lock is not None:
+            lock.close()  # releases the lock
+
+
+def _write_json(path: Path, obj) -> bool:
+    """Through a temporary file: a reader in another process must never
+    see the file half written. Returns whether it was written."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps(obj, indent=2))
+        tmp.replace(path)
+        return True
+    except OSError:
+        return False
+
+
 def _compute_line_map(snapshot: str, current: str) -> dict[int, int]:
     """Return a mapping {snapshot_line_no -> current_line_no} (1-based).
 
@@ -369,17 +401,8 @@ class ReviewStore:
                           if isinstance(entries, list)}
 
     def _save(self) -> None:
-        if not self._path:
-            return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            # gitr-serve and a gitr window may both use this file; a reader
-            # must never see it half written.
-            tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
-            tmp.write_text(json.dumps({'files': self._data}, indent=2))
-            tmp.replace(self._path)
-        except OSError:
-            pass
+        if self._path:
+            _write_json(self._path, {'files': self._data})
 
     def write_snapshot(self, content: str) -> 'str | None':
         """Persist ``content`` under .gitr/snapshots/<sha1> and return the sha,
@@ -427,20 +450,9 @@ class ReviewStore:
         """Each change goes into the file as it is now, under a lock: a gitr
         window, gitr-serve and `gitr comments` may all write it, and one
         that kept its own copy would otherwise undo the others' changes."""
-        lock = None
-        if fcntl is not None and self._gitr_dir is not None:
-            try:
-                self._gitr_dir.mkdir(parents=True, exist_ok=True)
-                lock = open(self._gitr_dir / 'review.lock', 'a')
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            except OSError:
-                lock = None
-        try:
+        with _locked(self._gitr_dir, 'review.lock'):
             self._load()
             yield
-        finally:
-            if lock is not None:
-                lock.close()  # releases the lock
 
     def add(self, file: str, snapshot: str, line_no: int, side: str,
             line_text: str, comment: str, kind: str = 'note') -> None:
@@ -493,6 +505,52 @@ class ReviewStore:
             self._data.clear()
             self._save()
             return True
+
+
+class ViewedStore:
+    """The hunks marked as viewed, in .gitr/viewed.json: {"viewed": {key:
+    unix time marked}}. A key is a hunk's content (hunk_key in gitr-serve),
+    so a hunk an agent changes is no longer viewed, and one that only moved
+    still is. Keys of hunks no longer in the diff stay, as they may be in
+    another view of it (another base, a single commit); the oldest go once
+    there are more than MAX."""
+
+    MAX = 5000
+
+    def __init__(self, gitr_dir: 'Path | None') -> None:
+        self._gitr_dir = gitr_dir
+        self._path = (gitr_dir / 'viewed.json') if gitr_dir else None
+
+    def load(self) -> dict[str, float]:
+        if not (self._path and self._path.exists()):
+            return {}
+        try:
+            obj = json.loads(self._path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        viewed = obj.get('viewed') if isinstance(obj, dict) else None
+        return viewed if isinstance(viewed, dict) else {}
+
+    def mark(self, keys: 'list[str]', viewed: bool) -> bool:
+        """Returns whether the file was written."""
+        if not self._path:
+            return False
+        with _locked(self._gitr_dir, 'viewed.lock'):
+            data = self.load()
+            now = round(time.time())
+            for k in keys:
+                if viewed:
+                    data[k] = now
+                else:
+                    data.pop(k, None)
+            if len(data) > self.MAX:
+                # The keys just marked all have the same time; none of them
+                # goes, only older ones.
+                batch = set(keys) if viewed else set()
+                older = sorted((kv for kv in data.items() if kv[0] not in batch), key=lambda kv: kv[1])
+                keep = older[len(data) - self.MAX:] if len(data) - self.MAX < len(older) else []
+                data = {**dict(keep), **{k: data[k] for k in batch}}
+            return _write_json(self._path, {'viewed': data})
 
 
 # --diff parsing ------------------------------------------------------------

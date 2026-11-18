@@ -35,7 +35,7 @@ if not __package__:
     # both are on the path already.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gitr  # noqa: E402
-from gitr import (COMMENT_KINDS, ReviewStore, _diff_side,  # noqa: E402
+from gitr import (COMMENT_KINDS, ReviewStore, ViewedStore, _diff_side,  # noqa: E402
                   _ExportItem, _format_export, _match_anchor,
                   _pair_lines_for_word_diff, _read_text_safe,
                   _resolve_anchors, _word_matcher, parse_diff)
@@ -191,6 +191,9 @@ class Doc:
         # order (changed_lines' order); a collapsed pair maps both to its ~ line.
         self.change_lines: dict[str, list[int]] = {}
         self.file_sigs: dict[str, str] = {}  # file_sig() per path
+        # [first line, last line, hunk_key()] per hunk, in document order; a
+        # file without hunks (binary, empty, a pure rename) is one.
+        self.hunks: list[list] = []
         self._line_of: dict[int, int] = {}
         for line in prefix:
             self._push(line, K_COMMIT)
@@ -220,6 +223,16 @@ class Doc:
             # label needs the room, and headers look alike throughout.
             self._push('', K_HUNK)
         body_start = len(self.lines)
+        first_hunk = len(self.hunks)
+        hunk_lines: list[str] = []  # the + and - lines of the current hunk
+        seen: dict[str, int] = {}
+
+        def close_hunk() -> None:
+            if len(self.hunks) > first_hunk:
+                self.hunks[-1][1] = len(self.lines)
+                self.hunks[-1][2] = hunk_key(df.path, hunk_lines, seen)
+                hunk_lines.clear()
+
         adds = dels = 0
         # The current run of removed and added lines (with any "\ No newline
         # at end of file" between them), emitted as a whole by flush().
@@ -237,15 +250,18 @@ class Doc:
                 continue
             if k == 'hunk':
                 flush()
+                close_hunk()
                 has_hunk = True
-                self._push(dl.text, K_HUNK)
+                self.hunks.append([self._push(dl.text, K_HUNK), 0, ''])
             elif k == 'removed':
                 if any(d.kind == 'added' for d in run):
                     flush()
                 run.append(dl)
+                hunk_lines.append(dl.text)
                 dels += 1
             elif k == 'added':
                 run.append(dl)
+                hunk_lines.append(dl.text)
                 adds += 1
             elif dl.text.startswith('\\') and has_hunk:
                 run.append(dl)
@@ -258,6 +274,7 @@ class Doc:
                 self._push(dl.text, K_CTX, old=dl.old_line_no, new=dl.new_line_no,
                            anchor=dl.new_line_no)
         flush()
+        close_hunk()
         self.change_lines[df.path] = [self._line_of[id(dl)] for dl in df.lines
                                       if dl.kind in ('added', 'removed')]
         self._line_of.clear()
@@ -275,6 +292,12 @@ class Doc:
         # itself and give up only the box's bottom margin.
         while len(self.lines) - start + 1 < MIN_FILE_LINES:
             self._push('', K_META)
+        if has_hunk:
+            self.hunks[-1][1] = len(self.lines)
+        else:
+            body = [dl.text for dl in df.lines if dl.kind != 'fileheader']
+            self.hunks.append([start + 1, len(self.lines),
+                               hunk_key(df.path, [file_sig(df), *body], seen)])
         self.files.append({'path': df.path, 'oldPath': df.old_path, 'status': df.status,
                            'add': adds, 'del': dels, 'start': start,
                            'end': len(self.lines)})
@@ -609,6 +632,7 @@ class State:
             'fingerprintKind': 'all' if with_untracked else 'tracked',
             'text': '\n'.join(doc.lines), 'kinds': ''.join(doc.kinds),
             'oldNo': doc.old_no, 'newNo': doc.new_no, 'files': doc.files,
+            'hunks': doc.hunks, **self.viewed(wt, doc),
             'news': news,
             'timing': {'git_ms': round((t_git - t0) * 1000),
                        'doc_ms': round((t_doc - t_git) * 1000)},
@@ -656,6 +680,29 @@ class State:
         changed, untracked = worktree_status(wt)
         return {'commits': list_commits(wt, base), 'uncommitted': changed, 'untracked': untracked,
                 'head': git(wt, 'rev-parse', 'HEAD').strip()}
+
+    # --viewed marks: .gitr/viewed.json in each worktree
+
+    def viewed(self, wt: str, doc: 'Doc') -> dict:
+        stamp = gitr_stamp(wt, 'viewed.json')
+        stored = ViewedStore(Path(wt) / '.gitr').load()
+        return {'viewed': [h[2] for h in doc.hunks if h[2] in stored], 'viewedStamp': stamp}
+
+    def all_viewed(self, wt: str) -> dict:
+        """Every stored key: the page picks its own hunks', so this needs no
+        document the server may have dropped from its cache since."""
+        wt = self.check_worktree(wt)
+        stamp = gitr_stamp(wt, 'viewed.json')
+        return {'viewed': list(ViewedStore(Path(wt) / '.gitr').load()), 'viewedStamp': stamp}
+
+    def mark_viewed(self, req: dict) -> dict:
+        wt = self.check_worktree(req['wt'])
+        keys = req['keys']
+        if not (isinstance(keys, list) and all(isinstance(k, str) for k in keys)):
+            raise ValueError('keys must be a list of strings')
+        if not ViewedStore(Path(wt) / '.gitr').mark(keys, bool(req['viewed'])):
+            raise GitError(f'cannot write {wt}/.gitr/viewed.json')
+        return {'viewedStamp': gitr_stamp(wt, 'viewed.json')}
 
     def _export_doc(self, wt: str, doc: 'Doc') -> 'Doc':
         """The agent export (copy for agent) always describes the
@@ -769,9 +816,11 @@ def line_sides(doc: 'Doc', ln: int) -> 'list[tuple[int, str, str]]':
     return [(no, _diff_side(KIND_NAMES[kind]), text)]
 
 
-def review_stamp(wt: str) -> int:
+def gitr_stamp(wt: str, name: str) -> int:
+    """When .gitr/<name> last changed, 0 if it does not exist: the page
+    polls this to see a change from outside."""
     try:
-        return os.stat(os.path.join(wt, '.gitr', 'review.json')).st_mtime_ns
+        return os.stat(os.path.join(wt, '.gitr', name)).st_mtime_ns
     except OSError:
         return 0
 
@@ -810,7 +859,7 @@ def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, li
         for a in anchors[file]:
             elsewhere += 1
             add(a, len(doc.lines), a.target_line_no, True, True)
-    return {'comments': shown, 'elsewhere': elsewhere, 'stamp': review_stamp(wt)}, items
+    return {'comments': shown, 'elsewhere': elsewhere, 'stamp': gitr_stamp(wt, 'review.json')}, items
 
 
 def drop_review_md(wt: str) -> None:
@@ -891,6 +940,15 @@ def file_sig(df) -> str:
     """A file's header lines (index, mode, rename): what tells two versions
     of a file without + and - lines (binary, empty) apart."""
     return '\n'.join(dl.text for dl in df.lines if dl.kind == 'fileheader')
+
+
+def hunk_key(path: str, lines: 'list[str]', seen: dict[str, int]) -> str:
+    """What a hunk is viewed under: its file and its + and - lines, without
+    line numbers or context, so a hunk that only moved keeps it. The same
+    lines twice in a file (`seen` counts them) are two hunks to view."""
+    text = '\n'.join(lines)
+    n = seen[text] = seen.get(text, 0) + 1
+    return hashlib.sha1(f'{path}\0{n}\0{text}'.encode('utf-8', 'surrogateescape')).hexdigest()[:16]
 
 
 def changed_lines(diff_files) -> dict[str, list[str]]:
@@ -1248,13 +1306,17 @@ class Handler(BaseHTTPRequestHandler):
                 mb = merge_base(wt, q['base'])
                 tracked, every = fingerprint(wt, mb, shows_untracked(q.get('commit')))
                 return self._json({'fingerprint': tracked, 'fingerprintAll': every,
-                                   'review': review_stamp(wt), 'version': page_version()})
+                                   'review': gitr_stamp(wt, 'review.json'),
+                                   'viewed': gitr_stamp(wt, 'viewed.json'),
+                                   'version': page_version()})
             if url.path == '/api/changes':
                 return self._json(self.state.changes(q['wt'], q['id'], q['base']))
             if url.path == '/api/comments':
                 return self._json(self.state.comments(q['wt'], q['id']))
             if url.path == '/api/export':
                 return self._json(self.state.export(q['wt'], q['id']))
+            if url.path == '/api/viewed':
+                return self._json(self.state.all_viewed(q['wt']))
         except KeyError as e:
             return self._json({'error': f'missing parameter {e}'}, 400)
         except ValueError as e:
@@ -1285,6 +1347,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.save_position(req))
             if path == '/api/settings':
                 return self._json(self.state.save_settings(req))
+            if path == '/api/viewed':
+                return self._json(self.state.mark_viewed(req))
             if path == '/api/comments/clear':
                 return self._json(self.state.clear_comments(req['wt'], req['id']))
         except KeyError as e:

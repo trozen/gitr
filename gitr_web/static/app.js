@@ -16,6 +16,7 @@ const FILE_MINIMAP = '#bd93f9';
 // File bands show through Monaco's 70% label box; hunk rows have no label,
 // so they get 30% alpha to come out equally strong.
 const HUNK_MINIMAP = '#bd93f94d';
+const VIEWED_MINIMAP = '#6272a466';  // shade over viewed hunks
 // The label box is 1.5 x the label font tall, at 2px per minimap row. The
 // font is below Monaco's 9px default so that short files need less padding
 // (server.py MIN_FILE_LINES).
@@ -50,7 +51,7 @@ let current = null;            // {wt, base, commit} last requested
 let shown = null;              // {wt, base, commit} of the diff on screen, null while loading
 let numWidth = 4;
 const worktrees = new Map();   // worktree path -> {p, w} from /api/projects
-let commentDecos, hoverDecos, newsDecos;
+let commentDecos, hoverDecos, newsDecos, viewedDecos, shadeDecos;
 let comments = [];             // resolved comments of the doc on screen, from the server
 let commentStamp = null;       // review.json mtime they were read at
 let totalComments = 0;         // including comments on files not in this diff
@@ -110,7 +111,9 @@ function init() {
     minimap: { enabled: true, renderCharacters: true, size: 'proportional', scale: 1, maxColumn: 120,
                showSlider: 'always', sectionHeaderFontSize: MINIMAP_LABEL_PX },
     lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 16,
-    glyphMargin: false, folding: true, showFoldingControls: 'mouseover',
+    // Folding regions only for the sticky headers; the gutter of a header
+    // is the viewed box's, as a line's is the comment +.
+    glyphMargin: false, folding: true, showFoldingControls: 'never',
     foldingMaximumRegions: 200000,
     stickyScroll: { enabled: true, maxLineCount: 2, defaultModel: 'foldingProviderModel' },
     renderLineHighlight: 'line', occurrencesHighlight: 'off', selectionHighlight: false,
@@ -128,6 +131,8 @@ function init() {
   commentDecos = editor.createDecorationsCollection();
   hoverDecos = editor.createDecorationsCollection();
   newsDecos = editor.createDecorationsCollection();
+  viewedDecos = editor.createDecorationsCollection();
+  shadeDecos = editor.createDecorationsCollection();
   editor.onDidScrollChange(onScroll);
   initComments();
 
@@ -232,6 +237,13 @@ function setView(view) {
 
 function initViews() {
   $('collapse-all').addEventListener('click', () => collapseAll(true));
+  $('next-unviewed').addEventListener('click', () => jumpUnviewed(1));
+  $('prev-unviewed').addEventListener('click', () => jumpUnviewed(-1));
+  $('viewed-all').addEventListener('click', () => {
+    if (!doc) return;
+    const all = doc.files.map((f, i) => i);
+    markViewed(doc.hunks.map((h, i) => i), viewedState(all) !== 'all');
+  });
   $('expand-all').addEventListener('click', () => collapseAll(false));
   for (const b of document.querySelectorAll('#activity .view')) b.addEventListener('click', () => setView(b.dataset.view));
   setView(VIEWS.includes(prefs.view) ? prefs.view : 'files');
@@ -1194,6 +1206,7 @@ async function showDiff(d, gen, state, since, restore, t0) {
   const t1 = performance.now();
   showProgress(`rendering ${d.files.length} files, ${d.kinds.length} lines ...`);
   await nextFrame();
+  const wasViewed = since && doc ? viewedPaths() : new Set();
   doc = d;
   shown = state;
   showCommitShown(d.commit);
@@ -1216,10 +1229,14 @@ async function showDiff(d, gen, state, since, restore, t0) {
   editor.getModel().setValue(d.text);
   editor.setScrollTop(0);
   if (restore) scrollToPosition(restore);
+  initViewed(d);
   renderFiles();
   markHeadersInMinimap();
-  applyNews(d.news, since);
+  // files still in the diff that were viewed and no longer are
+  const nowViewed = viewedPaths(), inDiff = new Set(d.files.map((f) => f.path));
+  applyNews(d.news, since, [...wasViewed].filter((p) => inDiff.has(p) && !nowViewed.has(p)).length);
   markNewFiles(d.news);
+  showViewed();
   updateDecorations(true);
   if (d.files.length) hideProgress();
   else if (commit === 'uncommitted') showProgress('no uncommitted changes');
@@ -1252,7 +1269,7 @@ let newsSince = null;          // id of the diff the marks compare with, see loa
 // Returns the summary to show, if there is something new to say.
 // The note in the top bar stays until the next load, or its x clears the
 // marks with it.
-function applyNews(news, since) {
+function applyNews(news, since, unviewed = 0) {
   newsSince = news && !news.missing ? since : null;
   $('news').hidden = !news;
   $('news').classList.toggle('missing', !!news?.missing);
@@ -1275,6 +1292,7 @@ function applyNews(news, since) {
                   options: { isWholeLine: true, className: cls, marginClassName: cls, ...marks } });
   newsDecos.set(list);
   $('news-text').replaceChildren(...newsSummary(news));
+  if (unviewed) $('news-text').append(`; ${plural(unviewed, 'viewed file')} changed`);
   $('news').title = 'Marked in the diff, the scrollbar, the minimap and the file list; the x clears the marks';
 }
 
@@ -1424,6 +1442,7 @@ function updateDecorations(force) {
   flush(to);
   decos.set(list);
   updateWordDecorations();
+  shadeViewed();
 }
 
 function updateWordDecorations() {
@@ -1466,6 +1485,171 @@ async function fetchWords(gen) {
   }
   timing.wordsMs = Math.round(performance.now() - t0);
 }
+
+// --viewed marks -----------------------------------------------------------
+//
+// Kept per hunk in the worktree's .gitr/viewed.json under a key of the
+// hunk's content (server.py hunk_key), so a hunk an agent changed comes back
+// unviewed while the rest of its file stays viewed. A file is viewed when
+// all its hunks are.
+
+let viewed = new Set();   // keys of the doc's hunks that are viewed
+let viewedStamp = null;   // viewed.json mtime they were read at
+let fileHunks = [];       // per file, the indexes of its hunks in doc.hunks
+let viewedBoxes = new Map();  // header line -> 'all' | 'some' | 'none' of its box
+
+function initViewed(d) {
+  viewed = new Set(d.viewed);
+  viewedStamp = d.viewedStamp;
+  fileHunks = d.files.map(() => []);
+  let fi = 0;
+  d.hunks.forEach(([start], h) => {
+    while (fi + 1 < d.files.length && d.files[fi + 1].start <= start) fi++;
+    fileHunks[fi].push(h);
+  });
+}
+
+// 'all', 'some' or 'none' of the hunks of these files
+function viewedState(files) {
+  let on = 0, n = 0;
+  for (const i of files) for (const h of fileHunks[i]) { n++; if (viewed.has(doc.hunks[h][2])) on++; }
+  return !n || !on ? 'none' : on === n ? 'all' : 'some';
+}
+
+const viewedPaths = () => new Set(doc.files.filter((f, i) => viewedState([i]) === 'all').map((f) => f.path));
+
+function viewedBox(files) {
+  const b = el('span', 'vw');
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const fs = files();
+    markViewed(fs.flatMap((i) => fileHunks[i]), viewedState(fs) !== 'all');
+  });
+  return b;
+}
+
+// a click on one of the boxes showViewed puts in the diff
+function toggleViewedAt(ln) {
+  const fi = fileOf(ln);
+  if (doc.kinds[ln - 1] === 'f') {
+    markViewed(fileHunks[fi], viewedState([fi]) !== 'all');
+  } else {
+    const h = hunkAt(ln);
+    if (h >= 0) markViewed([h], !viewed.has(doc.hunks[h][2]));
+  }
+}
+
+function hunkAt(ln) {
+  const h = upperBound(doc.hunks.map((x) => x[0]), ln) - 1;
+  return h >= 0 && ln <= doc.hunks[h][1] ? h : -1;
+}
+
+let viewedSaving = 0;  // marks on their way to the server, see pollChanges
+
+async function markViewed(hunks, on) {
+  // shown is null while another diff loads over this one
+  if (!doc || !shown || !hunks.length) return;
+  const keys = hunks.map((h) => doc.hunks[h][2]);
+  for (const k of keys) if (on) viewed.add(k); else viewed.delete(k);
+  showViewed();
+  const gen = wordGen;
+  viewedSaving++;
+  try {
+    const r = await post('/api/viewed', { wt: shown.wt, keys, viewed: on });
+    if (gen === wordGen) viewedStamp = r.viewedStamp;
+  } catch (e) {
+    flash('could not save: ' + e.message);
+    viewedStamp = null;  // the next poll reads back what is stored
+  } finally {
+    viewedSaving--;
+  }
+}
+
+// viewed.json changed outside this page (another tab, or this one's
+// earlier write whose stamp a poll saw first)
+async function reloadViewed(gen) {
+  if (!shown) return;
+  let r;
+  try { r = await api('/api/viewed', { wt: shown.wt }); } catch { return; }
+  // a mark made meanwhile is newer than this answer; the poll after it reads again
+  if (gen !== wordGen || viewedSaving) return;
+  const stored = new Set(r.viewed);
+  viewed = new Set(doc.hunks.map((h) => h[2]).filter((k) => stored.has(k)));
+  viewedStamp = r.viewedStamp;
+  showViewed();
+}
+
+function showViewed() {
+  const T = monaco.editor;
+  const color = getComputedStyle(document.documentElement).getPropertyValue('--viewed').trim();
+  const ruler = { overviewRuler: { color, position: T.OverviewRulerLane.Left } };
+  const list = [], model = editor.getModel();
+  doc.hunks.forEach(([a, b, key]) => {
+    if (viewed.has(key))
+      list.push({ range: new monaco.Range(a, 1, b, model.getLineMaxColumn(b)), options: { inlineClassName: 'vw-dim', ...ruler } });
+  });
+  // A box in the gutter of each file header and (in a file of several)
+  // hunk header, where other lines show the + that adds a comment on
+  // hover: clicked to mark it while reading the diff.
+  viewedBoxes = new Map();
+  const box = (ln, st) => {
+    viewedBoxes.set(ln, st);
+    list.push({ range: new monaco.Range(ln, 1, ln, 1), options: { linesDecorationsClassName: 'vw-gut vw-' + st } });
+  };
+  let all = 0;
+  doc.files.forEach((f, i) => {
+    const st = viewedState([i]);
+    fileRows[i].dataset.viewed = st;
+    box(f.start, st);
+    if (fileHunks[i].length > 1)
+      for (const h of fileHunks[i]) box(doc.hunks[h][0], viewed.has(doc.hunks[h][2]) ? 'all' : 'none');
+    if (st === 'all') {
+      all++;
+      list.push({ range: new monaco.Range(f.start, 1, f.start, model.getLineMaxColumn(f.start)), options: { inlineClassName: 'vw-dim' } });
+    }
+  });
+  for (const d of dirEntries) d.row.dataset.viewed = viewedState(d.files);
+  viewedDecos.set(list);
+  shadeViewed();
+  const n = doc.files.length;
+  $('files-count').textContent = !n ? '' : all ? `(${all}/${n})` : `(${n})`;
+  $('files-count').title = all ? `${all} of ${plural(n, 'file')} viewed` : '';
+  $('viewed-all').parentElement.dataset.viewed = viewedState(doc.files.map((f, i) => i));
+  $('viewed-all').hidden = !n;
+}
+
+// The minimap cannot dim its text; a grey shade over the rows does instead.
+// One decoration per row (as for the file headers), so only in the window
+// around the view the line backgrounds cover (updateDecorations), which
+// holds more than the minimap shows: a diff of 200k viewed lines would take
+// a quarter of a second per click otherwise.
+function shadeViewed() {
+  const [from, to] = decoWindow;
+  const shade = { minimap: { color: VIEWED_MINIMAP, position: monaco.editor.MinimapPosition.Inline } };
+  const list = [];
+  for (const [a, b, key] of doc.hunks) {
+    if (b < from || a > to || !viewed.has(key)) continue;
+    for (let ln = Math.max(a, from); ln <= Math.min(b, to); ln++)
+      list.push({ range: new monaco.Range(ln, 1, ln, 1), options: shade });
+  }
+  shadeDecos.set(list);
+}
+
+// The next (dir 1) or previous (-1) hunk not viewed from the top of the
+// view, going round at the ends.
+function jumpUnviewed(dir) {
+  if (!doc) return;
+  const top = editor.getVisibleRanges()[0]?.startLineNumber || 1;
+  const open = doc.hunks.map((h, i) => i).filter((i) => !viewed.has(doc.hunks[i][2]));
+  if (!open.length) return flash('all viewed');
+  // the top of the view sits on the header of a file it jumped to
+  const at = (i) => { const s = doc.hunks[i][0]; return fileHunks[fileOf(s)][0] === i ? fileStarts[fileOf(s)] : s; };
+  const h = dir > 0 ? open.find((i) => at(i) > top) ?? open[0]
+    : open.findLast((i) => at(i) < top) ?? open[open.length - 1];
+  editor.setScrollTop(editor.getTopForLineNumber(at(h)));
+}
+
+const fileOf = (ln) => Math.max(0, upperBound(fileStarts, ln) - 1);
 
 // --file list ------------------------------------------------------------
 
@@ -1521,12 +1705,14 @@ function renderFiles() {
           el('span', 'n n-add', f.add ? '+' + f.add : ''),
           el('span', 'n n-rem', f.del ? '-' + f.del : ''),
           el('span', 'st st-' + f.status, f.status),
+          viewedBox(() => [i]),
         ]);
         row.title = f.oldPath && 'RC'.includes(f.status) ? `${f.oldPath} -> ${f.path}` : f.path;
         row.addEventListener('click', () => jumpToFile(i));
         into.append(row);
         fileRows[i] = row;
         fileDirs[i] = ancestors;
+        for (const d of ancestors) d.files.push(i);
         continue;
       }
       let name = c.name, d = c.dir;
@@ -1536,12 +1722,17 @@ function renderFiles() {
         d = subNode;
       }
       const path = prefix + name;
-      const row = el('div', 'row dir', [...guides(depth), el('span', 'chev'), el('span', 'grow', name)]);
+      const entry = { path, files: [] };
+      const chev = el('span', 'chev');
+      const row = el('div', 'row dir', [...guides(depth), chev, el('span', 'grow', name),
+                                        viewedBox(() => entry.files)]);
       row.title = path;
       const kids = el('div', 'kids');
-      const entry = { path, row, kids };
+      Object.assign(entry, { row, kids });
       dirEntries.push(entry);
-      row.addEventListener('click', () => {
+      // Only the chevron: a click meant for the viewed box at the other end
+      // of the row would otherwise fold the folder when it missed.
+      chev.addEventListener('click', () => {
         if (collapsed.has(path)) collapsed.delete(path); else collapsed.add(path);
         showCollapsed(entry, collapsed.has(path));
         setActive(activeFile, true);
@@ -1555,7 +1746,6 @@ function renderFiles() {
   const frag = document.createDocumentFragment();
   walk(buildTree(doc.files), 0, '', frag, []);
   box.append(frag);
-  $('files-count').textContent = doc.files.length ? `(${doc.files.length})` : '';
 }
 
 function showCollapsed(entry, isCollapsed) {
@@ -1606,7 +1796,7 @@ function jumpToFile(i) {
 function viewPosition() {
   const top = editor.getVisibleRanges()[0]?.startLineNumber;
   if (!doc || !top || !doc.files.length) return null;
-  const f = doc.files[Math.max(0, upperBound(fileStarts, top) - 1)];
+  const f = doc.files[fileOf(top)];
   for (let ln = top; ln <= f.end && ln < top + 50; ln++)
     if ('aci'.includes(doc.kinds[ln - 1])) return { file: f.path, at: doc.newNo[ln - 1] - (ln - top), off: 0 };
   return { file: f.path, at: 0, off: top - f.start };
@@ -1714,14 +1904,27 @@ const keyStr = (c) => (c.key ? c.key.join('\0') + '\0' + c.file : 'new\0' + c.li
 function initComments() {
   const T = monaco.editor.MouseTargetType;
   editor.onMouseMove((e) => {
-    const ln = e.target.position?.lineNumber;
-    const show = ln && commentable(ln) && !commentAt(ln) &&
-      (e.target.type === T.GUTTER_LINE_DECORATIONS || e.target.type === T.GUTTER_LINE_NUMBERS ||
-       e.target.type === T.CONTENT_TEXT || e.target.type === T.CONTENT_EMPTY);
-    hoverDecos.set(show ? [{ range: new monaco.Range(ln, 1, ln, 1),
-                             options: { linesDecorationsClassName: 'c-add' } }] : []);
+    const on = e.target.type === T.GUTTER_LINE_DECORATIONS || e.target.type === T.GUTTER_LINE_NUMBERS ||
+      e.target.type === T.CONTENT_TEXT || e.target.type === T.CONTENT_EMPTY;
+    showHover(on ? e.target.position?.lineNumber : null);
   });
-  editor.onMouseLeave(() => hoverDecos.clear());
+  editor.onMouseLeave(() => showHover(null));
+  // A header's gutter is also where Monaco folds it, on any click there
+  // (its chevrons hidden or not). Clicks in the gutter of a file or hunk
+  // header are taken before Monaco sees them: on the viewed box they mark,
+  // elsewhere they do nothing, rather than fold with nothing to show how.
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
+    editor.getDomNode().addEventListener(type, (e) => {
+      if (!doc || !e.target.closest?.('.margin')) return;
+      const t = editor.getTargetAtClientPoint(e.clientX, e.clientY);
+      const ln = t?.position?.lineNumber;
+      if (t?.type !== T.GUTTER_LINE_DECORATIONS || !'fh'.includes(doc.kinds[ln - 1] || 'x')) return;
+      e.stopPropagation();
+      e.preventDefault();
+      // pointerdown: its preventDefault keeps the browser from sending mousedown
+      if (type !== 'pointerdown' || e.button !== 0) return;
+      if (e.target.classList.contains('vw-gut') && viewedBoxes.has(ln)) toggleViewedAt(ln);
+    }, true);
   editor.onMouseDown((e) => {
     if (e.target.type !== T.GUTTER_LINE_DECORATIONS || !e.event.leftButton) return;
     const ln = e.target.position?.lineNumber;
@@ -1747,6 +1950,12 @@ function initComments() {
   $('copy-agent').addEventListener('click', copyForAgent);
   $('clear-comments').addEventListener('click', clearComments);
   $('clear-all').addEventListener('click', clearComments);
+}
+
+// the + that adds a comment, in the gutter of the line under the mouse
+function showHover(ln) {
+  const show = ln && commentable(ln) && !commentAt(ln);
+  hoverDecos.set(show ? [{ range: new monaco.Range(ln, 1, ln, 1), options: { linesDecorationsClassName: 'c-add' } }] : []);
 }
 
 function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
@@ -2134,8 +2343,16 @@ function showMenu(ln, x, y) {
     }
     m.append(el('div', 'c-sep'));
   }
-  const fi = Math.max(0, upperBound(fileStarts, ln) - 1);
+  const fi = fileOf(ln);
   const path = doc.files[fi].path;
+  const fileOn = fileHunks[fi].every((h) => viewed.has(doc.hunks[h][2]));
+  item(fileOn ? 'Mark file not viewed' : 'Mark file viewed', () => markViewed(fileHunks[fi], !fileOn));
+  const h = hunkAt(ln);
+  if (h >= 0 && fileHunks[fi].length > 1) {
+    const on = viewed.has(doc.hunks[h][2]);
+    item(on ? 'Mark hunk not viewed' : 'Mark hunk viewed', () => markViewed([h], !on));
+  }
+  m.append(el('div', 'c-sep'));
   item('Reveal in file list', () => revealFile(fi));
   // Monaco's find widget; it starts from the selected text, if any.
   item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); });
@@ -2208,7 +2425,7 @@ function linesAround(ln) {
 // gitr's location: the file and the new-side line number, a removed line
 // taking the number of the new-side line above it; headers give the path.
 function locationOf(ln) {
-  const f = doc.files[Math.max(0, upperBound(fileStarts, ln) - 1)];
+  const f = doc.files[fileOf(ln)];
   for (let i = ln; i > f.start; i--) {
     const k = doc.kinds[i - 1];
     if ('aci'.includes(k)) return `${f.path}:${doc.newNo[i - 1]}`;
@@ -2336,6 +2553,8 @@ async function pollChanges() {
     // review.json written by a gitr window (or another tab)
     // commentStamp is null until a load's comments arrive: nothing yet to compare with
     if (r.review !== commentStamp && !editing) loadComments(gen, commentStamp !== null);
+    // not while a mark is being saved: what is stored may not have it yet
+    if (r.viewed !== viewedStamp && !viewedSaving) reloadViewed(gen);
   } catch { /* transient; next poll retries */ }
 }
 

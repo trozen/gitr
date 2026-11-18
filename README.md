@@ -193,6 +193,20 @@ jump to, as in VS Code, followed by the worktrees of all projects to
 switch to: type parts of the name (`srvpy` finds `server.py`, `wtag` the
 `agent-1` worktree of `wt`), pick with the arrows and Enter or a click.
 The project switcher takes the arrows and Enter too.
+The box at the end of each row in the file list marks a file (or all the
+files of a folder, or in the list's header all files) as viewed; a folder
+folds from its chevron. The same box is in the diff's gutter at each file
+header and (in a file of several hunks) each hunk header, where other
+lines show the + that adds a comment, and right-clicking a line marks its file or
+hunk. Viewed hunks are dimmed, marked grey in the scrollbar and shaded in
+the minimap; a half-filled box is a file with some hunks viewed, and the
+arrows in the list's header go to the next and previous hunk not viewed
+yet. The marks are
+kept per hunk in the worktree's `.gitr/viewed.json`, under the hunk's
+changed lines rather than its place, so when an agent changes a hunk only
+that one comes back unviewed (the reload note counts the viewed files a
+reload changed), a hunk that only moved stays viewed, and a hunk viewed in
+a single commit is viewed in the whole review too, while it is the same.
 The third icon of the left bar shows the commits between the base and
 HEAD as a graph, as gitk draws them, with the uncommitted changes and the
 untracked files on top, and the base at the bottom.

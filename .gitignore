@@ -1,5 +1,8 @@
 __pycache__/
 *.egg-info/
-.uv/
-dist/
+/.uv/
+/dist/
 monaco/node_modules/
+/build/
+/.gitr/
+/.ccsbx/

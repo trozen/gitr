@@ -46,8 +46,8 @@ let pinned = null;             // {file, scrollTop} after a click, see onScroll
 let decoWindow = [0, 0];
 let wordsByLine = new Map();   // line -> [startCol, endCol, ...]
 let wordGen = 0;               // bumps on every load so stale fetches are dropped
-let current = null;            // {wt, base, untracked} last requested
-let shown = null;              // {wt, base, untracked} of the diff on screen, null while loading
+let current = null;            // {wt, base, commit} last requested
+let shown = null;              // {wt, base, commit} of the diff on screen, null while loading
 let numWidth = 4;
 const worktrees = new Map();   // worktree path -> {p, w} from /api/projects
 let commentDecos, hoverDecos, newsDecos;
@@ -115,7 +115,7 @@ function init() {
     stickyScroll: { enabled: true, maxLineCount: 2, defaultModel: 'foldingProviderModel' },
     renderLineHighlight: 'line', occurrencesHighlight: 'off', selectionHighlight: false,
     renderWhitespace: 'none', guides: { indentation: false },
-    wordWrap: 'on', wrappingIndent: 'none',
+    wordWrap: (prefs.wrap ?? true) ? 'on' : 'off', wrappingIndent: 'none',
     wrappingStrategy: 'simple',  // monospace arithmetic, no DOM measuring
     // contextmenu off: the comment menu replaces Monaco's, whose entries
     // (copy aside) do nothing in a read-only diff.
@@ -134,14 +134,20 @@ function init() {
   initBasePicker();
   $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition(),
                                                                  current.commit, shown && doc?.id));
-  $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
-  // Only how the lines are shown changes, so the marks of the last reload stay.
-  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(),
-                                                                   current.commit, newsSince));
-  $('wrap').checked = true;
+  // Per browser, as the font sizes: they change how the diff looks, not
+  // what is reviewed. gitr collapses re-indented lines by default too.
+  $('wrap').checked = prefs.wrap ?? true;
+  $('reindent').checked = prefs.reindent ?? true;
   $('wrap').addEventListener('change', () => {
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
-    if (shown) saveSettings(shown.wt, shown.base);
+    prefs = { ...prefs, wrap: $('wrap').checked };
+    savePrefs();
+  });
+  // Only how the lines are shown changes, so the marks of the last reload stay.
+  $('reindent').addEventListener('change', () => {
+    prefs = { ...prefs, reindent: $('reindent').checked };
+    savePrefs();
+    if (current) load(current.wt, current.base, null, viewPosition(), current.commit, newsSince);
   });
   initSash();
   initSettings();
@@ -429,11 +435,8 @@ async function loadProjects() {
   const hash = new URLSearchParams(location.hash.slice(1));
   const initial = worktrees.has(hash.get('wt')) ? hash.get('wt') : null;
   if (initial) {
-    // A link names its base and untracked option; the rest comes from what
-    // was saved for the worktree.
+    // A link names its base; else the one saved for the worktree.
     const st = settingsFor(initial);
-    if (hash.has('untracked')) st.untracked = hash.get('untracked') === '1';
-    applyOptions(st);
     const pos = hash.get('file') ? { file: hash.get('file'), at: +hash.get('at') || 0, off: +hash.get('off') || 0 }
                                  : worktrees.get(initial).w.position;
     load(initial, hash.get('base') || st.base, worktrees.get(initial).p.defaultBase, pos, hash.get('commit'));
@@ -484,9 +487,7 @@ function renderProjects(projects) {
 
 function openWorktree(path) {
   const { p, w } = worktrees.get(path);
-  const st = settingsFor(path);
-  applyOptions(st);
-  load(path, st.base, p.defaultBase, w.position);
+  load(path, settingsFor(path).base, p.defaultBase, w.position);
 }
 
 const wtLabel = (w) => w.branch || (w.head ? w.head + ' (detached)' : '?');
@@ -771,15 +772,15 @@ const LANE_COLORS = ['#8be9fd', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1
 
 async function refreshCommits(gen) {
   try {
-    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, untracked: shown.untracked });
+    const r = await api('/api/commits', { wt: shown.wt, base: shown.base });
     if (gen === wordGen) { commitList = r; renderCommits(); }
   } catch { /* transient; next poll retries */ }
 }
 
 async function loadCommits(gen) {
-  const at = doc.fingerprint;
+  const at = doc.fingerprintAll;
   try {
-    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, untracked: shown.untracked });
+    const r = await api('/api/commits', { wt: shown.wt, base: shown.base });
     if (gen !== wordGen) return;
     commitList = r;
     commitsFp = at;
@@ -808,10 +809,16 @@ function commitRows() {
     below.get(last).push(b);
   }
   for (const i of [...below.keys()].sort((x, y) => y - x)) rows.splice(i + 1, 0, ...below.get(i));
+  // As gitk draws local changes: nodes above HEAD, the untracked files on top.
   if (commitList.uncommitted)
     rows.unshift({ hash: 'uncommitted', parents: [commitList.head], subject: 'Uncommitted changes', refs: [] });
+  if (commitList.untracked)
+    rows.unshift({ hash: 'untracked', parents: [commitList.uncommitted ? 'uncommitted' : commitList.head],
+                   subject: `Untracked files (${commitList.untracked})`, refs: [] });
   return rows;
 }
+
+const LOCAL = new Set(['uncommitted', 'untracked']);  // rows that are no commits
 
 // Lane layout, newest first: each column waits for one commit (the parent
 // of the commit above it in that column). A commit takes the column that
@@ -864,7 +871,7 @@ function drawGraph(svg, r, g, width, h) {
     else line(x(i), 0, x(i), h, l.color);
   });
   for (const o of g.outs) line(x(g.col), mid, x(o.j), h, o.color);
-  const color = r.hash === 'uncommitted' ? 'var(--note)' : paint(g.color);
+  const color = LOCAL.has(r.hash) ? 'var(--note)' : paint(g.color);
   svg.append(svgEl('circle', { cx: x(g.col), cy: mid, r: 3.5,
     fill: r.boundary ? 'var(--bg-side)' : color, stroke: color, 'stroke-width': 1.5 }));
 }
@@ -884,7 +891,6 @@ function renderCommits() {
   const cut = commitList?.commits.some((c) => c.cut);
   $('commits-count').textContent = commitList ? `(${inside}${cut ? '+' : ''})` : '';
   if (!commitList) return;
-  if (!rows.length) { box.append(el('div', 'empty', 'no commits since the base')); return; }
   const graph = commitGraph(rows);
   const lanes = Math.max(1, ...graph.map((g) => Math.max(g.before.length, g.col + 1, ...g.outs.map((o) => o.j + 1))));
   const width = lanes * LANE_W;
@@ -894,8 +900,10 @@ function renderCommits() {
                                        el('span', 'what', 'merge base to the working tree')]);
   all.firstChild.style.width = width + 'px';
   all.firstChild.style.flex = 'none';
-  all.title = `The whole review: ${current.base}'s merge base to the working tree`;
-  all.addEventListener('click', () => selectCommit(null));
+  all.title = `The whole review: ${current.base}'s merge base to the working tree, without the`
+    + ' untracked files (shift-click "Untracked files" to add them)';
+  all.dataset.hash = 'all';
+  all.addEventListener('click', (e) => pickCommit('all', e.shiftKey));
   box.append(all);
   const made = rows.map((r) => {
     // sized once the row height is known; unsized, an svg is 300 x 150
@@ -905,13 +913,13 @@ function renderCommits() {
       lab.title = `${ref.kind}${ref.head ? ' (checked out)' : ''}: ${ref.name}`;
       return lab;
     });
-    const cls = 'row cm' + (r.boundary ? ' boundary' : '') + (r.hash === 'uncommitted' ? ' uncommitted' : '');
+    const cls = 'row cm' + (r.boundary ? ' boundary' : '') + (LOCAL.has(r.hash) ? ' uncommitted' : '');
     const row = el('div', cls, [svg, ...(labels.length ? [el('span', 'refs', labels)] : []),
                                 el('span', 'subj', r.subject),
                                 el('span', 'age', r.time ? age(r.time) : '')]);
     row.dataset.hash = r.hash;
-    row.title = r.hash === 'uncommitted'
-      ? 'The working tree against HEAD'
+    row.title = r.hash === 'uncommitted' ? 'The tracked files of the working tree against HEAD'
+      : r.hash === 'untracked' ? 'The files git does not track (and does not ignore), not part of "All changes"'
       : `${r.hash}\n${r.author} <${r.email}>\n${new Date(r.time * 1000).toLocaleString()}\n\n${r.subject}` +
         (r.body ? '\n\n' + r.body : '') +
         (r.boundary ? '\n\n(not between the base and HEAD: the merge base, or merged in from the base)' : '');
@@ -921,6 +929,7 @@ function renderCommits() {
     return { row, svg };
   });
   if (cut) box.append(el('div', 'cut', `only the newest ${inside} commits are listed`));
+  if (!made.length) return markShownCommit();
   // Rows are as tall as the sidebar font makes them; the graph is drawn to
   // fit. A hidden pane has no heights: drawn when it is shown.
   const h = made[0].row.getBoundingClientRect().height;  // fractional, so lines meet
@@ -931,7 +940,7 @@ function renderCommits() {
 }
 
 // The commits a range holds, as git counts them: reachable from the newer
-// end but not from the older end's first parent.
+// end but not from the older end's first parent ('all': from the merge base).
 function rangeHashes(older, newer) {
   const byHash = new Map(commitRows().map((r) => [r.hash, r]));
   const reach = (start) => {
@@ -945,6 +954,8 @@ function rangeHashes(older, newer) {
     }
     return seen;
   };
+  // from the merge base: the commits since it, not the boundary ones
+  if (older === 'all') return new Set([...reach(newer)].filter((h) => byHash.has(h) && !byHash.get(h).boundary));
   const stop = reach(byHash.get(older)?.parents[0]);
   return new Set([...reach(newer)].filter((h) => !stop.has(h) && byHash.has(h)));
 }
@@ -965,6 +976,7 @@ function markShownCommit() {
   $('commit-shown').classList.toggle('gone', missing);
   if (missing)
     $('commit-shown').title = c === 'uncommitted' ? 'There are no uncommitted changes now'
+      : c === 'untracked' ? 'There are no untracked files now'
       : c.includes('..') ? 'An end of this range is no longer between the base and HEAD'
       : 'This commit is no longer between the base and HEAD';
 }
@@ -975,15 +987,28 @@ function showCommitShown(info) {
   box.classList.remove('gone');
   text.textContent = '';
   if (!info) return;
-  if (info.range) {
-    const to = info.to === 'uncommitted' ? 'working tree' : info.to.slice(0, 7);
-    text.append(el('span', 'hash', `${info.from.slice(0, 7)}..${to}`), ` ${info.count} commit${info.count === 1 ? '' : 's'}`);
-    box.title = `Showing ${info.count} commits combined, from ${info.from} to ${info.to === 'uncommitted' ? 'the working tree' : info.to}`;
+  const end = (h) => ({ all: 'merge base', uncommitted: 'working tree', untracked: 'untracked' })[h] || h.slice(0, 7);
+  const plus = (to) => (to === 'untracked' ? ' + untracked' : to === 'uncommitted' ? ' + uncommitted' : '');
+  if (info.range && info.from === 'all' && info.to === 'untracked') {
+    text.append('all changes + untracked');
+    box.title = 'Showing the whole review with the untracked files';
+  } else if (info.range && info.from === 'uncommitted') {
+    text.append('uncommitted + untracked');
+    box.title = 'Showing the working tree against HEAD, the untracked files included';
+  } else if (info.range) {
+    text.append(el('span', 'hash', `${end(info.from)}..${end(info.to)}`),
+                ` ${plural(info.count, 'commit')}${plus(info.to)}`);
+    box.title = `Showing ${plural(info.count, 'commit')} combined, from ${info.from === 'all' ? 'the merge base' : info.from}`
+      + ` to ${info.to === 'untracked' ? 'the working tree with the untracked files'
+               : info.to === 'uncommitted' ? 'the working tree' : info.to}`;
   } else if (info.hash.includes('..')) {
-    text.append(el('span', 'hash', info.hash.split('..').map((h) => h === 'uncommitted' ? 'working tree' : h.slice(0, 7)).join('..')));
+    text.append(el('span', 'hash', info.hash.split('..').map(end).join('..')));
   } else if (info.hash === 'uncommitted') {
     text.append('uncommitted changes');
-    box.title = 'Showing the working tree against HEAD';
+    box.title = 'Showing the tracked files of the working tree against HEAD';
+  } else if (info.hash === 'untracked') {
+    text.append('untracked files');
+    box.title = 'Showing only the untracked files';
   } else {
     text.append(el('span', 'hash', info.hash.slice(0, 7)), info.subject ? ' ' + info.subject : '');
     box.title = `Showing commit ${info.hash}${info.subject ? ': ' + info.subject : ''} against its first parent`;
@@ -998,7 +1023,9 @@ function reviewPosition() {
 
 // Click: one commit (again: back to all changes). Shift-click: every
 // commit from the last clicked one to this one, both included; the older
-// end is the one lower in the list.
+// end is the one lower in the list. "All changes" counts as the lowest row
+// (from the merge base), the untracked files and uncommitted changes as
+// the top ones (the working tree, without and with the untracked files).
 let commitAnchor = null;
 // The header button: the next click picks one end (and shows that commit),
 // the one after it the other end, which also ends the mode.
@@ -1020,20 +1047,28 @@ function pickCommit(hash, shift) {
     shift = true;
   }
   if (shift && commitAnchor && commitAnchor !== hash) {
-    const order = commitRows().map((r) => r.hash);
+    const order = [...commitRows().map((r) => r.hash), 'all'];
     const [a, b] = [order.indexOf(commitAnchor), order.indexOf(hash)];
     if (a !== -1 && b !== -1) {
       const older = order[Math.max(a, b)], newer = order[Math.min(a, b)];
-      // the working tree has no parent to start from: it can only be the newer end
-      if (older !== 'uncommitted') return selectCommit(`${older}..${newer}`);
+      // The working tree has no parent to start from, so it is only ever the
+      // newer end, except the uncommitted changes up to the untracked files.
+      // From the merge base to the working tree is "All changes" itself.
+      const ok = older === 'uncommitted' ? newer === 'untracked'
+        : !(older === 'all' && newer === 'uncommitted');
+      if (ok) return selectCommit(`${older}..${newer}`, true);
     }
   }
   commitAnchor = hash;
-  selectCommit(toggle && current.commit === hash ? null : hash);
+  const target = hash === 'all' || (toggle && current.commit === hash) ? null : hash;
+  selectCommit(target, true);
+  // back on all changes, a shift-click from there adds the untracked files
+  if (!target) commitAnchor = 'all';
 }
 
-function selectCommit(hash) {
-  if (!hash) { commitAnchor = null; setRangeMode(null); }
+// keep: a pick within the commits pane, which keeps its anchor and range mode
+function selectCommit(hash, keep = false) {
+  if (!hash && !keep) { commitAnchor = null; setRangeMode(null); }
   if (!current) return;
   load(current.wt, current.base, null, hash ? null : reviewPosition(), hash);
 }
@@ -1083,21 +1118,11 @@ function updateRemoved() {
 // worktree usually wants the same base), else the defaults.
 function settingsFor(wt) {
   const { p, w } = worktrees.get(wt);
-  // gitr collapses re-indented lines by default too
-  return { base: p.defaultBase, untracked: false, wrap: true, reindent: true,
-           ...(p.settings || {}), ...(w.settings || {}) };
-}
-
-function applyOptions(st) {
-  $('untracked').checked = st.untracked;
-  $('reindent').checked = st.reindent;
-  $('wrap').checked = st.wrap;
-  editor.updateOptions({ wordWrap: st.wrap ? 'on' : 'off' });
+  return { base: p.defaultBase, ...(p.settings || {}), ...(w.settings || {}) };
 }
 
 async function saveSettings(wt, base) {
-  const st = { base, untracked: $('untracked').checked, wrap: $('wrap').checked,
-               reindent: $('reindent').checked };
+  const st = { base };
   const entry = worktrees.get(wt);
   if (entry) entry.w.settings = st;
   try {
@@ -1122,12 +1147,13 @@ async function load(wt, base, defaultBase, restore, commit = null, since = null)
     $('outside').hidden = true;
   }
   const gen = ++wordGen;
-  const untracked = $('untracked').checked ? '1' : '0';
   if (current?.wt !== wt || current?.base !== base) commitList = null;
-  current = { wt, base, untracked, defaultBase: defaultBase || current?.defaultBase || base, commit };
+  current = { wt, base, defaultBase: defaultBase || current?.defaultBase || base, commit };
   // a single commit restored from the address is where a shift-click starts
   if (commit && !commit.includes('..') && !commitAnchor) commitAnchor = commit;
-  const state = { wt, base, untracked, ...(commit ? { commit } : {}) };
+  // on the whole review, a shift-click goes from "All changes"
+  if (!commit) commitAnchor = 'all';
+  const state = { wt, base, ...(commit ? { commit } : {}) };
   setHash({ ...state, ...(restore || {}) });
   showCommitShown(commit ? { hash: commit } : null);
   document.querySelectorAll('.wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
@@ -2142,8 +2168,8 @@ function commitMenu(r, x, y) {
     m.append(it);
   };
   const shown = current?.commit && !current.commit.includes('..') ? current.commit : null;
-  const short = (h) => h === 'uncommitted' ? 'uncommitted changes' : h.slice(0, 7);
-  if (r.hash !== 'uncommitted') {
+  const short = (h) => ({ uncommitted: 'uncommitted changes', untracked: 'untracked files' })[h] || h.slice(0, 7);
+  if (!LOCAL.has(r.hash)) {
     item(`Copy "${r.hash.slice(0, 10)}"`, () => copyText(r.hash, `copied ${r.hash}`));
     item('Copy subject', () => copyText(r.subject, 'copied the subject'));
     m.append(el('div', 'c-sep'));
@@ -2151,7 +2177,7 @@ function commitMenu(r, x, y) {
   if (shown && shown !== r.hash) {
     item(`Show range to ${short(shown)}`, () => { commitAnchor = shown; pickCommit(r.hash, true); });
   }
-  if (r.hash !== 'uncommitted') {
+  if (!LOCAL.has(r.hash)) {
     // the base's merge base with HEAD is the commit itself when it is an ancestor
     item('Review changes after this commit (use as base)', () => applyBase(r.hash));
   }
@@ -2292,14 +2318,17 @@ async function pollChanges() {
     const r = await api('/api/fingerprint', shown);
     noteVersion(r.version);
     if (gen !== wordGen) return;
-    // The list follows the worktree quietly; the diff waits for reload.
-    if (r.fingerprint !== commitsFp && commitList) { commitsFp = r.fingerprint; refreshCommits(gen); }
-    if (r.fingerprint !== fp) {
+    // The list follows the worktree quietly, untracked files included (it
+    // counts them); the diff waits for reload.
+    if (r.fingerprintAll !== commitsFp && commitList) { commitsFp = r.fingerprintAll; refreshCommits(gen); }
+    // a view showing the untracked files changes with them, the others not
+    const now = doc.fingerprintKind === 'all' ? r.fingerprintAll : r.fingerprint;
+    if (now !== fp) {
       $('changed').hidden = false;
       // Each summary runs a whole git diff; while an agent keeps editing,
       // at most one per CHANGES_MS. A later poll catches up with the last.
-      if (r.fingerprint !== changesFp && Date.now() - changesAt >= CHANGES_MS) {
-        changesFp = r.fingerprint;
+      if (now !== changesFp && Date.now() - changesAt >= CHANGES_MS) {
+        changesFp = now;
         changesAt = Date.now();
         showChanges(gen);
       }

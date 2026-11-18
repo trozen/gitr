@@ -19,6 +19,7 @@ import os
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -64,6 +65,8 @@ K_COMMIT = 'k'  # the commit header and message before a single commit's diff
 EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 MAX_COMMITS = 500
 UNCOMMITTED = 'uncommitted'  # the commits pane's row for the working tree
+UNTRACKED = 'untracked'  # ... for the untracked files, above it
+ALL = 'all'  # ... for the whole review, as the older end of a range
 
 
 # --git helpers ---------------------------------------------------------------
@@ -422,7 +425,7 @@ class State:
         # Bounded by count, not by worktree, so another tab (or another base on
         # the same worktree) keeps its document while this one reloads.
         self._docs: OrderedDict[str, Doc] = OrderedDict()
-        # (worktree, doc id) -> (base, untracked, baseline()), see new_since
+        # (worktree, doc id) -> (base, baseline()), see new_since
         self._baselines: OrderedDict[str, tuple] = OrderedDict()
 
     def projects(self) -> list[dict]:
@@ -477,8 +480,9 @@ class State:
 
     def save_settings(self, req: dict) -> dict:
         wt, repo = self._find_worktree(str(req['wt']))
-        settings = {'base': str(req['base']), 'untracked': bool(req.get('untracked')),
-                    'wrap': bool(req.get('wrap')), 'reindent': bool(req.get('reindent'))}
+        # wrap and collapse re-indent are kept per browser, the untracked
+        # files are a row of the commits pane: only the base is left here
+        settings = {'base': str(req['base'])}
         # A new worktree starts from its project's last settings. A base that
         # is a branch or tag carries over; a commit (a hash, HEAD~3) belongs
         # to the worktree it was picked in, so the project keeps its base.
@@ -526,28 +530,36 @@ class State:
         except OSError as e:
             raise GitError(f'cannot save settings to {SETTINGS_PATH}: {e}')
 
-    def diff(self, wt: str, base: str, untracked: bool, reindent: bool = False,
+    def diff(self, wt: str, base: str, reindent: bool = False,
              commit: 'str | None' = None, since: 'str | None' = None) -> dict:
-        """The review's diff (merge base to the working tree), or with
-        `commit` one commit's diff against its first parent, as git show
-        has it, or the uncommitted changes alone. `since` names the diff a
-        reload replaces, whose lines the new one's are compared with."""
+        """The review's diff (merge base to the working tree, the tracked
+        files), or with `commit` one commit's diff against its first parent,
+        as git show has it, the uncommitted changes or the untracked files
+        alone, or a range (commit_range). `since` names the diff a reload
+        replaces, whose lines the new one's are compared with."""
         wt = self.check_worktree(wt)
         t0 = time.perf_counter()
         mb = merge_base(wt, base)
         # Taken before the diff: an edit landing while the diff runs then
         # shows up as a change instead of hiding in the baseline.
         head = git(wt, 'rev-parse', 'HEAD').strip()
-        fp = fingerprint(wt, mb, untracked)
+        # A view with the untracked files changes when they do.
+        with_untracked = shows_untracked(commit)
+        fps = fingerprint(wt, mb, with_untracked)
         prefix: list[str] = []
         shown = None
+        newer = None
         if not commit:
-            text = diff_text(wt, mb, untracked)
+            text = diff_text(wt, mb, False)
         elif commit == UNCOMMITTED:
-            text = diff_text(wt, 'HEAD', untracked)
+            text = diff_text(wt, 'HEAD', False)
             shown = {'hash': UNCOMMITTED}
+        elif commit == UNTRACKED:
+            text = untracked_diff(wt)
+            shown = {'hash': UNTRACKED}
+            newer = UNTRACKED
         elif '..' in commit:
-            text, prefix, shown, newer = commit_range(wt, commit, untracked)
+            text, prefix, shown, newer = commit_range(wt, commit, mb)
         else:
             sha = verify_commit(wt, commit)
             parents = git(wt, 'rev-list', '--parents', '-n', '1', sha).split()[1:]
@@ -561,12 +573,12 @@ class State:
         diff_files = parse_diff(text)
         doc = Doc(diff_files, reindent, prefix)
         doc.head = head
-        doc.base, doc.untracked = base, untracked
+        doc.base = base
         if commit:
             doc.commit = shown['hash']
             # comments go on the newer end's files: a commit's, or the worktree's
-            end = newer if '..' in commit else shown['hash']
-            if end != UNCOMMITTED:
+            end = newer or shown['hash']
+            if end not in (UNCOMMITTED, UNTRACKED):
                 doc.read_file = blob_reader(wt, end)
         # What a reload would bring is measured against the whole review.
         doc.changed_lines = None if commit else changed_lines(diff_files)
@@ -577,8 +589,8 @@ class State:
             if prev is None:
                 # the server restarted, or the diff is too many loads back
                 news = {'missing': True}
-            elif prev[:2] == (base, untracked):
-                news = new_since(prev[2], doc)
+            elif prev[0] == base:
+                news = new_since(prev[1], doc)
         t_doc = time.perf_counter()
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
@@ -586,13 +598,14 @@ class State:
             while len(self._docs) > MAX_DOCS:
                 self._docs.popitem(last=False)
             if not commit:
-                self._baselines[f'{wt}\0{doc_id}'] = (base, untracked, baseline(doc))
+                self._baselines[f'{wt}\0{doc_id}'] = (base, baseline(doc))
                 while len(self._baselines) > MAX_BASELINES:
                     self._baselines.popitem(last=False)
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
             'ahead': ahead, 'behind': behind, 'commit': shown,
-            'fingerprint': fp,
+            'fingerprint': fps[with_untracked], 'fingerprintAll': fps[1],
+            'fingerprintKind': 'all' if with_untracked else 'tracked',
             'text': '\n'.join(doc.lines), 'kinds': ''.join(doc.kinds),
             'oldNo': doc.old_no, 'newNo': doc.new_no, 'files': doc.files,
             'news': news,
@@ -600,7 +613,7 @@ class State:
                        'doc_ms': round((t_doc - t_git) * 1000)},
         }
 
-    def changes(self, wt: str, doc_id: str, base: str, untracked: bool) -> dict:
+    def changes(self, wt: str, doc_id: str, base: str) -> dict:
         """What a reload would bring, measured against the loaded diff: the
         commits HEAD moved by, and the changed lines (the diff's + and -
         lines) that would appear or go, per file."""
@@ -617,7 +630,7 @@ class State:
                 rewritten = True
         if doc.changed_lines is None:
             return {'commits': commits, 'rewritten': rewritten}
-        now_files = parse_diff(diff_text(wt, merge_base(wt, base), untracked))
+        now_files = parse_diff(diff_text(wt, merge_base(wt, base), False))
         now = changed_lines(now_files)
         sigs = {df.path: file_sig(df) for df in now_files}
         files = add = rem = 0
@@ -637,18 +650,22 @@ class State:
         return {'commits': commits, 'rewritten': rewritten,
                 'files': files, 'add': add, 'del': rem}
 
-    def commits(self, wt: str, base: str, untracked: bool) -> dict:
+    def commits(self, wt: str, base: str) -> dict:
         wt = self.check_worktree(wt)
-        return {'commits': list_commits(wt, base), 'uncommitted': has_uncommitted(wt, untracked),
+        changed, untracked = worktree_status(wt)
+        return {'commits': list_commits(wt, base), 'uncommitted': changed, 'untracked': untracked,
                 'head': git(wt, 'rev-parse', 'HEAD').strip()}
 
     def _export_doc(self, wt: str, doc: 'Doc') -> 'Doc':
         """The agent export (review.md, copy for agent) always describes the
-        whole review, also while a single commit is on screen: its line
-        numbers are the working tree's."""
-        if doc.commit is None:
+        whole review and the untracked files, also while a single commit is
+        on screen: its line numbers are the working tree's, and a comment on
+        a file the agent created but did not add keeps its place."""
+        untracked = untracked_diff(wt)
+        if doc.commit is None and not untracked:
             return doc
-        return Doc(parse_diff(diff_text(wt, merge_base(wt, doc.base), doc.untracked)), doc.reindent)
+        text = diff_text(wt, merge_base(wt, doc.base), False) + untracked
+        return Doc(parse_diff(text), doc.reindent)
 
     def _doc(self, wt: str, doc_id: str) -> 'Doc':
         with self._lock:
@@ -676,9 +693,8 @@ class State:
         return out
 
     def _export_items(self, wt: str, doc: 'Doc', store: ReviewStore, items: list) -> list:
-        if doc.commit is None:
-            return items
-        return resolve_comments(wt, self._export_doc(wt, doc), store)[1]
+        export = self._export_doc(wt, doc)
+        return items if export is doc else resolve_comments(wt, export, store)[1]
 
     def save_comment(self, wt: str, doc_id: str, req: dict) -> dict:
         wt = self.check_worktree(wt)
@@ -986,30 +1002,44 @@ def verify_commit(wt: str, rev: str) -> str:
 RANGE_LIST_MAX = 50
 
 
-def commit_range(wt: str, spec: str, untracked: bool) -> 'tuple[str, list[str], dict, str]':
+def commit_range(wt: str, spec: str, mb: str) -> 'tuple[str, list[str], dict, str]':
     """older..newer, both included: the diff from the older commit's first
-    parent to the newer commit (or to the working tree when newer is
-    'uncommitted'), so it holds the changes of every selected commit, and a
-    header listing those commits. Returns the diff text, the header lines,
-    the summary for the page and the newer end."""
+    parent to the newer commit, so it holds the changes of every selected
+    commit, and a header listing those commits. The older end can also be
+    'all' (from the merge base `mb`) or 'uncommitted' (from HEAD, up to the
+    untracked files); the newer end 'uncommitted' (the working tree) or
+    'untracked' (the working tree and the untracked files). Returns the
+    diff text, the header lines, the summary for the page and the newer end."""
     older, newer = spec.split('..', 1)
-    old_sha = verify_commit(wt, older)
-    parents = git(wt, 'rev-list', '--parents', '-n', '1', old_sha).split()[1:]
-    start = parents[0] if parents else EMPTY_TREE
-    if newer == UNCOMMITTED:
-        text = diff_text(wt, start, untracked)
+    if older == UNCOMMITTED and newer != UNTRACKED or older == UNTRACKED:
+        raise GitError(f'not a range: {spec}')
+    if older == ALL:
+        start, old_sha, has_start = mb, ALL, True
+    elif older == UNCOMMITTED:
+        start, old_sha, has_start = 'HEAD', UNCOMMITTED, True
+    else:
+        old_sha = verify_commit(wt, older)
+        parents = git(wt, 'rev-list', '--parents', '-n', '1', old_sha).split()[1:]
+        start, has_start = (parents[0], True) if parents else (EMPTY_TREE, False)
+    if newer in (UNCOMMITTED, UNTRACKED):
+        text = diff_text(wt, start, newer == UNTRACKED)
         tip = 'HEAD'
     else:
         newer = verify_commit(wt, newer)
         text = git(wt, 'diff', '--no-color', '--no-ext-diff', '--src-prefix=a/',
                    '--dst-prefix=b/', start, newer)
         tip = newer
-    log = git(wt, 'log', '--topo-order', '--format=%h %s', tip, *(['--not', start] if parents else []))
-    commits = log.splitlines()
+    commits = [] if older == UNCOMMITTED else git(
+        wt, 'log', '--topo-order', '--format=%h %s', tip, *(['--not', start] if has_start else [])).splitlines()
     n = len(commits)
-    upto = 'the working tree' if newer == UNCOMMITTED else newer[:10]
-    lines = [f'commits {old_sha[:10]} to {upto}: {n} commit{"" if n == 1 else "s"}'
-             + (' and the uncommitted changes' if newer == UNCOMMITTED else ''), '']
+    if older == UNCOMMITTED:
+        lines = ['the uncommitted changes and untracked files', '']
+    else:
+        names = {ALL: 'the merge base', UNCOMMITTED: 'the working tree', UNTRACKED: 'the working tree'}
+        lines = [f'{names.get(old_sha) or old_sha[:10]} to {names.get(newer) or newer[:10]}: '
+                 f'{n} commit{"" if n == 1 else "s"}'
+                 + {UNCOMMITTED: ' and the uncommitted changes',
+                    UNTRACKED: ' and the uncommitted changes and untracked files'}.get(newer, ''), '']
     lines += ['    ' + c for c in commits[:RANGE_LIST_MAX]]
     if n > RANGE_LIST_MAX:
         lines.append(f'    ... and {n - RANGE_LIST_MAX} more')
@@ -1042,10 +1072,23 @@ def list_commits(wt: str, base: str) -> list[dict]:
     lists them. Long ranges are cut at MAX_COMMITS."""
     if not base or base.startswith('-'):
         raise GitError(f'invalid base: {base!r}')
-    out = git(wt, 'log', '--boundary', '--topo-order', '--decorate=full',
-              f'--max-count={MAX_COMMITS + 1}',
-              '--format=%m%x00%H%x00%P%x00%an%x00%ae%x00%at%x00%D%x00%s%x00%b%x1e',
-              f'{base}..HEAD', '--')
+    commits = _log_commits(wt, '--boundary', f'--max-count={MAX_COMMITS + 1}', f'{base}..HEAD')
+    if not commits:
+        # Nothing since the base: git lists no boundary then, but the base
+        # (its merge base with HEAD) is still what the review starts from.
+        commits = _log_commits(wt, '-n', '1', merge_base(wt, base))
+        commits[0]['boundary'] = True
+    inside = [c for c in commits if not c['boundary']]
+    if len(inside) > MAX_COMMITS:
+        # cut: the boundary was not reached, and one commit too many came
+        commits = inside[:MAX_COMMITS]
+        commits[-1]['cut'] = True
+    return commits
+
+
+def _log_commits(wt: str, *args: str) -> list[dict]:
+    out = git(wt, 'log', '--topo-order', '--decorate=full',
+              '--format=%m%x00%H%x00%P%x00%an%x00%ae%x00%at%x00%D%x00%s%x00%b%x1e', *args, '--')
     commits = []
     for rec in out.split('\x1e'):
         rec = rec.lstrip('\n')
@@ -1055,11 +1098,6 @@ def list_commits(wt: str, base: str) -> list[dict]:
         commits.append({'hash': h, 'parents': parents.split(), 'author': an, 'email': ae,
                         'time': int(at), 'refs': parse_refs(refs), 'subject': subject,
                         'body': body.strip()[:4000], 'boundary': mark == '-'})
-    inside = [c for c in commits if not c['boundary']]
-    if len(inside) > MAX_COMMITS:
-        # cut: the boundary was not reached, and one commit too many came
-        commits = inside[:MAX_COMMITS]
-        commits[-1]['cut'] = True
     return commits
 
 
@@ -1079,14 +1117,43 @@ def parse_refs(decoration: str) -> list[dict]:
     return refs
 
 
-def has_uncommitted(wt: str, untracked: bool) -> bool:
-    status = git(wt, 'status', '--porcelain=v1', '-z',
-                 '--untracked-files=' + ('all' if untracked else 'no'))
-    for entry in filter(None, status.split('\0')):
-        rel = entry[3:]
+def shows_untracked(commit: 'str | None') -> bool:
+    """Whether a view (the diff's `commit` choice) holds the untracked files."""
+    return bool(commit) and (commit == UNTRACKED or commit.endswith('..' + UNTRACKED))
+
+
+def status_entries(wt: str) -> 'list[tuple[str, str]]':
+    """(status code, path) per entry of git status, the untracked files
+    each listed, gitr's own .gitr/ left out."""
+    fields = git(wt, 'status', '--porcelain=v1', '-z', '--untracked-files=all').split('\0')
+    out = []
+    it = iter(fields)
+    for entry in it:
+        if len(entry) < 4:
+            continue
+        code, rel = entry[:2], entry[3:]
+        if 'R' in code or 'C' in code:
+            next(it, None)  # the old path, a field of its own
         if not (rel == '.gitr' or rel.startswith('.gitr/')):
-            return True
-    return False
+            out.append((code, rel))
+    return out
+
+
+def worktree_status(wt: str) -> 'tuple[bool, int]':
+    """Whether tracked files have uncommitted changes, and how many
+    untracked files the untracked view would show (regular files: it
+    skips symlinks, as untracked_diff does)."""
+    changed, untracked = False, 0
+    for code, rel in status_entries(wt):
+        if code != '??':
+            changed = True
+            continue
+        try:
+            if stat.S_ISREG(os.lstat(os.path.join(wt, rel)).st_mode):
+                untracked += 1
+        except OSError:
+            pass
+    return changed, untracked
 
 
 def ahead_behind(wt: str, base: str) -> tuple[int, int]:
@@ -1094,28 +1161,30 @@ def ahead_behind(wt: str, base: str) -> tuple[int, int]:
     return int(ahead), int(behind)
 
 
-def fingerprint(wt: str, merge_base: str, untracked: bool) -> str:
+def fingerprint(wt: str, merge_base: str, stat_untracked: bool) -> 'tuple[str, str]':
     """Cheap change detector: HEAD, the status listing and the size/mtime of
     every listed path. Agents editing a file change its mtime even when the
-    status line stays the same."""
+    status line stays the same. Two of them: without the untracked files
+    (the review leaves them out, so a scratch file an agent drops must not
+    raise the "changed" note) and with them, for the commits pane's
+    untracked row and the views that show them. Only those views need an
+    edit to an untracked file noticed: the others take just the list, and
+    stat no untracked file (an unignored venv has thousands)."""
     head = git(wt, 'rev-parse', 'HEAD').strip()
-    # Without untracked files in the diff, a new scratch file an agent drops
-    # must not raise the "changed" banner.
-    status = git(wt, 'status', '--porcelain=v1', '-z',
-                 '--untracked-files=' + ('all' if untracked else 'no'))
-    h = hashlib.sha1(f'{head}\0{merge_base}\0'.encode())
-    for entry in filter(None, status.split('\0')):
-        rel = entry[3:] if len(entry) > 3 and entry[2] == ' ' else entry
-        # gitr's review state is left out of the diff, so writing it is no change.
-        if rel == '.gitr' or rel.startswith('.gitr/'):
-            continue
-        h.update(f'{entry}\0'.encode())
-        try:
-            st = os.stat(os.path.join(wt, rel))
-            h.update(f'{rel}\0{st.st_size}\0{st.st_mtime_ns}\0'.encode())
-        except OSError:
-            pass
-    return h.hexdigest()[:16]
+    tracked = hashlib.sha1(f'{head}\0{merge_base}\0'.encode())
+    every = tracked.copy()
+    for code, rel in status_entries(wt):
+        part = f'{code} {rel}\0'
+        if code != '??' or stat_untracked:
+            try:
+                st = os.stat(os.path.join(wt, rel))
+                part += f'{st.st_size}\0{st.st_mtime_ns}\0'
+            except OSError:
+                pass
+        every.update(part.encode())
+        if code != '??':
+            tracked.update(part.encode())
+    return tracked.hexdigest()[:16], every.hexdigest()[:16]
 
 
 # --http --------------------------------------------------------------------------
@@ -1175,11 +1244,11 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/projects':
                 return self._json(self.state.projects())
             if url.path == '/api/diff':
-                return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1',
+                return self._json(self.state.diff(q['wt'], q['base'],
                                                   q.get('reindent') == '1', q.get('commit') or None,
                                                   q.get('since') or None))
             if url.path == '/api/commits':
-                return self._json(self.state.commits(q['wt'], q['base'], q.get('untracked') == '1'))
+                return self._json(self.state.commits(q['wt'], q['base']))
             if url.path == '/api/refs':
                 return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':
@@ -1188,11 +1257,11 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/fingerprint':
                 wt = self.state.check_worktree(q['wt'])
                 mb = merge_base(wt, q['base'])
-                return self._json({'fingerprint': fingerprint(wt, mb, q.get('untracked') == '1'),
+                tracked, every = fingerprint(wt, mb, shows_untracked(q.get('commit')))
+                return self._json({'fingerprint': tracked, 'fingerprintAll': every,
                                    'review': review_stamp(wt), 'version': page_version()})
             if url.path == '/api/changes':
-                return self._json(self.state.changes(q['wt'], q['id'], q['base'],
-                                                     q.get('untracked') == '1'))
+                return self._json(self.state.changes(q['wt'], q['id'], q['base']))
             if url.path == '/api/comments':
                 return self._json(self.state.comments(q['wt'], q['id']))
             if url.path == '/api/export':

@@ -19,9 +19,6 @@
     aria-expanded="false" spellcheck="false" size="14" autocomplete="off"
     title="Any branch, tag or commit; click for a list"></label>
   <span id="commit-shown" class="chip" hidden><span id="commit-shown-text"></span><button id="commit-all" class="chip-x" title="Back to all changes (merge base to the working tree)">&#215;</button></span>
-  <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
-  <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
-  <label class="opt" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> collapse re-indent</label>
   <span id="mergebase" class="dim"></span>
   <!-- notes, in this order; "news" takes the place of "changed" after a reload -->
   <span id="removed" class="chip" hidden>worktree removed</span>
@@ -86,6 +83,9 @@
     <div id="settings" hidden>
       <h2>Font sizes</h2>
       <div id="font-rows"></div>
+      <h2>Diff</h2>
+      <label class="set-row"><input type="checkbox" id="wrap"> Wrap long lines</label>
+      <label class="set-row" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> Collapse re-indented lines</label>
       <div class="set-row reload-row">
         <button id="reload-app" title="Load the page again, e.g. after gitr-serve changed">reload the app</button>
       </div>

@@ -157,9 +157,8 @@ whole diff in one read-only document as in gitr.
 - [x] Base picker: the base field lists the default, the upstream, the
       other worktrees' branches, and all branches and tags with ahead /
       behind counts; a ref that does not exist marks the field
-- [ ] Wrap and collapse re-indent into the settings popup: they change
-      only how the diff is shown, not what is reviewed. Decide whether
-      they stay per worktree (saved on the server, as now) or become one
+- [x] Wrap and collapse re-indent into the settings popup: they change
+      only how the diff is shown, not what is reviewed, so they are one
       choice per browser like the font sizes
 - [ ] Keep each project's state across switches: the loaded diff, scroll
       position and open editors stay as they were, so a project that
@@ -232,13 +231,13 @@ whole diff in one read-only document as in gitr.
       newer one, or to the working tree), listed before the diff
 - [x] Commit rows' right-click menu: copy hash or subject, a range to the
       shown commit, and "use as base" (review the changes after a commit)
-- [ ] Untracked files in the commits pane: an entry of their own below
+- [x] Untracked files in the commits pane: an entry of their own below
       "All changes", above the commits (and uncommitted changes), showing
-      only the untracked files; maybe with an option there to include them
-      in "All changes", taking over from the top bar's untracked checkbox
-- [ ] Commits pane with no commits since the base: it says only "no
+      only the untracked files; "All changes" leaves them out, and a range
+      from it to them adds them (the top bar's checkbox is gone)
+- [x] Commits pane with no commits since the base: it said only "no
       commits since the base", while with commits the base shows as the
-      boundary commit at the bottom; show the base commit there too
+      boundary commit at the bottom; the base commit shows there too
 - [ ] Comment marks in the commits pane: per commit, the comments on lines
       it changed (found with blame on the commented lines), so it shows
       which commits have been reviewed and which not yet

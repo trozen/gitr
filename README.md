@@ -114,11 +114,13 @@ project's other worktrees, the branch's recent commits (to review only
 what came after one), and all branches and tags, each with how many
 commits HEAD is ahead of (and behind) it; typing filters the list, and
 Enter takes the text as typed (a commit hash, `HEAD~3`). The counts for the
-current base are also shown next to the merge-base. The base and the
-untracked / wrap options are remembered per
-worktree on the server (`~/.local/state/gitr/web.json`); a worktree opened
-for the first time starts from the ones last used in its project (a base
-that is a commit rather than a branch or tag stays with its worktree). Monaco is
+current base are also shown next to the merge-base. The base is
+remembered per worktree on the server (`~/.local/state/gitr/web.json`); a
+worktree opened for the first time starts from the one last used in its
+project (a base that is a commit rather than a branch or tag stays with
+its worktree). The review leaves untracked files out; the commits pane
+shows them (below). Wrapping long lines and collapsing re-indented ones
+are set in the settings popup (the gear), per browser. Monaco is
 bundled in the package, so the page needs no internet access.
 
 When the worktree changes, a "worktree changed" note with a reload button
@@ -137,7 +139,7 @@ has none (the note says so). When gitr-serve restarts or its page
 files change, an "app changed" note in the top bar offers to reload the
 page, whose code may no longer fit the server's.
 
-As in gitr, "collapse re-indent" shows a removed and added line that differ
+As in gitr, collapsing re-indented lines shows a removed and added line that differ
 only in whitespace as one dimmed `~` line, and the right-click menu copies
 the file path, `path:line`, or `path:line` with the line (or the selection
 holding it) in a `diff` code fence for pasting into an agent's chat.
@@ -162,17 +164,23 @@ switch to: type parts of the name (`srvpy` finds `server.py`, `wtag` the
 `agent-1` worktree of `wt`), pick with the arrows and Enter or a click.
 The project switcher takes the arrows and Enter too.
 The third icon of the left bar shows the commits between the base and
-HEAD as a graph, as gitk draws them, with uncommitted changes on top.
+HEAD as a graph, as gitk draws them, with the uncommitted changes and the
+untracked files on top, and the base at the bottom.
 Clicking one shows only that commit, as `git show` does (a merge against
-its first parent). Shift-clicking a second commit (or the compare icon in
-the pane's header, then two clicks) shows the commits from one to the
-other combined, both included (from the older one's parent;
-"Uncommitted changes" can be the newer end). The "All changes" row at the
+its first parent), or only the uncommitted changes or untracked files.
+Shift-clicking a second row (or the compare icon in the pane's header,
+then two clicks) shows everything from one to the other combined, both
+included (from the older commit's parent). "Uncommitted changes" and
+"Untracked files" can be the newer end (the working tree, without and with
+the untracked files), and "All changes" the older one (from the merge
+base): shift-clicking from "All changes" to "Untracked files" shows the
+whole review with the untracked files. The "All changes" row at the
 top of the list, or the x on the note in the top bar, goes back to the
 whole review. Right-clicking a commit copies its hash or subject, or makes
 it the base, to review only what came after it. Comments can be read and written there too; they are
 placed on that commit's version of the file, and the agent export always
-describes the whole review.
+describes the whole review and the untracked files (so a comment on a file
+an agent created but did not add keeps its line).
 Comments are stored in the worktree's `.gitr/review.json`, the same file a
 gitr window uses, so a review can move between the two. On every change the
 server also writes the agent export to `.gitr/review.md`, so an agent in that

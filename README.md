@@ -124,7 +124,18 @@ bundled in the package, so the page needs no internet access.
 When the worktree changes, a "worktree changed" note with a reload button
 appears in the top bar (the view never re-renders by itself). It says what
 a reload would bring, compared with the diff on screen: the new commits,
-and how many changed lines would appear and go, in how many files.
+and how many changed lines would appear and go, in how many files. After
+the reload those changes stay marked, so an agent's follow-up stands out
+from what was already reviewed: an orange bar at the left of each new
+changed line, an orange line where changed lines went, marks in the
+scrollbar and the minimap, and a bar on those files (and their folders) in
+the file list. A note in the top bar sums them up; its x clears the
+marks, which otherwise stay until the next reload (or another base or
+commit). The server keeps what the
+marks are measured against in memory, so a reload just after it restarted
+has none (the note says so). When gitr-serve restarts or its page
+files change, an "app changed" note in the top bar offers to reload the
+page, whose code may no longer fit the server's.
 
 As in gitr, "collapse re-indent" shows a removed and added line that differ
 only in whitespace as one dimmed `~` line, and the right-click menu copies
@@ -166,7 +177,11 @@ Comments are stored in the worktree's `.gitr/review.json`, the same file a
 gitr window uses, so a review can move between the two. On every change the
 server also writes the agent export to `.gitr/review.md`, so an agent in that
 worktree can be told to read it; "copy for agent" puts the same text on the
-clipboard. Keep `.gitr/` out of commits (e.g. in a global gitignore), or
+clipboard. When `review.json` changes from outside the page (a gitr
+window, another tab, an agent), the comments reload by themselves, a note
+in the top bar says how many were added, edited and removed, and the added
+and edited ones are flagged; the note's x clears the flags, which otherwise
+stay until the next such change or another diff. Keep `.gitr/` out of commits (e.g. in a global gitignore), or
 agents may commit it.
 
 ## Requirements

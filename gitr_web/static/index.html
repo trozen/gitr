@@ -18,13 +18,17 @@
   <label class="base">base <input id="base" type="search" role="combobox" aria-autocomplete="list" aria-controls="base-list"
     aria-expanded="false" spellcheck="false" size="14" autocomplete="off"
     title="Any branch, tag or commit; click for a list"></label>
-  <span id="commit-shown" hidden><span id="commit-shown-text"></span><button id="commit-all" title="Back to all changes (merge base to the working tree)">&#215;</button></span>
+  <span id="commit-shown" class="chip" hidden><span id="commit-shown-text"></span><button id="commit-all" class="chip-x" title="Back to all changes (merge base to the working tree)">&#215;</button></span>
   <label class="opt"><input type="checkbox" id="untracked"> untracked</label>
   <label class="opt"><input type="checkbox" id="wrap"> wrap</label>
   <label class="opt" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> collapse re-indent</label>
   <span id="mergebase" class="dim"></span>
-  <span id="changed" hidden>worktree changed<span id="changed-what"></span> <button id="reload">reload</button></span>
-  <span id="removed" hidden>worktree removed</span>
+  <!-- notes, in this order; "news" takes the place of "changed" after a reload -->
+  <span id="removed" class="chip" hidden>worktree removed</span>
+  <span id="changed" class="chip" hidden><span>worktree changed<span id="changed-what"></span></span><button id="reload" class="chip-act">reload</button></span>
+  <span id="news" class="chip" hidden><span id="news-text"></span><button id="news-close" class="chip-x" title="Clear the marks of the last reload">&#215;</button></span>
+  <span id="outside" class="chip" hidden title="review.json was written by something else (a gitr window, another tab, an agent); the comments it added or edited are flagged"><span id="outside-text"></span><button id="outside-close" class="chip-x" title="Clear the flags">&#215;</button></span>
+  <span id="updated" class="chip" hidden title="gitr-serve restarted or its page files changed, so the code running in this page may no longer fit it"><span>app changed</span><button id="reload-page" class="chip-act">reload</button></span>
   <span id="review">
     <span id="ccount" class="dim"></span>
     <span class="nav"><button id="prev-comment" title="Previous comment">&#8593;</button><button id="next-comment" title="Next comment">&#8595;</button></span>
@@ -83,7 +87,7 @@
       <h2>Font sizes</h2>
       <div id="font-rows"></div>
       <div class="set-row reload-row">
-        <button id="reload-app" title="Load the page again, e.g. after gitr-serve was updated">reload the app</button>
+        <button id="reload-app" title="Load the page again, e.g. after gitr-serve changed">reload the app</button>
       </div>
     </div>
   </main>

@@ -40,6 +40,7 @@ from gitr import (COMMENT_KINDS, ReviewStore, _diff_side,  # noqa: E402
                   _resolve_anchors, _word_matcher, parse_diff)
 
 STATIC_DIR = Path(__file__).resolve().parent / 'static'
+STARTED = str(time.time_ns())
 CONFIG_PATH = Path.home() / '.config' / 'gitr' / 'projects.json'
 SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
                  / 'gitr' / 'web.json')
@@ -47,6 +48,9 @@ SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local'
 OLD_SETTINGS_PATH = SETTINGS_PATH.with_name('serve.json')
 MIN_FILE_LINES = 4  # see the padding in Doc._add_file
 MAX_DOCS = 4  # a huge diff's document is tens of MB
+# Past review diffs a reload is compared with, as hashes of their + and -
+# lines (see baseline()), so many more of them than documents.
+MAX_BASELINES = 64
 UNTRACKED_MAX_BYTES = 2 * 1024 * 1024
 TOKEN_RE = re.compile(r'\w+|[^\w\s]|\s+')
 
@@ -137,7 +141,11 @@ def untracked_diff(wt: str) -> str:
         except OSError:
             continue
         if b'\0' in data[:8192]:
-            parts.append(head + f'Binary files /dev/null and b/{rel} differ\n')
+            # The blob id as git prints it, so that a changed binary file
+            # differs in its header (file_sig) though its diff text does not.
+            blob = hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+            parts.append(head + f'index 0000000..{blob[:7]}\n'
+                         f'Binary files /dev/null and b/{rel} differ\n')
             continue
         lines = data.decode('utf-8', 'replace').splitlines()
         if not lines:
@@ -176,6 +184,11 @@ class Doc:
         # Collapsed line -> (the removed line's text, its anchor): a comment
         # stored for either side of the pair belongs on the one shown line.
         self.reindent_src: dict[int, tuple[str, int]] = {}
+        # Per file, the document line of each of its + and - lines in diff
+        # order (changed_lines' order); a collapsed pair maps both to its ~ line.
+        self.change_lines: dict[str, list[int]] = {}
+        self.file_sigs: dict[str, str] = {}  # file_sig() per path
+        self._line_of: dict[int, int] = {}
         for line in prefix:
             self._push(line, K_COMMIT)
         for df in diff_files:
@@ -242,6 +255,10 @@ class Doc:
                 self._push(dl.text, K_CTX, old=dl.old_line_no, new=dl.new_line_no,
                            anchor=dl.new_line_no)
         flush()
+        self.change_lines[df.path] = [self._line_of[id(dl)] for dl in df.lines
+                                      if dl.kind in ('added', 'removed')]
+        self._line_of.clear()
+        self.file_sigs[df.path] = file_sig(df)
         # git prints only header lines for an empty new or deleted file, a
         # pure rename or copy, or a mode change; without a note the bare
         # header looks like something is missing.
@@ -274,8 +291,10 @@ class Doc:
             for d in run:
                 if d.kind == 'removed':
                     rem_lns.append(self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no))
+                    self._line_of[id(d)] = rem_lns[-1]
                 elif d.kind == 'added':
                     add_lns.append(self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no))
+                    self._line_of[id(d)] = add_lns[-1]
                 else:
                     self._push(d.text, K_META)
             if rem_lns and add_lns:
@@ -291,16 +310,18 @@ class Doc:
                     ln = self._push('~' + new.text[1:], K_REIND, old=old.old_line_no,
                                     new=new.new_line_no, anchor=new.new_line_no)
                     self.reindent_src[ln] = (old.text, old.new_line_no)
+                    self._line_of[id(old)] = self._line_of[id(new)] = ln
                     continue
                 r = self._push(old.text, K_REM, old=old.old_line_no, anchor=old.new_line_no)
                 a = self._push(new.text, K_ADD, new=new.new_line_no, anchor=new.new_line_no)
+                self._line_of[id(old)], self._line_of[id(new)] = r, a
                 self.blocks.append(([r], [a]))
             elif act[0] == 'rem':
                 d = next(ri)
-                self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no)
+                self._line_of[id(d)] = self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no)
             else:
                 d = next(ai)
-                self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no)
+                self._line_of[id(d)] = self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no)
         for d in run:
             if d.kind not in ('removed', 'added'):
                 self._push(d.text, K_META)
@@ -401,6 +422,8 @@ class State:
         # Bounded by count, not by worktree, so another tab (or another base on
         # the same worktree) keeps its document while this one reloads.
         self._docs: OrderedDict[str, Doc] = OrderedDict()
+        # (worktree, doc id) -> (base, untracked, baseline()), see new_since
+        self._baselines: OrderedDict[str, tuple] = OrderedDict()
 
     def projects(self) -> list[dict]:
         out = []
@@ -504,10 +527,11 @@ class State:
             raise GitError(f'cannot save settings to {SETTINGS_PATH}: {e}')
 
     def diff(self, wt: str, base: str, untracked: bool, reindent: bool = False,
-             commit: 'str | None' = None) -> dict:
+             commit: 'str | None' = None, since: 'str | None' = None) -> dict:
         """The review's diff (merge base to the working tree), or with
         `commit` one commit's diff against its first parent, as git show
-        has it, or the uncommitted changes alone."""
+        has it, or the uncommitted changes alone. `since` names the diff a
+        reload replaces, whose lines the new one's are compared with."""
         wt = self.check_worktree(wt)
         t0 = time.perf_counter()
         mb = merge_base(wt, base)
@@ -546,18 +570,32 @@ class State:
                 doc.read_file = blob_reader(wt, end)
         # What a reload would bring is measured against the whole review.
         doc.changed_lines = None if commit else changed_lines(diff_files)
+        news = None
+        if since and not commit:
+            with self._lock:
+                prev = self._baselines.get(f'{wt}\0{since}')
+            if prev is None:
+                # the server restarted, or the diff is too many loads back
+                news = {'missing': True}
+            elif prev[:2] == (base, untracked):
+                news = new_since(prev[2], doc)
         t_doc = time.perf_counter()
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
             self._docs[f'{wt}\0{doc_id}'] = doc
             while len(self._docs) > MAX_DOCS:
                 self._docs.popitem(last=False)
+            if not commit:
+                self._baselines[f'{wt}\0{doc_id}'] = (base, untracked, baseline(doc))
+                while len(self._baselines) > MAX_BASELINES:
+                    self._baselines.popitem(last=False)
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
             'ahead': ahead, 'behind': behind, 'commit': shown,
             'fingerprint': fp,
             'text': '\n'.join(doc.lines), 'kinds': ''.join(doc.kinds),
             'oldNo': doc.old_no, 'newNo': doc.new_no, 'files': doc.files,
+            'news': news,
             'timing': {'git_ms': round((t_git - t0) * 1000),
                        'doc_ms': round((t_doc - t_git) * 1000)},
         }
@@ -579,11 +617,16 @@ class State:
                 rewritten = True
         if doc.changed_lines is None:
             return {'commits': commits, 'rewritten': rewritten}
-        now = changed_lines(parse_diff(diff_text(wt, merge_base(wt, base), untracked)))
+        now_files = parse_diff(diff_text(wt, merge_base(wt, base), untracked))
+        now = changed_lines(now_files)
+        sigs = {df.path: file_sig(df) for df in now_files}
         files = add = rem = 0
         for path in doc.changed_lines.keys() | now.keys():
             a, b = doc.changed_lines.get(path, []), now.get(path, [])
             if a == b:
+                # a file without + and - lines that came, went or changed
+                if not a and doc.file_sigs.get(path) != sigs.get(path):
+                    files += 1
                 continue
             files += 1
             sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
@@ -839,11 +882,77 @@ def diff_text(wt: str, merge_base: str, untracked: bool) -> str:
     return text
 
 
+def file_sig(df) -> str:
+    """A file's header lines (index, mode, rename): what tells two versions
+    of a file without + and - lines (binary, empty) apart."""
+    return '\n'.join(dl.text for dl in df.lines if dl.kind == 'fileheader')
+
+
 def changed_lines(diff_files) -> dict[str, list[str]]:
     """The + and - lines of each file, without context or line numbers, so
     an edit elsewhere in the file that only shifts a hunk is no change."""
     return {f.path: [l.text for l in f.lines if l.kind in ('added', 'removed')]
             for f in diff_files}
+
+
+def baseline(doc: 'Doc') -> dict[str, tuple[str, list[int]]]:
+    """Per file, its header lines and a hash of each + and - line: all
+    new_since compares, at a fraction of the text's size (a diff that adds
+    a big generated file holds most of it in its + lines). The hashes live
+    only in this process, so Python's per-process hash seed does no harm."""
+    return {path: (doc.file_sigs[path], [hash(t) for t in lines])
+            for path, lines in doc.changed_lines.items()}
+
+
+def new_since(prev: dict[str, tuple[str, list[int]]], doc: 'Doc') -> dict:
+    """Where the changed lines of `doc` differ from `prev`, the baseline()
+    of the diff it replaces, per file: its lines that are new (as runs of
+    document lines), and the lines after which (or, at a file's first
+    change, before which) changed lines of the old diff are gone. A hunk
+    that only moved, or changed context around it, is no difference. A file
+    without + and - lines that is new in the diff or changed (a binary or
+    empty file, a pure rename) has its header line marked."""
+    lines: set[int] = set()
+    headers: set[int] = set()  # marked, but no changed lines to count
+    gone_after: set[int] = set()
+    gone_before: set[int] = set()
+    paths: list[str] = []
+    gone = 0
+    for f in doc.files:
+        path = f['path']
+        at = doc.change_lines[path]
+        sig, a = prev.get(path, (None, []))
+        b = [hash(t) for t in doc.changed_lines[path]]
+        if a == b:
+            if a or sig == doc.file_sigs[path]:
+                continue
+            paths.append(path)
+            headers.add(f['start'])
+            continue
+        paths.append(path)
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == 'equal':
+                continue
+            gone += i2 - i1
+            if op != 'delete':
+                lines.update(at[j1:j2])
+            elif j1:
+                gone_after.add(at[j1 - 1])
+            else:
+                gone_before.add(at[0] if at else f['start'])
+    shown = {f['path'] for f in doc.files}
+    files_gone = sorted(p for p in prev if p not in shown)
+    runs: list[list[int]] = []
+    for ln in sorted(lines | headers):
+        if runs and runs[-1][1] == ln - 1:
+            runs[-1][1] = ln
+        else:
+            runs.append([ln, ln])
+    gone += sum(len(prev[p][1]) for p in files_gone)
+    return {'runs': runs, 'lines': len(lines), 'gone': gone, 'files': len(paths), 'paths': paths,
+            'goneAfter': sorted(gone_after), 'goneBefore': sorted(gone_before),
+            'filesGone': files_gone}
 
 
 def file_reader(wt: str, doc: 'Doc'):
@@ -1061,11 +1170,14 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         try:
+            if url.path == '/api/version':
+                return self._json({'version': page_version()})
             if url.path == '/api/projects':
                 return self._json(self.state.projects())
             if url.path == '/api/diff':
                 return self._json(self.state.diff(q['wt'], q['base'], q.get('untracked') == '1',
-                                                  q.get('reindent') == '1', q.get('commit') or None))
+                                                  q.get('reindent') == '1', q.get('commit') or None,
+                                                  q.get('since') or None))
             if url.path == '/api/commits':
                 return self._json(self.state.commits(q['wt'], q['base'], q.get('untracked') == '1'))
             if url.path == '/api/refs':
@@ -1077,7 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
                 wt = self.state.check_worktree(q['wt'])
                 mb = merge_base(wt, q['base'])
                 return self._json({'fingerprint': fingerprint(wt, mb, q.get('untracked') == '1'),
-                                   'review': review_stamp(wt)})
+                                   'review': review_stamp(wt), 'version': page_version()})
             if url.path == '/api/changes':
                 return self._json(self.state.changes(q['wt'], q['id'], q['base'],
                                                      q.get('untracked') == '1'))
@@ -1189,16 +1301,6 @@ def supervise() -> None:
                 out.append(0)
         return tuple(out)
 
-    def page_stamp() -> dict:
-        out = {}
-        for p in STATIC_DIR.rglob('*'):
-            try:
-                if p.is_file():
-                    out[p] = p.stat().st_mtime_ns
-            except OSError:
-                pass
-        return out
-
     cmd = [sys.executable, str(here), *sys.argv[1:]]
     env = dict(os.environ, **{RELOAD_CHILD_ENV: '1'})
     # A plain `kill` of the supervisor must not leave the server running.
@@ -1231,6 +1333,24 @@ def supervise() -> None:
             if child.poll() is None:
                 child.terminate()
             child.wait()
+
+
+def page_stamp() -> dict:
+    """Modification time of every page file (the Monaco bundle included)."""
+    out = {}
+    for p in STATIC_DIR.rglob('*'):
+        try:
+            if p.is_file():
+                out[p] = p.stat().st_mtime_ns
+        except OSError:
+            pass
+    return out
+
+
+def page_version() -> str:
+    """Changes when the server restarts or a page file changes, so that an
+    open page can tell its code is older than the server's."""
+    return f'{STARTED}-{max(page_stamp().values(), default=0)}'
 
 
 def tilde(path: str) -> str:

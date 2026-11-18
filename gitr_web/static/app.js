@@ -50,7 +50,7 @@ let current = null;            // {wt, base, untracked} last requested
 let shown = null;              // {wt, base, untracked} of the diff on screen, null while loading
 let numWidth = 4;
 const worktrees = new Map();   // worktree path -> {p, w} from /api/projects
-let commentDecos, hoverDecos;
+let commentDecos, hoverDecos, newsDecos;
 let comments = [];             // resolved comments of the doc on screen, from the server
 let commentStamp = null;       // review.json mtime they were read at
 let totalComments = 0;         // including comments on files not in this diff
@@ -127,13 +127,17 @@ function init() {
   fileDecos = editor.createDecorationsCollection();
   commentDecos = editor.createDecorationsCollection();
   hoverDecos = editor.createDecorationsCollection();
+  newsDecos = editor.createDecorationsCollection();
   editor.onDidScrollChange(onScroll);
   initComments();
 
   initBasePicker();
-  $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
+  $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition(),
+                                                                 current.commit, shown && doc?.id));
   $('untracked').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
-  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(), current.commit));
+  // Only how the lines are shown changes, so the marks of the last reload stay.
+  $('reindent').addEventListener('change', () => current && load(current.wt, current.base, null, viewPosition(),
+                                                                   current.commit, newsSince));
   $('wrap').checked = true;
   $('wrap').addEventListener('change', () => {
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
@@ -147,6 +151,11 @@ function init() {
   loadProjects();
   setInterval(pollChanges, POLL_MS);
   setInterval(refreshProjects, PROJECTS_MS);
+  checkVersion();
+  setInterval(checkVersion, PROJECTS_MS);
+  $('reload-page').addEventListener('click', reloadPage);
+  $('news-close').addEventListener('click', clearNews);
+  $('outside-close').addEventListener('click', clearOutside);
   addEventListener('focus', refreshProjects);
   document.addEventListener('visibilitychange', refreshProjects);
 }
@@ -250,6 +259,7 @@ function renderCommentList() {
       el('span', 'guide'), el('span', 'chev-space'),
       el('span', 'c-kind', KIND_MARK[c.kind]), el('span', 'txt', first),
       ...(flag ? [el('span', 'flag', flag)] : []),
+      ...(outsideMarks.has(keyStr(c)) ? [outsideFlag(c, 'flag')] : []),
       el('span', 'ln', c.lineNo ? String(c.lineNo) : ''),
       closeButton(c),
     ]);
@@ -257,6 +267,13 @@ function renderCommentList() {
     row.addEventListener('click', () => scrollToComment(i));
     box.append(row);
   });
+}
+
+function reloadPage() {
+  // The hash brings back the worktree and the scroll position at once,
+  // without waiting for the debounced update.
+  if (shown) setHash({ ...shown, ...(viewPosition() || {}) });
+  location.reload();
 }
 
 function initSettings() {
@@ -275,12 +292,7 @@ function initSettings() {
   const show = (on) => { panel.hidden = !on; btn.classList.toggle('on', on); };
   btn.addEventListener('click', () => show(panel.hidden));
   // An installed app has no browser reload button.
-  $('reload-app').addEventListener('click', () => {
-    // The hash brings back the worktree and the scroll position at once,
-    // without waiting for the debounced update.
-    if (shown) setHash({ ...shown, ...(viewPosition() || {}) });
-    location.reload();
-  });
+  $('reload-app').addEventListener('click', reloadPage);
   addEventListener('mousedown', (e) => {
     if (!panel.contains(e.target) && !btn.contains(e.target)) show(false);
   });
@@ -1045,6 +1057,22 @@ async function refreshProjects() {
   refreshing = false;
 }
 
+// The server tells its version (its start and the page files' times); a
+// different one than at page load means this page's code may not fit.
+// The change poll carries the version too, so with a worktree open a
+// restart shows within POLL_MS; this check covers the page without one.
+let serverVersion = null;
+function noteVersion(v) {
+  if (serverVersion === null) serverVersion = v;
+  else if (v !== serverVersion) $('updated').hidden = false;
+}
+
+async function checkVersion() {
+  if (document.hidden) return;
+  try { noteVersion((await api('/api/version', {})).version); }
+  catch { /* transient, or the server is restarting */ }
+}
+
 function updateRemoved() {
   const gone = !!shown && !worktrees.has(shown.wt);
   $('removed').hidden = !gone;
@@ -1083,8 +1111,16 @@ async function saveSettings(wt, base) {
 
 // commit: a single commit's diff (a hash, or 'uncommitted') instead of the
 // whole review; null for the review.
-async function load(wt, base, defaultBase, restore, commit = null) {
+// `since`: the id of the diff whose lines the new one is compared with, to
+// mark what a reload brought (only the server's cache still has it).
+async function load(wt, base, defaultBase, restore, commit = null, since = null) {
   if (shown && shown.wt !== wt) flushPosition();
+  // Another view: the notes about this one would stand until it renders, or
+  // for good if it fails to load. A reload or re-render replaces them.
+  if (!shown || shown.wt !== wt || shown.base !== base || (shown.commit || null) !== commit) {
+    $('news').hidden = true;
+    $('outside').hidden = true;
+  }
   const gen = ++wordGen;
   const untracked = $('untracked').checked ? '1' : '0';
   if (current?.wt !== wt || current?.base !== base) commitList = null;
@@ -1107,7 +1143,8 @@ async function load(wt, base, defaultBase, restore, commit = null) {
   const t0 = performance.now();
   let d;
   try {
-    d = await api('/api/diff', { ...state, reindent: $('reindent').checked ? '1' : '0' });
+    d = await api('/api/diff', { ...state, reindent: $('reindent').checked ? '1' : '0',
+                                 ...(since ? { since } : {}) });
   } catch (e) {
     if (gen === wordGen) {
       showProgress('error: ' + e.message);
@@ -1117,6 +1154,17 @@ async function load(wt, base, defaultBase, restore, commit = null) {
     return;
   }
   if (gen !== wordGen) return;
+  // Thrown while drawing, an error would leave "rendering" up for good.
+  try {
+    await showDiff(d, gen, state, since, restore, t0);
+  } catch (e) {
+    showProgress('error showing the diff: ' + e.message + '\n(reloading the page may help)');
+    throw e;
+  }
+}
+
+async function showDiff(d, gen, state, since, restore, t0) {
+  const { wt, base, commit } = state;
   const t1 = performance.now();
   showProgress(`rendering ${d.files.length} files, ${d.kinds.length} lines ...`);
   await nextFrame();
@@ -1132,6 +1180,8 @@ async function load(wt, base, defaultBase, restore, commit = null) {
   numWidth = String(maxNo).length;
   wordsByLine = new Map();
   editing = null;
+  outsideMarks = new Map();
+  $('outside').hidden = true;
   applyComments({ comments: [], elsewhere: 0, stamp: null });
   decoWindow = [0, 0];
   activeFile = -1;
@@ -1142,6 +1192,8 @@ async function load(wt, base, defaultBase, restore, commit = null) {
   if (restore) scrollToPosition(restore);
   renderFiles();
   markHeadersInMinimap();
+  applyNews(d.news, since);
+  markNewFiles(d.news);
   updateDecorations(true);
   if (d.files.length) hideProgress();
   else if (commit === 'uncommitted') showProgress('no uncommitted changes');
@@ -1159,12 +1211,84 @@ async function load(wt, base, defaultBase, restore, commit = null) {
     (d.behind ? `, which has ${d.behind} commit${d.behind === 1 ? '' : 's'} not in HEAD` : '');
   const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
   $('stats').textContent = `${d.files.length} files  +${add} -${del}  ${d.kinds.length} lines`;
-  $('timing').textContent = `git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +
-    `fetch ${timing.fetchMs} ms, render ${timing.renderMs} ms`;
+  setTiming(`git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +
+            `fetch ${timing.fetchMs} ms, render ${timing.renderMs} ms`);
   onScroll();
   loadComments(gen);
   fetchWords(gen);
   loadCommits(gen);
+}
+
+// --what a reload brought ---------------------------------------------------
+
+let newsSince = null;          // id of the diff the marks compare with, see load()
+
+// Returns the summary to show, if there is something new to say.
+// The note in the top bar stays until the next load, or its x clears the
+// marks with it.
+function applyNews(news, since) {
+  newsSince = news && !news.missing ? since : null;
+  $('news').hidden = !news;
+  $('news').classList.toggle('missing', !!news?.missing);
+  if (!news || news.missing) {
+    newsDecos.set([]);
+    $('news-text').textContent = news ? 'no marks for this reload' : '';
+    $('news').title = 'The server no longer has the diff before the reload (it restarted, or that'
+      + ' was too many loads ago), so there is nothing to compare with';
+    return;
+  }
+  const T = monaco.editor;
+  const color = getComputedStyle(document.documentElement).getPropertyValue('--new').trim();
+  const marks = { overviewRuler: { color, position: T.OverviewRulerLane.Right },
+                  minimap: { color, position: T.MinimapPosition.Gutter } };
+  const list = news.runs.map(([a, b]) => ({ range: new monaco.Range(a, 1, b, 1),
+                                            options: { isWholeLine: true, marginClassName: 'm-new', ...marks } }));
+  for (const [lines, cls] of [[news.goneAfter, 'gone-after'], [news.goneBefore, 'gone-before']])
+    for (const ln of lines)
+      list.push({ range: new monaco.Range(ln, 1, ln, 1),
+                  options: { isWholeLine: true, className: cls, marginClassName: cls, ...marks } });
+  newsDecos.set(list);
+  $('news-text').replaceChildren(...newsSummary(news));
+  $('news').title = 'Marked in the diff, the scrollbar, the minimap and the file list; the x clears the marks';
+}
+
+function clearNews() {
+  applyNews(null, null);
+  document.querySelectorAll('#files .row.new').forEach((r) => {
+    r.classList.remove('new');
+    r.title = r.title.replace(NEW_TIP, '');
+  });
+}
+
+const NEW_TIP = '\nchanged since the last load';
+
+// The folders above a marked file are marked too, so that a collapsed one
+// still shows it.
+function markNewFiles(news) {
+  const paths = new Set(news?.paths || []);  // none when missing
+  doc.files.forEach((f, i) => {
+    if (!paths.has(f.path)) return;
+    fileRows[i].classList.add('new');
+    fileRows[i].title += NEW_TIP;
+    for (const d of fileDirs[i]) d.row.classList.add('new');
+  });
+}
+
+const plural = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
+// [a, b, c] -> [a, ', ', b, ', ', c]
+const joined = (parts) => parts.flatMap((p, i) => (i ? [', ', p] : [p]));
+
+// nodes for the note: the counts coloured, the rest plain
+function newsSummary(n) {
+  if (!n.files && !n.filesGone.length) return ['reload: the diff is the same'];
+  const parts = [];
+  if (n.lines) parts.push(el('span', 'hi', plural(n.lines, 'new changed line')));
+  if (n.gone) parts.push(el('span', 'hi', `${n.gone} gone`));
+  const out = ['reload: ', ...joined(parts)];
+  // a file without + and - lines (binary, empty, renamed) has no lines to count
+  if (n.files) out.push(parts.length ? ` in ${plural(n.files, 'file')}` : el('span', 'hi', plural(n.files, 'changed file')));
+  if (n.filesGone.length) out.push(`${out.length > 1 ? '; ' : ''}${plural(n.filesGone.length, 'file')} no longer changed`);
+  return out;
 }
 
 function showProgress(msg) { const p = $('progress'); p.textContent = msg; p.hidden = false; }
@@ -1601,11 +1725,46 @@ function initComments() {
 
 function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
 
-async function loadComments(gen) {
+// `outside`: review.json was written by something else (a gitr window,
+// another tab, an agent), so say what changed and mark it.
+async function loadComments(gen, outside = false) {
   try {
     const r = await api('/api/comments', { wt: shown.wt, id: doc.id });
-    if (gen === wordGen) applyComments(r);
+    if (gen !== wordGen) return;
+    if (outside) noteOutsideChanges(r.comments);
+    applyComments(r);
   } catch (e) { flash('comments: ' + e.message); }
+}
+
+// keyStr -> 'new' | 'edited', for the comments the last outside change
+// brought; kept until the next one, or a new diff.
+let outsideMarks = new Map();
+function noteOutsideChanges(next) {
+  const before = new Map(comments.map((c) => [keyStr(c), c]));
+  const marks = new Map();
+  for (const c of next) {
+    const old = before.get(keyStr(c));
+    before.delete(keyStr(c));
+    if (!old) marks.set(keyStr(c), 'new');
+    else if (old.text !== c.text || old.kind !== c.kind) marks.set(keyStr(c), 'edited');
+  }
+  const counts = { new: 0, edited: 0 };
+  for (const m of marks.values()) counts[m]++;
+  const parts = [];
+  if (counts.new) parts.push(el('span', 'hi', `${counts.new} added`));
+  if (counts.edited) parts.push(el('span', 'hi', `${counts.edited} edited`));
+  if (before.size) parts.push(el('span', 'hi', `${before.size} removed`));
+  if (!parts.length) return;  // rewritten as it was
+  outsideMarks = marks;
+  $('outside-text').replaceChildren('comments changed outside: ', ...joined(parts));
+  $('outside').hidden = false;
+}
+
+function clearOutside() {
+  outsideMarks = new Map();
+  $('outside').hidden = true;
+  renderZones(false);
+  renderCommentList();
 }
 
 async function post(path, body) {
@@ -1625,6 +1784,7 @@ async function saveComment(target, text, kind) {
     const r = await post('/api/comment', body);
     if (gen !== wordGen) return false;
     editing = null;
+    if (target.key) outsideMarks.delete(keyStr(target));
     applyComments(r);
     return true;
   } catch (e) { flash(e.message); return false; }
@@ -1696,7 +1856,8 @@ function renderZones(all) {
   const elsewhere = comments.filter((c) => c.elsewhere);
   if (elsewhere.length)
     want.set('elsewhere', { c: { line: elsewhere[0].line, text: String(elsewhere.length) }, head: true });
-  const sigOf = (w) => JSON.stringify([w.c.line, w.c.kind, w.c.text, w.c.moved, w.c.orphan, !!w.ed, width]);
+  const sigOf = (w) => JSON.stringify([w.c.line, w.c.kind, w.c.text, w.c.moved, w.c.orphan, !!w.ed, width,
+                                       outsideMarks.get(keyStr(w.c))]);
   const anchor = editor.getVisibleRanges()[0]?.startLineNumber;
   const offset = anchor ? editor.getScrollTop() - editor.getTopForLineNumber(anchor) : 0;
   let focus = null;
@@ -1817,6 +1978,12 @@ function elsewhereHead(n) {
   return el('div', 'c-section', `${n} comment${n === 1 ? '' : 's'} on files not in this diff`);
 }
 
+function outsideFlag(c, cls) {
+  const f = el('span', cls + ' outside', outsideMarks.get(keyStr(c)));
+  f.title = 'Changed outside this page (a gitr window, another tab, an agent)';
+  return f;
+}
+
 function commentBox(c) {
   const action = (label, title, fn, cls) => {
     const b = el('button', 'c-act' + (cls ? ' ' + cls : ''), label);
@@ -1829,6 +1996,7 @@ function commentBox(c) {
     c.elsewhere ? el('span', 'c-loc', c.lineNo ? `${c.file}:${c.lineNo}` : c.file) : null,
     c.elsewhere ? null : c.orphan ? el('span', 'c-flag', 'orphaned: line no longer in the diff') : null,
     !c.orphan && c.moved ? el('span', 'c-flag', 'moved') : null,
+    outsideMarks.has(keyStr(c)) ? outsideFlag(c, 'c-flag') : null,
     el('span', 'grow'),
     c.kind === 'good' ? null
       : action('accept', 'Resolved: make it a good comment', () => saveComment(c, accepted(c.text), 'good'), 'c-good'),
@@ -2093,6 +2261,13 @@ async function clearComments() {
 }
 
 let flashTimer = 0;
+// A message flashed there stays up; the new text shows when it ends.
+function setTiming(text) {
+  const t = $('timing');
+  if (flashTimer) t.dataset.saved = text;
+  else t.textContent = text;
+}
+
 function flash(msg) {
   const t = $('timing');
   if (!flashTimer) t.dataset.saved = t.textContent;
@@ -2115,6 +2290,7 @@ async function pollChanges() {
   const gen = wordGen, fp = doc.fingerprint;
   try {
     const r = await api('/api/fingerprint', shown);
+    noteVersion(r.version);
     if (gen !== wordGen) return;
     // The list follows the worktree quietly; the diff waits for reload.
     if (r.fingerprint !== commitsFp && commitList) { commitsFp = r.fingerprint; refreshCommits(gen); }
@@ -2129,7 +2305,8 @@ async function pollChanges() {
       }
     }
     // review.json written by a gitr window (or another tab)
-    if (r.review !== commentStamp && !editing) loadComments(gen);
+    // commentStamp is null until a load's comments arrive: nothing yet to compare with
+    if (r.review !== commentStamp && !editing) loadComments(gen, commentStamp !== null);
   } catch { /* transient; next poll retries */ }
 }
 
@@ -2142,16 +2319,18 @@ async function showChanges(gen) {
   if (gen !== wordGen) return;
   const what = $('changed-what');
   what.textContent = '';
-  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const parts = [];
   if (r.rewritten) parts.push(el('span', null, 'history rewritten'));
   else if (r.commits) parts.push(el('span', null, plural(r.commits, 'commit')));
-  if (r.files) {
+  if (r.files && !r.add && !r.del) {
+    // files without + and - lines (binary, empty, renamed)
+    parts.push(el('span', null, plural(r.files, 'changed file')));
+  } else if (r.files) {
     parts.push(el('span', null, [el('span', 'n-add', '+' + r.add), ' ', el('span', 'n-rem', '-' + r.del),
                                  ` in ${plural(r.files, 'file')}`]));
   } else if (!parts.length && r.files === 0) parts.push(el('span', null, 'diff unchanged'));
   if (parts.length) what.append(': ');
-  parts.forEach((p, i) => what.append(...(i ? [', ', p] : [p])));
+  what.append(...joined(parts));
   $('changed').title = 'Since this diff was loaded: '
     + (r.rewritten ? 'HEAD was rebased or reset; ' : r.commits ? `${plural(r.commits, 'new commit')}; ` : '')
     + (r.files ? `${plural(r.add, 'changed line')} would appear and ${r.del} go, in ${plural(r.files, 'file')}`

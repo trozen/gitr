@@ -9,6 +9,8 @@
   --add: #50fa7b;
   --rem: #ff5555;
   --hunk: #ffb86c;
+  /* what the last reload or an outside change brought (read by app.js) */
+  --new: #ffb86c;
   --file: #bd93f9;
   --ren: #ff79c6;
   --note: #f1fa8c;
@@ -99,6 +101,8 @@ h2 .grow { flex: 1; }
   border: solid var(--fg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .8; }
 .dir.collapsed .chev::before { transform: rotate(-45deg); margin: 1px 0 1px 3px; }
 #files .row.dir { color: var(--fg); }
+/* changed since the last load */
+#files .row.new { box-shadow: inset 3px 0 0 var(--new); }
 .n-add { color: var(--add); } .n-rem { color: var(--rem); }
 
 /* Across the whole window: the worktree and its base apply to the file list
@@ -157,8 +161,19 @@ h2 .grow { flex: 1; }
 #base::-webkit-search-cancel-button, #base::-webkit-search-decoration { -webkit-appearance: none; display: none; }
 #base:focus { outline: none; border-color: var(--file); }
 #base.bad { border-color: var(--rem); }
-#changed { color: var(--note); }
+/* Top bar notes: the colour goes on the part that matters (.hi, or the
+   whole text where all of it does). */
+.chip { display: flex; align-items: center; padding: 0 8px; border-radius: 3px; background: var(--sel);
+        white-space: nowrap; }
+.chip-act, .chip-x { margin-left: 4px; padding: 0 6px; background: none; border: none; color: var(--dim); }
+.chip-act:hover, .chip-x:hover { background: none; color: var(--fg); }
+/* a button ending the chip sits flush with its edge */
+.chip > button:last-child { margin-right: -8px; }
+.chip .hi { color: var(--hi); }
 #removed { color: var(--rem); }
+#updated > span { color: var(--note); }
+#news, #outside { --hi: var(--new); }
+#news.missing { color: var(--dim); }
 .opt { display: flex; align-items: center; gap: 4px; color: var(--dim); }
 #editor-wrap { flex: 1; position: relative; min-height: 0; }
 #editor { position: absolute; inset: 0; }
@@ -185,6 +200,11 @@ h2 .grow { flex: 1; }
 }
 .w-add { background: var(--add-hi); border-radius: 2px; }
 .w-rem { background: var(--rem-hi); border-radius: 2px; }
+/* What the last reload brought: a bar at the
+   gutter's left edge on new lines, a line across where old ones went. */
+.m-new { box-shadow: inset 3px 0 0 var(--new); }
+.gone-after { box-shadow: inset 0 -2px 0 var(--new); }
+.gone-before { box-shadow: inset 0 2px 0 var(--new); }
 /* lineNumber() pads with spaces to form the old / new columns */
 .monaco-editor .line-numbers { white-space: pre; }
 
@@ -222,6 +242,7 @@ h2 .grow { flex: 1; }
   color: #fff; font-family: var(--mono); font-weight: bold; }
 .c-kind { color: var(--c); font-weight: bold; font-family: monospace; }
 .c-flag { color: var(--dim); font-style: italic; }
+.c-flag.outside, .cmt .flag.outside { color: var(--new); font-style: normal; }
 .c-quote { font-family: var(--mono); font-size: .92em; color: var(--dim); white-space: pre-wrap; word-break: break-all; }
 .c-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .c-edit { cursor: default; }
@@ -266,13 +287,10 @@ h2 .grow { flex: 1; }
 .ref-label.k-branch.head { font-weight: 700; }
 .ref-label.k-tag { background: var(--note); }
 .ref-label.k-remote { background: var(--hunk); }
-#commit-shown { display: flex; align-items: center; gap: 4px; padding: 0 0 0 8px; border-radius: 3px;
-  background: var(--sel); max-width: 40ch; }
+#commit-shown { max-width: 40ch; }
 #commit-shown-text { overflow: hidden; text-overflow: ellipsis; }
 #commit-shown-text .hash { font-family: var(--mono); font-size: .92em; color: var(--hunk); }
 #commit-shown.gone #commit-shown-text { color: var(--rem); }
-#commit-all { padding: 0 6px; background: none; border: none; color: var(--dim); }
-#commit-all:hover { color: var(--fg); }
 .l-commit { background: rgba(139, 233, 253, .05); }
 #comments-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #comments-count { font-weight: normal; }

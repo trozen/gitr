@@ -77,7 +77,7 @@ with the ability to attach persistent local comments to specific diff lines.
       seen, a skimmed one does not), and the shading is hard to read on the
       narrow minimap. Parked; the per-hunk content keys on that branch are
       the basis for the viewed marks above.
-- [ ] Search within diff (`Ctrl+F`)
+- [ ] Search within diff (`Ctrl+F`) in the Tk window (gitr-serve has Monaco's)
 - [ ] Hunk navigation (`j` / `k` to jump between `@@` hunks within a file)
 - [ ] Jump to `$EDITOR` at the correct line (`o`)
 - [ ] Fold / collapse individual file diffs
@@ -128,18 +128,18 @@ whole diff in one read-only document as in gitr.
 
 ### V1 - gitr parity, multi-repo
 
-- [ ] Project list from a config file, worktrees per project
+- [x] Project list from a config file, worktrees per project
       (`git worktree list --porcelain`), switch worktree by clicking
-- [ ] Diff base per worktree, default `main` / `master`; diff against the
+- [x] Diff base per worktree, default `main` / `master`; diff against the
       merge base including uncommitted and untracked files
-- [ ] Single continuous diff, file list (flat / tree, `+N -N`, per-kind
+- [x] Single continuous diff, file list (tree only, `+N -N`, per-kind
       comment counts), minimap with comment marks, word diff, line numbers,
       sticky file header
-- [ ] File list synced with the diff: scrolling highlights the current file,
+- [x] File list synced with the diff: scrolling highlights the current file,
       clicking a file scrolls to its start
-- [ ] Comments with kinds and presets, same storage as gitr; copy for agent
-- [ ] "Worktree changed" banner with reload (no silent re-render)
-- Mouse navigation only; no Commits panel
+- [x] Comments with kinds and presets, same storage as gitr; copy for agent
+- [x] "Worktree changed" banner with reload (no silent re-render)
+- Mouse navigation only; no Commits panel (a commits pane and Ctrl+P came later)
 
 ### Later
 
@@ -165,7 +165,7 @@ whole diff in one read-only document as in gitr.
       position and open editors stay as they were, so a project that
       needs a reload still shows the pre-reload diff on return (with its
       banner) until reload is clicked
-- [ ] Changes since the last reload: on reload, mark the lines that differ
+- [x] Changes since the last reload: on reload, mark the lines that differ
       from the previous load (per file, the old diff text against the
       new one), so after an agent's follow-up only the new work stands
       out; the marks clear on the next reload
@@ -183,10 +183,17 @@ whole diff in one read-only document as in gitr.
 - [x] Base picker: recent commits of the branch as well (short hash,
       subject, age), so a base a few commits back is a click away rather
       than a typed `HEAD~3`
-- [ ] Notice when `.gitr/review.json` changes from outside (a gitr window,
+- [x] Notice when `.gitr/review.json` changes from outside (a gitr window,
       another tab, an agent or the CLI): the comments already reload on
       their own, silently; say so, e.g. "comments updated: 2 added, 1
       removed", and mark the new ones for a while
+- [ ] Push from the server (Server-Sent Events) instead of polling: the
+      page keeps one `/api/events` connection open; the browser reconnects
+      by itself after a restart and the first message tells the new
+      version, so the "app changed" note comes at once. Worktree and
+      review.json changes could come the same way. To check: a held
+      thread per open tab, and proxies (`tailscale serve`) buffering the
+      stream
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line
@@ -225,6 +232,13 @@ whole diff in one read-only document as in gitr.
       newer one, or to the working tree), listed before the diff
 - [x] Commit rows' right-click menu: copy hash or subject, a range to the
       shown commit, and "use as base" (review the changes after a commit)
+- [ ] Untracked files in the commits pane: an entry of their own below
+      "All changes", above the commits (and uncommitted changes), showing
+      only the untracked files; maybe with an option there to include them
+      in "All changes", taking over from the top bar's untracked checkbox
+- [ ] Commits pane with no commits since the base: it says only "no
+      commits since the base", while with commits the base shows as the
+      boundary commit at the bottom; show the base commit there too
 - [ ] Comment marks in the commits pane: per commit, the comments on lines
       it changed (found with blame on the commented lines), so it shows
       which commits have been reviewed and which not yet

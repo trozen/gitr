@@ -55,18 +55,23 @@ now opens gitr-serve's page for the repository it is run in.
       mode, in a profile of gitr's own so that quitting the browser or its
       session restore leaves gitr's windows alone (else the default browser), and ends on Ctrl+C (closing its
       windows) or when its last window closed: each page holds a
-      server-sent events stream open, and the server stops a few seconds
-      after the last one dropped; pipe mode and `-p` went with the window
+      server-sent events stream open, and the server stops when the last
+      one dropped (waiting a moment only when the page was just asked for
+      again: a reload); on Ctrl+C it tells the pages, which close; pipe mode and `-p` went with the window
 - [ ] `gitr`'s window with the installed app's title bar (its colour, icon
       and name): only an installed web app gets it, an install needs a
       click in the page, and it belongs to one address, port included; so
       one shared port for every repo's `gitr` (one server for all of them),
       installed once and opened with `--app-id`. Dropped for now
-- [ ] Changes pushed on the events stream instead of the page polling
-      for them every few seconds. In gitr-serve too, which needs a way
-      around HTTP/1.1's six connections per host (a few tabs holding a
-      stream each would use them up): one stream per browser, shared
-      between tabs (a SharedWorker or BroadcastChannel), or HTTP/2
+- [x] Changes pushed on the events stream instead of the page polling
+      for them every few seconds, in gitr-serve too: one stream per
+      browser, held by a SharedWorker for all its tabs (HTTP/1.1 allows
+      six connections per host), which posts what each visible tab shows
+      to `/api/watch`. A server thread checks those views every second
+      (once per view, however many tabs) and the worktree list and page
+      version every 10, and sends what changed. The polls stay for when
+      the stream is down (or a browser without SharedWorker). To check:
+      `tailscale serve` passing the stream on unbuffered
 
 ### Annotation storage format
 
@@ -164,13 +169,10 @@ whole diff in one read-only document as in gitr.
       another tab, an agent or the CLI): the comments already reload on
       their own, silently; say so, e.g. "comments updated: 2 added, 1
       removed", and mark the new ones for a while
-- [ ] Push from the server (Server-Sent Events) instead of polling: the
-      page keeps one `/api/events` connection open; the browser reconnects
-      by itself after a restart and the first message tells the new
-      version, so the "app changed" note comes at once. Worktree and
-      review.json changes could come the same way. To check: a held
-      thread per open tab, and proxies (`tailscale serve`) buffering the
-      stream
+- [x] Push from the server (Server-Sent Events) instead of polling: see
+      "Changes pushed on the events stream" above; the stream's first
+      message is the server's version, so the "app changed" note comes as
+      soon as it reconnects after a restart
 - [ ] Keyboard navigation (n / p / Tab), including next / previous comment
       (the top bar arrows do it with the mouse) and `c` to comment on the
       cursor line

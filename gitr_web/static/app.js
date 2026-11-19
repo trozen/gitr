@@ -169,11 +169,12 @@ function init() {
   // itself says the server is gone, and a page asleep finds out on waking.
   checkAlive();
   setInterval(checkAlive, 30000);
+  startEvents();
   $('reload-page').addEventListener('click', reloadPage);
   $('news-close').addEventListener('click', clearNews);
   $('outside-close').addEventListener('click', clearOutside);
-  addEventListener('focus', refreshProjects);
-  document.addEventListener('visibilitychange', refreshProjects);
+  addEventListener('focus', () => refreshProjects());
+  document.addEventListener('visibilitychange', () => refreshProjects());
 }
 
 function initSash() {
@@ -1151,8 +1152,8 @@ function listSignature(projects) {
 // Agents add and remove worktrees and switch branches; the list follows,
 // every PROJECTS_MS while the page is visible and when it comes back.
 let refreshing = false;
-async function refreshProjects() {
-  if (document.hidden || refreshing) return;
+async function refreshProjects(now = false) {
+  if (refreshing || (!now && (document.hidden || pushed))) return;
   refreshing = true;
   try {
     const projects = await api('/api/projects', {});
@@ -1172,7 +1173,7 @@ function noteVersion(v) {
 }
 
 async function checkVersion() {
-  if (document.hidden) return;
+  if (document.hidden || pushed) return;
   try { noteVersion((await api('/api/version', {})).version); }
   catch { /* transient, or the server is restarting */ }
 }
@@ -1324,6 +1325,7 @@ async function showDiff(d, gen, state, since, restore, t0, k = null) {
   const wasViewed = since && doc ? viewedPaths() : new Set();
   doc = d;
   shown = state;
+  watchShown();
   showCommitShown(d.commit);
   $('base').classList.remove('bad');
   $('base').title = 'Any branch, tag or commit; click for a list';
@@ -2665,85 +2667,149 @@ function flash(msg) {
 // meanwhile finds out on waking); a browser lets a page close only the
 // window it opened in, so elsewhere, and for gitr-serve, which may just be
 // restarting, a note says so. Asked twice before giving up, as one
-// failed request may be a hiccup.
-let standalone = false, checking = false, events = null, eventsWanted = false;
+// failed request may be a hiccup. A server that stops on its own says so
+// first (the 'bye' event); this is for one that crashed or was killed.
+let standalone = false, checking = false;
 
-// `gitr` ends when no page holds /api/events open. One page per server
-// does, the holder of a lock its other windows wait for: over HTTP/1.1 a
-// browser keeps about 6 connections per host, which windows holding a
-// stream each would use up (so gitr-serve, with its tabs, has none). When
-// the holder closes, the next window takes the lock and the stream at once,
-// within the server's grace (server.py GRACE_S).
-function holdEvents() {
-  if (eventsWanted) {
-    if (!events && lockHeld) openEvents();
+// --pushed changes ----------------------------------------------------------
+//
+// A shared worker (events.js) holds one /api/events stream for all of this
+// browser's pages of the server, over which the server sends what changed in
+// the view each page shows. While it is open the polls below stand by; when
+// it drops they take over until it is back. The stream is also what tells
+// `gitr` a window is open.
+
+let pushed = false;     // the stream is open: changes come over it
+let port = null;        // to the worker
+let watchN = 0;         // see watchShown
+let watching = null;    // {key, view: the view as JSON} posted last
+let lastFp = null;      // the last change check for it
+const tabId = 'gitr-tab-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+async function startEvents() {
+  if (!window.SharedWorker || !navigator.locks) {
+    // The polls bring the changes; a stream of the page's own still tells
+    // `gitr` that it is open, and when the server stops.
+    const es = new EventSource('/api/events?id=' + tabId);
+    es.addEventListener('bye', () => { es.close(); onEvent({ type: 'bye' }); });
+    es.onerror = () => checkAlive();
     return;
   }
-  eventsWanted = true;
-  if (!navigator.locks) { lockHeld = true; openEvents(); return; }
-  navigator.locks.request('gitr-events', () => {
-    lockHeld = true;
-    openEvents();
-    return new Promise(() => {});  // held until the page goes
+  let v = '';
+  try { v = (await api('/api/version', {})).version; } catch { /* any worker then */ }
+  // per server version: a page loaded after an update gets a worker of the
+  // new code, not the one its older tabs keep alive
+  const w = new SharedWorker('events.js?v=' + encodeURIComponent(v), { name: 'gitr-events' });
+  port = w.port;
+  port.onmessage = (m) => onEvent(m.data);
+  port.start();
+  // held while the page lives; the worker waits for it to learn that it went
+  navigator.locks.request(tabId, () => {
+    port.postMessage({ type: 'hello', tab: tabId });
+    watchShown();
+    return new Promise(() => {});
   });
+  document.addEventListener('visibilitychange', watchShown);
 }
-let lockHeld = false;
 
-function openEvents() {
-  events = new EventSource('/api/events');
-  events.onerror = () => checkAlive();
+function onEvent(m) {
+  if (m.type === 'open') {
+    // changes to the list while the stream was down came to no one
+    if (!pushed) refreshProjects(true);
+    pushed = true;
+    $('gone').hidden = true;
+    return;
+  }
+  // the server says it is stopping: no need to ask whether it is still there
+  if (m.type === 'bye') {
+    if (standalone) window.close();
+    $('gone').hidden = false;
+    return;
+  }
+  if (m.type === 'error') { pushed = false; checkAlive(); return; }
+  if (m.type === 'version') return noteVersion(m.data);
+  if (m.type === 'projects') {
+    if (listSignature(m.data) !== projectsSig) renderProjects(m.data);
+    return;
+  }
+  if (m.type === 'fp' && watching?.key === m.data.key) {
+    lastFp = m.data;
+    applyChanges(m.data);
+  }
 }
+
+// The view on screen, none while hidden (nothing is checked for it then).
+// Each load gets a key of its own: the server answers a new one at once, and
+// nothing checked before the diff loaded can come in after it.
+function watchShown() {
+  if (!port) return;
+  const view = document.hidden || !shown || !worktrees.has(shown.wt) ? null
+    : { wt: shown.wt, base: shown.base, commit: shown.commit || null, doc: doc?.id };
+  const v = view && JSON.stringify(view);
+  if ((watching?.view ?? null) === v) return;
+  // the worker passes on the keys of all of the browser's pages
+  watching = v && { key: `${tabId}:${watchN++}`, view: v };
+  lastFp = null;
+  port.postMessage({ type: 'watch', sub: view && { key: watching.key, wt: view.wt, base: view.base, commit: view.commit } });
+}
+
 async function checkAlive() {
   if (checking) return;
   checking = true;
   try {
     for (let i = 0; i < 2; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 250));
       try {
         standalone = (await api('/api/alive', {})).standalone;
         $('gone').hidden = true;
-        if (standalone) holdEvents();
         return;
-      } catch { await new Promise((r) => setTimeout(r, 1000)); }
+      } catch { /* once more */ }
     }
     if (standalone) window.close();
     $('gone').hidden = false;
-    // a page that stays (it may not close itself) stops retrying every
-    // second; checkAlive's own interval opens it again once the server is back
-    events?.close();
-    events = null;
   } finally { checking = false; }
 }
 
 async function pollChanges() {
   if (!shown || document.hidden || !worktrees.has(shown.wt)) return;
+  watchShown();
+  // Pushed: the last answer again, for what it had to leave for later (a
+  // comment being edited, the summary at most every CHANGES_MS).
+  if (pushed) { if (lastFp) applyChanges(lastFp); return; }
   // A load started while the request was out replaces the doc, so its
   // answer no longer applies.
-  const gen = wordGen, fp = doc.fingerprint;
+  const gen = wordGen;
   try {
     const r = await api('/api/fingerprint', shown);
     noteVersion(r.version);
-    if (gen !== wordGen) return;
-    // The list follows the worktree quietly, untracked files included (it
-    // counts them); the diff waits for reload.
-    if (r.fingerprintAll !== commitsFp && commitList) { commitsFp = r.fingerprintAll; refreshCommits(gen); }
-    // a view showing the untracked files changes with them, the others not
-    const now = doc.fingerprintKind === 'all' ? r.fingerprintAll : r.fingerprint;
-    if (now !== fp) {
-      $('changed').hidden = false;
-      // Each summary runs a whole git diff; while an agent keeps editing,
-      // at most one per CHANGES_MS. A later poll catches up with the last.
-      if (now !== changesFp && Date.now() - changesAt >= CHANGES_MS) {
-        changesFp = now;
-        changesAt = Date.now();
-        showChanges(gen);
-      }
-    }
-    // review.json written by another tab, gitr comments or an agent
-    // commentStamp is null until a load's comments arrive: nothing yet to compare with
-    if (r.review !== commentStamp && !editing) loadComments(gen, commentStamp !== null);
-    // not while a mark is being saved: what is stored may not have it yet
-    if (r.viewed !== viewedStamp && !viewedSaving) reloadViewed(gen);
+    if (gen === wordGen && !pushed) applyChanges(r);
   } catch { checkAlive(); }
+}
+
+// An answer of /api/fingerprint, polled or pushed, for the diff on screen.
+function applyChanges(r) {
+  const gen = wordGen, fp = doc.fingerprint;
+  // The list follows the worktree quietly, untracked files included (it
+  // counts them); the diff waits for reload.
+  if (r.fingerprintAll !== commitsFp && commitList) { commitsFp = r.fingerprintAll; refreshCommits(gen); }
+  // a view showing the untracked files changes with them, the others not
+  const now = doc.fingerprintKind === 'all' ? r.fingerprintAll : r.fingerprint;
+  if (now !== fp) {
+    $('changed').hidden = false;
+    // Each summary runs a whole git diff; while an agent keeps editing,
+    // at most one per CHANGES_MS. A later poll catches up with the last
+    // (pollChanges, also when pushed).
+    if (now !== changesFp && Date.now() - changesAt >= CHANGES_MS) {
+      changesFp = now;
+      changesAt = Date.now();
+      showChanges(gen);
+    }
+  }
+  // review.json written by another tab, gitr comments or an agent
+  // commentStamp is null until a load's comments arrive: nothing yet to compare with
+  if (r.review !== commentStamp && !editing) loadComments(gen, commentStamp !== null);
+  // not while a mark is being saved: what is stored may not have it yet
+  if (r.viewed !== viewedStamp && !viewedSaving) reloadViewed(gen);
 }
 
 // Measured against the loaded diff, not the base: what a reload would add.

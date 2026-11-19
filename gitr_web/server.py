@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 import zlib
 from collections import OrderedDict
@@ -1308,6 +1309,183 @@ def fingerprint(wt: str, merge_base: str, stat_untracked: bool) -> 'tuple[str, s
     return tracked.hexdigest()[:16], every.hexdigest()[:16]
 
 
+# --pushed changes ----------------------------------------------------------------
+#
+# Each browser holds one /api/events stream for all its pages of a server
+# (static/events.js, a shared worker: over HTTP/1.1 a browser keeps about 6
+# connections per host, which a stream per tab would use up), and posts to
+# /api/watch what its pages show. A thread checks those worktrees and sends
+# what changed: once per view however many tabs show it, and nothing for
+# hidden tabs, which post nothing. git has no change notification, and the
+# standard library no file watching, so it is a check on a timer still.
+
+WATCH_S = 1.0   # how often the worktrees pages show are checked
+LIST_S = 10.0   # ... the worktree list and the page version
+
+
+class Stream:
+    """One /api/events connection and what its pages show: key -> (wt,
+    base, commit), a key per page and load, so that its first event comes
+    after the page's diff, never from before it."""
+
+    def __init__(self) -> None:
+        self.subs: dict[str, tuple[str, str, 'str | None']] = {}
+        self.sent: dict[str, dict] = {}
+        self.out: list[bytes] = []
+        self.lock = threading.Lock()
+        # wakes the connection's thread, which waits for the socket too
+        self.wake_r, self.wake_w = socket.socketpair()
+
+    def push(self, event: str, data) -> None:
+        with self.lock:
+            self.out.append(f'event: {event}\ndata: {json.dumps(data, separators=(",", ":"))}\n\n'.encode())
+        try:
+            self.wake_w.send(b'.')
+        except OSError:
+            pass
+
+    def take(self) -> bytes:
+        with self.lock:
+            out, self.out = b''.join(self.out), []
+        return out
+
+    def close(self) -> None:
+        self.wake_r.close()
+        self.wake_w.close()
+
+
+class Events:
+    def __init__(self) -> None:
+        self.streams: dict[str, Stream] = {}
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.projects_sig: 'str | None' = None
+        self.version: 'str | None' = None
+        self.due: dict[tuple, float] = {}  # view -> when to check it next
+
+    def watch(self, sid: str, subs: dict) -> None:
+        if not isinstance(subs, dict):
+            raise ValueError('subs')
+        parsed = {}
+        for key, sub in subs.items():
+            wt, base, commit = sub['wt'], sub['base'], sub.get('commit')
+            if not all(isinstance(v, str) for v in (key, wt, base)) or not isinstance(commit, (str, type(None))):
+                raise ValueError('sub')
+            parsed[key] = (wt, base, commit)
+        with self.lock:
+            st = self.streams.get(sid)
+            if st is None:
+                raise KeyError('no such stream')
+            st.subs = parsed
+            st.sent = {k: v for k, v in st.sent.items() if k in parsed}
+        self.wake.set()
+
+    def run(self, state: 'State') -> None:
+        list_at = 0.0
+        while True:
+            self.wake.wait(WATCH_S)
+            self.wake.clear()
+            with self.lock:
+                streams = list(self.streams.values())
+            if not streams:
+                continue
+            # Whatever goes wrong, the thread goes on: the pages, which poll
+            # no more while their stream is open, would hear of nothing again.
+            try:
+                if time.monotonic() - list_at >= LIST_S:
+                    list_at = time.monotonic()
+                    self._lists(state, streams)
+                self._views(state, streams)
+            except Exception:
+                traceback.print_exc()
+
+    def _views(self, state: 'State', streams: list[Stream]) -> None:
+        seen: dict[tuple, 'dict | None'] = {}
+        shown = set()
+        for st in streams:
+            with self.lock:
+                subs = list(st.subs.items())
+            for key, sub in subs:
+                wt, base, commit = sub
+                view = (wt, base, shows_untracked(commit))
+                shown.add(view)
+                if view not in seen:
+                    # A view slow to check (git status in a big repo) is
+                    # checked less often, so that it neither keeps a core busy
+                    # nor holds up the others; a new page's view at once.
+                    if key in st.sent and time.monotonic() < self.due.get(view, 0):
+                        continue
+                    t = time.monotonic()
+                    seen[view] = view_stamps(state, *view)
+                    self.due[view] = t + max(WATCH_S, 5 * (time.monotonic() - t))
+                data = seen[view]
+                with self.lock:
+                    # unless the page posted another view meanwhile
+                    if data is not None and st.subs.get(key) == sub and st.sent.get(key) != data:
+                        st.sent[key] = data
+                        st.push('fp', {'key': key, **data})
+        self.due = {v: t for v, t in self.due.items() if v in shown}
+
+    def _lists(self, state: 'State', streams: list[Stream]) -> None:
+        version = page_version()
+        if version != self.version:
+            self.version = version
+            for st in streams:
+                st.push('version', version)
+        projects = state.projects()
+        # what the page's list shows (app.js listSignature); positions and
+        # settings change with every scroll and are no news
+        sig = json.dumps([[p['name'], p['path'], p.get('error'),
+                           [[w['path'], w.get('branch'), w.get('head'), w.get('detached')]
+                            for w in p['worktrees']]] for p in projects])
+        if sig != self.projects_sig:
+            self.projects_sig = sig
+            for st in streams:
+                st.push('projects', projects)
+
+
+    def bye(self) -> None:
+        """Tell every page the server is stopping (`gitr`'s windows close),
+        and give the streams a moment to send it."""
+        with self.lock:
+            streams = list(self.streams.values())
+        for st in streams:
+            st.push('bye', None)
+        end = time.monotonic() + 1
+        while time.monotonic() < end and any(st.out for st in streams):
+            time.sleep(0.02)
+        time.sleep(0.05)  # taken is not yet written
+
+
+EVENTS = Events()
+
+
+def serve(srv: ThreadingHTTPServer) -> None:
+    """Until Ctrl+C, a kill, or shutdown(); then the pages are told."""
+    def stop(*_) -> None:
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    threading.Thread(target=EVENTS.run, args=(Handler.state,), daemon=True).start()
+    try:
+        srv.serve_forever(poll_interval=0.1)  # shutdown() waits for a poll
+    except KeyboardInterrupt:
+        pass
+    EVENTS.bye()
+
+
+def view_stamps(state: 'State', wt: str, base: str, untracked: bool) -> 'dict | None':
+    """What /api/fingerprint answers, for the events stream; None for a view
+    that cannot be checked now (a worktree gone, a base deleted): the page
+    learns about those from the worktree list or its next load."""
+    try:
+        wt = state.check_worktree(wt)
+        tracked, every = fingerprint(wt, merge_base(wt, base), untracked)
+        return {'fingerprint': tracked, 'fingerprintAll': every,
+                'review': gitr_stamp(wt, 'review.json'), 'viewed': gitr_stamp(wt, 'viewed.json')}
+    except (GitError, OSError, ValueError):
+        return None
+
+
 # --http --------------------------------------------------------------------------
 
 APP_NAME = 'gitr - ' + socket.gethostname().split('.')[0]
@@ -1328,6 +1506,9 @@ class Handler(BaseHTTPRequestHandler):
     pages_seen = False
     last_page_left = 0.0
     expect_until = 0.0  # see EXPECT_S
+    busy = 0  # requests being answered, the events streams aside
+    last_page_request = 0.0  # the page itself asked for, see GRACE_S
+    last_stream_open = 0.0
     pages_lock = threading.Lock()
 
     def log_message(self, fmt: str, *args) -> None:
@@ -1351,35 +1532,46 @@ class Handler(BaseHTTPRequestHandler):
             # poll cut off); nobody is left to answer.
             self.close_connection = True
 
-    def _events(self) -> None:
-        """A server-sent events stream held open by each page of `gitr`,
-        so the server knows when the last one closed: the browser closes the
-        socket at once, also when it crashes. Nothing is sent on it yet but
-        keep-alive comments; it is where pushed changes would go."""
+    def _events(self, sid: str) -> None:
+        """The events stream of a browser's pages (see Events), which also
+        tells `gitr` that a page is open: the browser closes the socket at
+        once when the last page goes, also when it crashes."""
         self.close_connection = True
+        if not sid or len(sid) > 64:
+            return self._json({'error': 'bad stream id'}, 400)
+        st = Stream()
+        # registered before the answer: the page posts /api/watch once it is open
+        with EVENTS.lock:
+            EVENTS.streams[sid] = st
+        with Handler.pages_lock:
+            Handler.pages += 1
+            Handler.pages_seen = True
+            Handler.last_stream_open = time.monotonic()
         try:
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
-        except OSError:
-            return  # the page went as it connected
-        with Handler.pages_lock:
-            Handler.pages += 1
-            Handler.pages_seen = True
-        try:
-            self.wfile.write(b'retry: 1000\n\n')
+            # a page that waited through a restart learns the version at once
+            self.wfile.write(f'event: version\ndata: {json.dumps(page_version())}\n\n'.encode())
             self.wfile.flush()
             while True:
+                ready, _, _ = select.select([self.connection, st.wake_r], [], [], 15)
                 # The page sends nothing, so readable means closed.
-                ready, _, _ = select.select([self.connection], [], [], 15)
-                if ready and not self.connection.recv(1):
+                if self.connection in ready and not self.connection.recv(1):
                     break
-                self.wfile.write(b': ping\n\n')
+                if st.wake_r in ready:
+                    st.wake_r.recv(4096)
+                self.wfile.write(st.take() or b': ping\n\n')
                 self.wfile.flush()
         except OSError:
             pass
         finally:
+            with EVENTS.lock:
+                # a reconnect with the same id may have replaced it already
+                if EVENTS.streams.get(sid) is st:
+                    del EVENTS.streams[sid]
+            st.close()
             with Handler.pages_lock:
                 Handler.pages -= 1
                 Handler.last_page_left = time.monotonic()
@@ -1396,14 +1588,33 @@ class Handler(BaseHTTPRequestHandler):
         return host in ALLOWED_HOSTS
 
     def do_GET(self) -> None:
+        if urlparse(self.path).path == '/api/events':
+            return self._get()  # held open: it counts as a page, not as a request
+        self._counted(self._get)
+
+    def do_POST(self) -> None:
+        self._counted(self._post)
+
+    def _counted(self, handle) -> None:
+        # A request still being answered (a big diff after a reload) keeps
+        # `gitr` up, as an open page does.
+        with Handler.pages_lock:
+            Handler.busy += 1
+        try:
+            handle()
+        finally:
+            with Handler.pages_lock:
+                Handler.busy -= 1
+                Handler.last_request = time.monotonic()
+
+    def _get(self) -> None:
         if not self._host_ok():
             return self._send(HTTPStatus.FORBIDDEN, b'forbidden host', 'text/plain')
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        Handler.last_request = time.monotonic()
         try:
             if url.path == '/api/events':
-                return self._events()
+                return self._events(q.get('id', ''))
             if url.path == '/api/alive':
                 return self._json({'standalone': Handler.standalone})
             if url.path == '/api/version':
@@ -1450,10 +1661,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'error': str(e)}, 400)
         self._static(url.path)
 
-    def do_POST(self) -> None:
+    def _post(self) -> None:
         if not self._host_ok():
             return self._send(HTTPStatus.FORBIDDEN, b'forbidden host', 'text/plain')
-        Handler.last_request = time.monotonic()
         # A form on another site can post here (the Host is ours then), but
         # only with a "simple" content type and its own Origin; a JSON body
         # needs a CORS preflight, which this server never grants.
@@ -1475,6 +1685,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.save_settings(req))
             if path == '/api/viewed':
                 return self._json(self.state.mark_viewed(req))
+            if path == '/api/watch':
+                EVENTS.watch(req['id'], req['subs'])
+                return self._json({})
             if path == '/api/comments/clear':
                 return self._json(self.state.clear_comments(req['wt'], req['id']))
         except KeyError as e:
@@ -1487,6 +1700,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _static(self, path: str) -> None:
         rel = 'index.html' if path in ('', '/') else path.lstrip('/')
+        if rel == 'index.html':
+            Handler.last_page_request = time.monotonic()
         p = (STATIC_DIR / rel).resolve()
         if STATIC_DIR not in p.parents or not p.is_file():
             return self._send(HTTPStatus.NOT_FOUND, b'not found', 'text/plain')
@@ -1675,10 +1890,7 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
     width = max(len(r['name']) for r in repos)
     for r in repos:
         print(f"  {r['name']:<{width}}  {tilde(r['path'])}", file=sys.stderr)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    serve(srv)
 
 
 # --gitr: one repo, in a window of its own -----------------------------------
@@ -1688,11 +1900,14 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
 # closed. The page's .gitr files are shared with gitr-serve, so the two can
 # show the same worktree.
 
-# With no page holding the events stream, the server stops this long after
-# the last one went (a reloaded page connects again within it), or, when no
-# page ever connected (the address printed, a browser that never opened it),
-# this long after the last request.
-GRACE_S = 10
+# The last page's stream closing is the page going: the server stops then,
+# once no request is being answered. Unless it is a reload, which asks for
+# the new page before the old one goes, so after the old one's stream
+# opened (a window just opened asked for it before): then the new page gets
+# GRACE_S without a request to connect. When no page ever connected (the
+# address printed, a browser that never opened it), the server stops IDLE_S
+# after the last request.
+GRACE_S = 2
 IDLE_S = 180
 # a window another `gitr` opened on this server (serving()) gets this long to
 # connect: a browser starting up may take longer than GRACE_S
@@ -1900,20 +2115,23 @@ def standalone(argv: list[str], prog: str = 'gitr') -> None:
 
     def watch() -> None:
         while True:
-            time.sleep(0.5)
+            time.sleep(0.1)
             with Handler.pages_lock:
-                if Handler.pages or time.monotonic() < Handler.expect_until:
+                if Handler.pages or Handler.busy or time.monotonic() < Handler.expect_until:
                     continue
                 quiet = time.monotonic() - max(Handler.last_page_left, Handler.last_request)
-                if quiet > (GRACE_S if Handler.pages_seen else IDLE_S):
+                if not Handler.pages_seen:
+                    wait = IDLE_S
+                elif Handler.last_page_request > Handler.last_stream_open:
+                    wait = GRACE_S
+                else:
+                    wait = 0
+                if quiet > wait:
                     break
         srv.shutdown()
 
     threading.Thread(target=watch, daemon=True).start()
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    serve(srv)
 
 
 if __name__ == '__main__':

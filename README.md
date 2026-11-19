@@ -43,7 +43,8 @@ browsing: quitting the browser leaves it open, and the browser's session
 restore never brings back a window of a gitr that has stopped. The base is the one last used for the
 worktree, else `main` or `master`; the switcher lists the repository's
 other worktrees. It runs until Ctrl+C, which closes its windows too, or
-until its last window closes (a page reload does not count). A browser
+until its last window closes (a page reload does not count); either end
+follows within a fraction of a second. A browser
 that puts a minimized window to sleep to save memory closes its
 connection, which counts as closing it: the window then closes when it
 wakes. A page that cannot close itself (a tab in a browser without app
@@ -178,7 +179,10 @@ are set in the settings popup (the gear), per browser. Monaco is
 bundled in the package, so the page needs no internet access.
 
 When the worktree changes, a "worktree changed" note with a reload button
-appears in the top bar (the view never re-renders by itself). It says what
+appears in the top bar within about a second (the view never re-renders by
+itself). The server checks the worktrees open pages show and sends what
+changed over one stream per browser, shared by its tabs; hidden tabs are
+not checked for. It says what
 a reload would bring, compared with the diff on screen: the new commits,
 and how many changed lines would appear and go, in how many files. After
 the reload those changes stay marked, so an agent's follow-up stands out

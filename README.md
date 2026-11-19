@@ -1,6 +1,8 @@
 # gitr
 
-Lightweight terminal-launched Git diff viewer. Two-panel GUI: coloured diff on the left, clickable file list on the right.
+A Git diff viewer for reviewing what coding agents changed, in a browser
+window: the whole review against a base as one diff, with a file list,
+comments an agent can read back, viewed marks, and the branch's commits.
 
 ## Install
 
@@ -17,29 +19,52 @@ alias gitr=~/path/to/gitr/gitr.py
 ## Usage
 
 ```bash
-gitr                         # git diff (unstaged changes)
-gitr master                  # git diff master (to working tree)
-gitr --merge-base master     # diff from common ancestor to working tree
-gitr master HEAD             # git diff master HEAD (committed only)
-
-git diff | gitr              # pipe a patch
-gitr -                       # read stdin explicitly
-gitr -p patch.diff           # read from a patch file
+gitr                         # this repository's review in a window
+gitr master                  # ... against master
+gitr -- comments             # a base named like one of gitr's commands
+gitr --browser list          # the browsers gitr found, the one it uses marked
+gitr --browser vivaldi       # that one (a listed name, or a path)
+gitr --browser default       # a tab in the default browser
+gitr --browser none          # only print the address
 ```
 
-`gitr diff ...` is the same as `gitr ...`; a ref named like one of gitr's
-commands (`diff`, `export`, `comments`, `serve`, `help`) needs it, or a
-`--` before it: `gitr diff comments`, `gitr -- comments`.
+`GITR_BROWSER` takes the same values, for a choice that sticks; `--browser`
+wins over it.
+
+`gitr` serves the repository it is run in, alone, and opens the page on the
+current worktree: in a Chromium-family browser's app mode (a window with no
+tabs or address bar) when one is installed (Chrome, Chromium, Edge, Brave,
+Vivaldi, Opera; also as a snap or a Flatpak), else in a tab of the default
+browser (Firefox, Safari), where everything works the same but the tab
+cannot close itself. The app window runs in a browser profile of
+gitr's own (under `~/.local/state/gitr/browsers/`; a snap's or a Flatpak's
+in its own folder, which its sandbox can write), apart from your
+browsing: quitting the browser leaves it open, and the browser's session
+restore never brings back a window of a gitr that has stopped. The base is the one last used for the
+worktree, else `main` or `master`; the switcher lists the repository's
+other worktrees. It runs until Ctrl+C, which closes its windows too, or
+until its last window closes (a page reload does not count). A browser
+that puts a minimized window to sleep to save memory closes its
+connection, which counts as closing it: the window then closes when it
+wakes. A page that cannot close itself (a tab in a browser without app
+mode) says "server stopped" instead, and reconnects when `gitr` runs
+again. The window opens where the last one was closed. Each repository
+gets a port of its own, the same every time, so the page's settings (font
+sizes, wrapping) stay with it; running `gitr` again
+while one serves the repository just opens another window on it. Over ssh,
+with no screen to open the window on, it prints the address instead. The
+page is the same as gitr-serve's below, which describes it.
 
 ## Comments from the command line
 
-The review comments (the window's and gitr-serve's, in `.gitr/review.json`
-of the repository) can be read and written without a window, so an agent
-or a script can take part in a review:
+The review comments (in `.gitr/review.json` of the repository) can be read
+and written from the terminal, so an agent or a script can take part in a
+review:
 
 ```bash
 gitr export master                       # all comments as markdown for an agent
-gitr export --kinds bad,note master      # only these kinds (also: gitr --export)
+gitr export --kinds bad,note master      # only these kinds
+gitr export -p change.diff               # placed on a patch (- for stdin)
 gitr comments list [--kinds bad] [src/]  # one line each: id, path:line, kind, text
 gitr comments list --full                # with the whole texts (--json for scripts)
 gitr comments add src/foo.py:42 "this leaks the handle" --kind bad
@@ -49,19 +74,18 @@ gitr comments rm src/foo.py:42           # by id (any unique prefix) or path:lin
 ```
 
 A comment from `add` goes on that line of the file as it is in the working
-tree, with no diff involved: the window and gitr-serve show it on that
+tree, with no diff involved: the page shows it on that
 line whether their diff has it added or unchanged (a line outside every
 hunk is listed after the diff). `list` gives the lines as they are now,
 flagged when a line's text changed, its file is gone, or it is a removed
-line (a comment from a window or gitr-serve). A line takes one
-comment from `add`; remove the old one first, or edit it in a window.
+line (a comment from the page). A line takes one
+comment from `add`; remove the old one first, or edit it in the page.
 
 ## gitr-serve
 
-`gitr-serve` is the same diff view and review in a browser, for several
-repositories and all their worktrees. It runs where the repositories are
-(e.g. a remote machine with agents working in worktrees), in the foreground,
-and needs no Tk.
+`gitr-serve` is the same page for several repositories and all their
+worktrees. It runs where the repositories are (e.g. a remote machine with
+agents working in worktrees), in the foreground.
 
 ```bash
 gitr-serve ~/dev/repo-a ~/dev/repo-b         # http://127.0.0.1:4487/
@@ -234,11 +258,11 @@ it the base, to review only what came after it. Comments can be read and written
 placed on that commit's version of the file, and the agent export always
 describes the whole review and the untracked files (so a comment on a file
 an agent created but did not add keeps its line).
-Comments are stored in the worktree's `.gitr/review.json`, the same file a
-gitr window uses, so a review can move between the two. "copy for agent"
+Comments are stored in the worktree's `.gitr/review.json`, which `gitr`
+and gitr-serve share. "copy for agent"
 puts the agent export on the clipboard; an agent in the worktree can read
-the same with `gitr export` (or `gitr comments list`, see above). When `review.json` changes from outside the page (a gitr
-window, another tab, an agent), the comments reload by themselves, a note
+the same with `gitr export` (or `gitr comments list`, see above). When `review.json` changes from outside the page (another
+tab, `gitr comments`, an agent), the comments reload by themselves, a note
 in the top bar says how many were added, edited and removed, and the added
 and edited ones are flagged; the note's x clears the flags, which otherwise
 stay until the next such change or another diff. Keep `.gitr/` out of commits (e.g. in a global gitignore), or
@@ -246,7 +270,7 @@ agents may commit it.
 
 ## Requirements
 
-Python 3.10+, Tkinter (included in most Python distributions). No other dependencies.
+Python 3.10+, no other dependencies (the page's Monaco editor is bundled), and a browser.
 
 ## Credits
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gitr"
 version = "0.1.0.dev0"
-description = "Lightweight Git diff viewer"
+description = "Review coding agents' changes: a Git diff viewer in the browser"
 requires-python = ">=3.10"
 
 [project.scripts]

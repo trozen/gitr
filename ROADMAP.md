@@ -2,59 +2,19 @@
 
 ## Overview
 
-`gitr` is a lightweight Git diff viewer and code review annotation tool.
+`gitr` is a Git diff viewer and code review annotation tool, in the browser.
 It fills the gap between `gitk` (great for history browsing, no branch diff) and
-full Git GUIs (too heavy) or web-based review tools (require a server).
+full Git GUIs (too heavy) or hosted review tools (need a forge).
 
 Primary use case: reviewing LLM-agent-generated code across one or more branches,
 with the ability to attach persistent local comments to specific diff lines.
 
+gitr began as a Tk window (`git diff | gitr`, `gitr master`): a diff with a
+file list, a minimap, word diff, line comments in `.gitr/review.json` and
+the agent export. gitr-serve below grew from it and replaced it: `gitr`
+now opens gitr-serve's page for the repository it is run in.
+
 ---
-
-## V1 - Diff Viewer + Annotations
-
-- [x] Pipe-only: `git diff ... | gitr`
-- [x] Direct invocation: `gitr master`, `gitr master HEAD`, `gitr --merge-base master`
-- [x] Read from patch file: `gitr -p patch.diff`
-- [x] Two-panel layout: diff on left, file list on right
-- [x] File list: flat and tree view, status badge (A/M/D/R), per-file `+N -N` counts
-- [x] Diff view: unified diff with coloured +/- lines, hunk separators
-- [x] Sticky file header while scrolling
-- [x] Minimap, VS Code style (1 px per character), with viewport indicator;
-      comments shown as coloured bands
-- [x] Smooth scrolling, keyboard navigation (n/p/Tab for next/prev file)
-- [x] Config persistence: wrap, tree view, word diff, line numbers
-- [x] Word-level diff: highlight changed words, dim unchanged words within changed
-      lines; optional collapsing of re-indented lines
-- [x] Line numbers in a gutter: off / new / old+new (`l`)
-- [x] Reload the git source without restarting (`r`, F5)
-- [x] Large diffs: skeleton-first render behind a progress label, word diff
-      applied afterwards from the visible region outward
-- [x] Hover ruler on diff lines with `+comment (a)` and `copy (c)`; copy puts
-      `path:line` plus the line(s) and their comments on the clipboard, in a
-      diff code fence so a markdown renderer keeps the +/- markers (the context
-      menu has a raw variant without the fence)
-- [x] Comments and Commits panels above the file list; comments dumped to the
-      terminal on exit (and on demand), Clear all with confirmation and a
-      timestamped backup
-- [x] Ctrl+C in the terminal closes the app like Ctrl+W
-- [x] Inline annotations: hover button, `a` or the context menu opens an inline
-      editor; the saved comment renders as a bar below the line
-- [x] Comments stored in `.gitr/review.json` (repo-local) with file snapshots in
-      `.gitr/snapshots/`
-- [x] Comment kinds: note / good / bad, each with a colour and a text marker
-      (`>>`, `++`, `!!`) used on screen and in the panels;
-      one-click presets and a kind submenu in the context menu, a kind button on
-      the comment and in the editor (Ctrl+1/2/3)
-- [x] Comment markers on an overview strip beside the scrollbar
-- [x] Commented files marked in file list: per-kind comment counts (`>>2 ++1 !!3`) in the kind colours after the `+N -N` stats
-- [x] Export for coding agents: Review > "Copy for agent" (all, or notes + bad,
-      `Ctrl+Shift+C` / `Ctrl+Shift+X`), per comment from its context menu, and
-      `gitr --export [--kinds bad,note] [refs]` printing the same text without a window
-- [x] Robust comment anchoring: each comment is anchored to a snapshot of the
-      file taken when it was written; on load the snapshot is diffed against the
-      current file to remap the line, so comments survive edits, rebases and
-      merges (moved ones are flagged with `~`)
 
 ## Future
 
@@ -64,11 +24,8 @@ with the ability to attach persistent local comments to specific diff lines.
       overlaid and switchable: off (plain file), inline unified, or two
       files side by side. The point is to see the changed lines in the
       context of the whole file, not just the hunks.
-- [ ] Viewed marks in the Tk window: gitr-serve has them (per hunk under a
-      content key in `.gitr/viewed.json`, set per file or hunk); the window
-      would read and write the same file, shown in the file list, the
-      overview strip and the minimap. A variant worth trying: a file counts
-      as viewed automatically once the view scrolled past its end.
+- [ ] Viewed marks set automatically: a file counts as viewed once the
+      view scrolled past its end (a variant to try)
 - [ ] Fog of war (experiment, branch `fog-of-war`): per-line exposure while
       on screen, minimap rows wiping clear after a dwell, seen state per hunk
       in `.gitr/seen.json`. Tried in use: the time-based per-line signal is
@@ -76,13 +33,11 @@ with the ability to attach persistent local comments to specific diff lines.
       seen, a skimmed one does not), and the shading is hard to read on the
       narrow minimap. Parked; the per-hunk content keys on that branch are
       the basis for the viewed marks above.
-- [ ] Search within diff (`Ctrl+F`) in the Tk window (gitr-serve has Monaco's)
 - [ ] Hunk navigation (`j` / `k` to jump between `@@` hunks within a file)
 - [ ] Jump to `$EDITOR` at the correct line (`o`)
 - [ ] Fold / collapse individual file diffs
-- [ ] Syntax highlighting per language (no extra deps — use `re`-based tokeniser)
-- [ ] Font size adjustment (`Ctrl++` / `Ctrl+-`)
-- [ ] Color theme override via `config.json`
+- [ ] Syntax highlighting per language (no extra deps; or Monaco's own)
+- [ ] Color theme override
 - [ ] Keyboard shortcut help (`?`)
 - [ ] Export diff as HTML
 - [x] Comments from the command line: `gitr comments list|add|rm|accept`
@@ -92,9 +47,26 @@ with the ability to attach persistent local comments to specific diff lines.
       added and an unchanged line alike
 - [ ] Removed lines from the CLI (`path:-42` against a base) and editing
       a comment's text (`gitr comments edit`)
-- [ ] Subcommands: `gitr diff|export|comments|serve` are there (plain
-      `gitr` is `gitr diff`); to come: `gitr serve start|stop|status`
-      (see gitr-serve's daemon item) and the viewer as the web page
+- [x] Subcommands: `gitr export|comments|serve`; plain `gitr [base]` is
+      the review of the repository it is run in
+- [x] The Tk window replaced by the page: `gitr` serves the repository
+      alone on a port of its own (the same every time, so the page's
+      settings stored in the browser stay), opens it in a Chromium-family browser's app
+      mode, in a profile of gitr's own so that quitting the browser or its
+      session restore leaves gitr's windows alone (else the default browser), and ends on Ctrl+C (closing its
+      windows) or when its last window closed: each page holds a
+      server-sent events stream open, and the server stops a few seconds
+      after the last one dropped; pipe mode and `-p` went with the window
+- [ ] `gitr`'s window with the installed app's title bar (its colour, icon
+      and name): only an installed web app gets it, an install needs a
+      click in the page, and it belongs to one address, port included; so
+      one shared port for every repo's `gitr` (one server for all of them),
+      installed once and opened with `--app-id`. Dropped for now
+- [ ] Changes pushed on the events stream instead of the page polling
+      for them every few seconds. In gitr-serve too, which needs a way
+      around HTTP/1.1's six connections per host (a few tabs holding a
+      stream each would use them up): one stream per browser, shared
+      between tabs (a SharedWorker or BroadcastChannel), or HTTP/2
 
 ### Annotation storage format
 
@@ -259,6 +231,9 @@ whole diff in one read-only document as in gitr.
 - [ ] Comment marks in the commits pane: per commit, the comments on lines
       it changed (found with blame on the commented lines), so it shows
       which commits have been reviewed and which not yet
+- [ ] Older commits in the commits pane: a number of commits before the
+      base (configurable, or a fixed number), faded like the base and not
+      part of "All changes", to look at or pick as a single commit
 - [ ] Phone view (Android, as an installed web app over `tailscale serve`):
       Monaco is not supported on mobile browsers and our comment controls
       need hover and right-click, so a separate light page rather than the
@@ -266,18 +241,13 @@ whole diff in one read-only document as in gitr.
       one file at a time with a file picker, tap a line to comment, the
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
-- [ ] Replace the Tk window with the web view: `gitr` becomes a launcher
-      for a one-diff `gitr-serve`, so there is one UI to maintain. Steps:
-      1. A one-diff mode in gitr-serve: refs or a piped patch (also outside
-         configured repos), a free local port, a Chrome app window
-         (`--app=URL`, else a browser tab via `webbrowser`), exit when the
-         window closes (page heartbeat). Stdlib only: no embedded web view.
-      2. Parity with the Tk window (keyboard navigation, comments panel,
-         word-diff and line-number modes); Monaco is already bundled, so it
-         works offline. Check the start-up time
-         (a browser window vs Tk's) is acceptable.
-      3. `gitr` launches it; the Tk window stays behind `gitr --tk` until
-         it is no longer used, then goes.
+- [x] Replace the Tk window with the web view: `gitr` launches a
+      one-repo server in a Chrome app window (see "The Tk window replaced"
+      above). Not carried over: pipe mode, the window's keys (postponed
+      for the page), word diff off, the flat file list, line-number modes,
+      "copy for agent: notes + bad" (`gitr export --kinds bad,note` has
+      it), copying lines without the code fence, copying one comment for
+      an agent, and the staged-only diff (`--cached`)
 
 ### Known issues
 
@@ -294,25 +264,18 @@ whole diff in one read-only document as in gitr.
 ## Usage
 
 ```bash
-gitr                         # git diff (unstaged changes)
-gitr master                  # git diff master
-gitr --merge-base master     # diff from common ancestor
-gitr master HEAD             # committed changes only
-git diff | gitr              # pipe a patch
-gitr -                       # read stdin explicitly
-gitr -p patch.diff           # read from a patch file
-GITR_SCALE=2 gitr master     # scale the UI up (HiDPI)
+gitr                         # this repository's review in a window
+gitr master                  # ... against master
+gitr export master           # the comments as text for an agent
+gitr comments list           # read and write comments from the terminal
+gitr serve [repos]           # many repositories and worktrees
 ```
-
-Comments need a git repository (they live in `<repo>/.gitr`), so run gitr from
-the repository the diff belongs to; outside one they are not offered.
 
 ---
 
 ## Technology
 
-- **Language:** Python 3.10+
-- **GUI:** Tkinter (stdlib only, zero extra deps)
+- **Language:** Python 3.10+, stdlib only
+- **UI:** a page in the browser, Monaco bundled (`monaco/`)
 - **Install:** `uv tool install .`
-- **Platform:** Linux-first (X11), should work on macOS/Windows
-- **Distribution:** single file (`gitr.py`)
+- **Platform:** Linux-first, should work on macOS

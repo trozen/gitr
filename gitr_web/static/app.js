@@ -165,6 +165,10 @@ function init() {
   setInterval(refreshProjects, PROJECTS_MS);
   checkVersion();
   setInterval(checkVersion, PROJECTS_MS);
+  // Also while hidden, unlike the other polls: a page that cannot close
+  // itself says the server is gone, and a page asleep finds out on waking.
+  checkAlive();
+  setInterval(checkAlive, 30000);
   $('reload-page').addEventListener('click', reloadPage);
   $('news-close').addEventListener('click', clearNews);
   $('outside-close').addEventListener('click', clearOutside);
@@ -2039,8 +2043,8 @@ function showHover(ln) {
 
 function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
 
-// `outside`: review.json was written by something else (a gitr window,
-// another tab, an agent), so say what changed and mark it.
+// `outside`: review.json was written by something else (another tab,
+// `gitr comments`, an agent), so say what changed and mark it.
 async function loadComments(gen, outside = false) {
   try {
     const r = await api('/api/comments', { wt: shown.wt, id: doc.id });
@@ -2283,7 +2287,7 @@ function relayoutZone(node) {
   }
 }
 
-// Marked in the text itself, so the gitr window and the agent export show
+// Marked in the text itself, so `gitr comments` and the agent export show
 // it too, with no new field in review.json.
 const ACCEPTED = '(accepted)';
 const accepted = (text) => (text.trimEnd().endsWith(ACCEPTED) ? text : text.trimEnd() + ' ' + ACCEPTED);
@@ -2294,7 +2298,7 @@ function elsewhereHead(n) {
 
 function outsideFlag(c, cls) {
   const f = el('span', cls + ' outside', outsideMarks.get(keyStr(c)));
-  f.title = 'Changed outside this page (a gitr window, another tab, an agent)';
+  f.title = 'Changed outside this page (another tab, gitr comments, an agent)';
   return f;
 }
 
@@ -2605,6 +2609,60 @@ function flash(msg) {
 
 // --change detection -----------------------------------------------------
 
+// Whether the server still answers. `gitr`'s window closes when its server
+// stopped (Ctrl+C, or minutes without a page: a page the browser froze
+// meanwhile finds out on waking); a browser lets a page close only the
+// window it opened in, so elsewhere, and for gitr-serve, which may just be
+// restarting, a note says so. Asked twice before giving up, as one
+// failed request may be a hiccup.
+let standalone = false, checking = false, events = null, eventsWanted = false;
+
+// `gitr` ends when no page holds /api/events open. One page per server
+// does, the holder of a lock its other windows wait for: over HTTP/1.1 a
+// browser keeps about 6 connections per host, which windows holding a
+// stream each would use up (so gitr-serve, with its tabs, has none). When
+// the holder closes, the next window takes the lock and the stream at once,
+// within the server's grace (server.py GRACE_S).
+function holdEvents() {
+  if (eventsWanted) {
+    if (!events && lockHeld) openEvents();
+    return;
+  }
+  eventsWanted = true;
+  if (!navigator.locks) { lockHeld = true; openEvents(); return; }
+  navigator.locks.request('gitr-events', () => {
+    lockHeld = true;
+    openEvents();
+    return new Promise(() => {});  // held until the page goes
+  });
+}
+let lockHeld = false;
+
+function openEvents() {
+  events = new EventSource('/api/events');
+  events.onerror = () => checkAlive();
+}
+async function checkAlive() {
+  if (checking) return;
+  checking = true;
+  try {
+    for (let i = 0; i < 2; i++) {
+      try {
+        standalone = (await api('/api/alive', {})).standalone;
+        $('gone').hidden = true;
+        if (standalone) holdEvents();
+        return;
+      } catch { await new Promise((r) => setTimeout(r, 1000)); }
+    }
+    if (standalone) window.close();
+    $('gone').hidden = false;
+    // a page that stays (it may not close itself) stops retrying every
+    // second; checkAlive's own interval opens it again once the server is back
+    events?.close();
+    events = null;
+  } finally { checking = false; }
+}
+
 async function pollChanges() {
   if (!shown || document.hidden || !worktrees.has(shown.wt)) return;
   // A load started while the request was out replaces the doc, so its
@@ -2629,12 +2687,12 @@ async function pollChanges() {
         showChanges(gen);
       }
     }
-    // review.json written by a gitr window (or another tab)
+    // review.json written by another tab, gitr comments or an agent
     // commentStamp is null until a load's comments arrive: nothing yet to compare with
     if (r.review !== commentStamp && !editing) loadComments(gen, commentStamp !== null);
     // not while a mark is being saved: what is stored may not have it yet
     if (r.viewed !== viewedStamp && !viewedSaving) reloadViewed(gen);
-  } catch { /* transient; next poll retries */ }
+  } catch { checkAlive(); }
 }
 
 // Measured against the loaded diff, not the base: what a reload would add.

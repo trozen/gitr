@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`gitr` is a single-file (`gitr.py`) pipe-only Git diff viewer using Python 3.10+ and Tkinter (stdlib only, zero extra dependencies). It is installed as a CLI tool via `uv`.
+`gitr` is a Git diff viewer for reviewing coding agents' changes, in the browser: a stdlib-only Python 3.10+ server and a Monaco-based page. It is installed as a CLI tool via `uv`. (It began as a Tkinter window, since removed.)
 
 ## Commands
 
@@ -12,18 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install / reinstall after changes
 uv tool install --reinstall .
 
-# Run without installing
-uv run gitr
-
 # Use it
-git diff main...HEAD | gitr
-git diff HEAD | gitr
-git diff --cached | gitr
-git show HEAD | gitr
-gitr export master          # review comments as text for a coding agent, no window
-gitr export --kinds bad,note   # only these kinds (gitr --export is the same)
-gitr comments list|add|rm|accept ...   # read and write comments, no window
-gitr serve [repos]          # gitr-serve
+gitr                        # this repo's review in a window (standalone server, Chrome app mode)
+gitr master                 # ... against master
+gitr --browser list         # which browser opens it (--browser NAME|default|none, $GITR_BROWSER)
+gitr export master          # review comments as text for a coding agent
+gitr export --kinds bad,note   # only these kinds
+gitr comments list|add|rm|accept ...   # read and write comments
+gitr serve [repos]          # gitr-serve: many repos and worktrees
 ```
 
 No test suite yet. Syntax check:
@@ -33,23 +29,11 @@ python3 -c "import ast; ast.parse(open('gitr.py').read())"
 
 ## Architecture
 
-Everything lives in `gitr.py`. The flow is:
-
-1. `main()` reads all of stdin; if stdin is a tty, prints usage and exits.
-2. `parse_diff(text)` splits the raw diff into `DiffFile` objects, each holding a list of `DiffLine(text, kind)` where `kind` is one of `added | removed | context | hunk | fileheader`.
-3. `entries_from_diff()` derives `FileEntry` (path, status A/M/D/R, +/- counts) from the parsed diff — no extra git calls needed.
-4. `try_current_branch()` is a best-effort git call for the top bar label; failure is silently ignored.
-5. `App` builds the Tkinter UI: a top bar + `PanedWindow` with a diff `Text` widget (left, 70%) and a file-list `Text` widget (right, 30%). Both panels use tag-based colouring. Clicking a file row in the right panel scrolls the diff to that file's position. A narrow overview strip (`_overview`) beside the diff scrollbar maps the whole document onto its height and marks every comment; clicking a mark jumps to it.
-6. The diff panel is rendered skeleton-first (`_render_diff_panel`): the whole document is emitted synchronously as plain lines, queued via `_emit` (which merges adjacent same-tag segments because Tk's insert cost is per tagged segment) with `_cur_line` tracking line numbers, so file positions, gutter numbers and the minimap are final at first paint. Word-diff highlighting is applied afterwards in place, in timed chunks starting from the visible region (`_word_diff_step`, using `Text.replace` so the view never moves). Parsing and the initial render run after the window is up, behind a progress label that replaces the diff widget (`_show_progress`) and is refreshed every 100 ms; the same label covers reloads and re-renders. Comments are added, edited and removed incrementally (`_shift_lines` keeps every line-keyed record consistent); only word-diff toggles, reload and clear-all re-render. Each comment has a kind (note / good / bad) that sets its colour and text marker everywhere it appears (the agent export and terminal dump spell the kind out instead); the kinds and the context menu's one-click presets are the hard-coded `COMMENT_KINDS` and `COMMENT_PRESETS` tables near the top of the file.
-7. The minimap is VS Code style: fixed pixels per line, one column per character, scrolling with the document when the diff is taller than the canvas. Only the visible band is rasterised, as a binary PPM handed to `PhotoImage(data=...)`, with per-line pixel rows cached in `_mm_rows`.
-
-### gitr-serve
-
-`gitr_web/` is a second command from the same package: a stdlib HTTP server (`server.py`) serving a Monaco-based page (`static/`) for many repos and their worktrees. It imports gitr's parser, `ReviewStore`, anchor matching and export from `gitr.py`, so `.gitr/review.json` stays shared with the window. The whole diff is one Monaco document plus per-line metadata (`Doc`); word-diff ranges are fetched in windows. Run from a checkout with `python3 gitr_web/server.py --reload`.
+- `gitr.py`: the command line (`main()` dispatches to the window, `export`, `comments`, `serve`) and what the server shares with it: `parse_diff()` (raw diff to `DiffFile`s of `DiffLine(text, kind)`, `kind` one of `added | removed | context | hunk | fileheader`), `ReviewStore` (comments in `.gitr/review.json`, anchored to snapshots of the file in `.gitr/snapshots/`, remapped by difflib on read), `ViewedStore` (`.gitr/viewed.json`), the anchor matching and the agent export (`_format_export`), and the word-diff line pairing.
+- `gitr_web/server.py`: a stdlib HTTP server serving the page (`static/`). `main()` is gitr-serve, for many repos and their worktrees; `standalone()` is `gitr`, one repo on a port of its own, opened in a Chromium-family browser's app mode in a profile of gitr's own, ending on Ctrl+C or a few seconds after the last page dropped its `/api/events` stream. The whole diff is one Monaco document plus per-line metadata (`Doc`); word-diff ranges are fetched in windows. Run from a checkout with `python3 gitr_web/server.py --reload`.
 
 ## Constraints
 
 - **No non-ASCII characters** anywhere in the source (no Unicode arrows, box-drawing chars, etc.).
-- Single file, no dependencies beyond stdlib. Do not add packages. (`gitr_web/` is the separate web command; its page uses Monaco, bundled by `monaco/build.sh` into `gitr_web/static/monaco/`, which is generated and committed: do not edit it by hand.)
-- `tkinter` is imported optionally in `gitr.py`: gitr-serve, `gitr export` and `gitr comments` must work without it. Keep Tk out of module-level code (annotations are not evaluated, via `from __future__ import annotations`).
-- Colour scheme is Catppuccin Mocha (hex values in the `C` dict).
+- No dependencies beyond stdlib. Do not add packages. The page uses Monaco, bundled by `monaco/build.sh` into `gitr_web/static/monaco/`, which is generated and committed: do not edit it by hand.
+- Colour scheme is Dracula (the page's CSS variables in `app.css`).

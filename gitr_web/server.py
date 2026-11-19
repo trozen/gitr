@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 import re
+import select
+import shutil
 import signal
 import socket
 import stat
@@ -24,11 +26,15 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
+import zlib
 from collections import OrderedDict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from http.client import HTTPConnection
+from typing import Iterator
+from urllib.parse import parse_qs, urlencode, urlparse
 
 if not __package__:
     # Run as a script from a checkout: gitr.py sits one level up. Installed,
@@ -752,8 +758,8 @@ class State:
             raise GitError('stale document, reload the diff')
         return doc
 
-    # --comments: gitr's .gitr/review.json in each worktree, so a review can
-    # move between the web page and a gitr window.
+    # --comments: .gitr/review.json in each worktree, shared with `gitr
+    # comments` and `gitr export`, which an agent reads them with.
 
     def comments(self, wt: str, doc_id: str) -> dict:
         wt = self.check_worktree(wt)
@@ -853,8 +859,7 @@ def gitr_stamp(wt: str, name: str) -> int:
 
 
 def resolve_comments(wt: str, doc: 'Doc', store: ReviewStore) -> 'tuple[dict, list[_ExportItem]]':
-    """Stored comments placed on the document's lines the way a gitr window
-    places them: a comment on a line no longer in the diff goes to the end
+    """Stored comments placed on the document's lines: a comment on a line no longer in the diff goes to the end
     of its file, marked orphaned. Also returns the agent export items in the
     same order (files not in this diff last)."""
     anchors = _resolve_anchors(store, file_reader(wt, doc))
@@ -1274,6 +1279,14 @@ CONTENT_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; c
 
 class Handler(BaseHTTPRequestHandler):
     state: State  # set on the class by main()
+    last_request = 0.0  # time.monotonic(), for standalone()
+    standalone = False  # serving `gitr`, whose page closes with it
+    # pages holding /api/events open, and when the last one went
+    pages = 0
+    pages_seen = False
+    last_page_left = 0.0
+    expect_until = 0.0  # see EXPECT_S
+    pages_lock = threading.Lock()
 
     def log_message(self, fmt: str, *args) -> None:
         if os.environ.get('GITR_SERVE_LOG'):
@@ -1296,6 +1309,39 @@ class Handler(BaseHTTPRequestHandler):
             # poll cut off); nobody is left to answer.
             self.close_connection = True
 
+    def _events(self) -> None:
+        """A server-sent events stream held open by each page of `gitr`,
+        so the server knows when the last one closed: the browser closes the
+        socket at once, also when it crashes. Nothing is sent on it yet but
+        keep-alive comments; it is where pushed changes would go."""
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+        except OSError:
+            return  # the page went as it connected
+        with Handler.pages_lock:
+            Handler.pages += 1
+            Handler.pages_seen = True
+        try:
+            self.wfile.write(b'retry: 1000\n\n')
+            self.wfile.flush()
+            while True:
+                # The page sends nothing, so readable means closed.
+                ready, _, _ = select.select([self.connection], [], [], 15)
+                if ready and not self.connection.recv(1):
+                    break
+                self.wfile.write(b': ping\n\n')
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            with Handler.pages_lock:
+                Handler.pages -= 1
+                Handler.last_page_left = time.monotonic()
+
     def _json(self, obj, status: int = 200) -> None:
         self._send(status, json.dumps(obj, separators=(',', ':')).encode(), 'application/json')
 
@@ -1312,10 +1358,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.FORBIDDEN, b'forbidden host', 'text/plain')
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        Handler.last_request = time.monotonic()
         try:
+            if url.path == '/api/events':
+                return self._events()
+            if url.path == '/api/alive':
+                return self._json({'standalone': Handler.standalone})
             if url.path == '/api/version':
                 return self._json({'version': page_version()})
             if url.path == '/api/projects':
+                if q.get('expect'):
+                    Handler.expect_until = time.monotonic() + EXPECT_S
                 return self._json(self.state.projects())
             if url.path == '/api/diff':
                 return self._json(self.state.diff(q['wt'], q['base'],
@@ -1357,6 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._host_ok():
             return self._send(HTTPStatus.FORBIDDEN, b'forbidden host', 'text/plain')
+        Handler.last_request = time.monotonic()
         # A form on another site can post here (the Host is ours then), but
         # only with a "simple" content type and its own Origin; a JSON body
         # needs a CORS preflight, which this server never grants.
@@ -1578,6 +1632,241 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
     width = max(len(r['name']) for r in repos)
     for r in repos:
         print(f"  {r['name']:<{width}}  {tilde(r['path'])}", file=sys.stderr)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+# --gitr: one repo, in a window of its own -----------------------------------
+#
+# `gitr` in a repository serves it alone, as the Tk window it replaced did:
+# started from the terminal, ended with Ctrl+C or a while after its window
+# closed. The page's .gitr files are shared with gitr-serve, so the two can
+# show the same worktree.
+
+# With no page holding the events stream, the server stops this long after
+# the last one went (a reloaded page connects again within it), or, when no
+# page ever connected (the address printed, a browser that never opened it),
+# this long after the last request.
+GRACE_S = 10
+IDLE_S = 180
+# a window another `gitr` opened on this server (serving()) gets this long to
+# connect: a browser starting up may take longer than GRACE_S
+EXPECT_S = 60
+# Each repo gets a port of its own, the same every time: the page keeps its
+# settings (font sizes, wrapping) in the browser per address. Below the ports the system
+# hands out for outgoing connections (from 32768 on Linux, 49152 on macOS),
+# which could otherwise hold it.
+PORT_FIRST, PORT_COUNT = 20000, 12000
+
+
+def repo_port(path: str) -> int:
+    return PORT_FIRST + zlib.crc32(path.encode()) % PORT_COUNT
+
+
+def serving(port: int, repo: str) -> bool:
+    """Whether a gitr for this repo already answers on the port."""
+    # http.client rather than urllib, which would ask an http_proxy from the
+    # environment
+    conn = HTTPConnection('127.0.0.1', port, timeout=2)
+    try:
+        conn.request('GET', '/api/projects?expect=1')
+        return [p['path'] for p in json.loads(conn.getresponse().read())] == [repo]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    finally:
+        conn.close()
+
+
+# The window's address names the server as localhost, not 127.0.0.1: Chrome
+# keeps an app window's size and place under a key made of the host name,
+# and with the dots of 127.0.0.1 in it the place is saved but never found
+# again. The key leaves out the port, so all gitr windows share one place.
+WINDOW_HOST = 'localhost'
+
+# Chromium-family browsers, the ones with an app mode, in order of preference.
+CHROMES = ('google-chrome', 'google-chrome-stable', 'google-chrome-beta', 'google-chrome-unstable',
+           'chromium', 'chromium-browser', 'microsoft-edge', 'microsoft-edge-stable',
+           'brave-browser', 'vivaldi', 'vivaldi-stable', 'opera')
+CHROME_FLATPAKS = ('com.google.Chrome', 'org.chromium.Chromium', 'com.microsoft.Edge',
+                   'com.brave.Browser', 'com.vivaldi.Vivaldi', 'com.opera.Opera')
+CHROME_APPS = ('Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Vivaldi', 'Opera')
+
+
+def chrome_args(profile: Path, url: str) -> list[str]:
+    """App mode (a window with no tabs or address bar) in a profile of
+    gitr's own, one per browser: its windows are not the user's browsing
+    session, so quitting the browser leaves them open, and a browser
+    restarted later does not bring back a window of a gitr long gone. The
+    flags keep a new profile from opening with its welcome pages."""
+    return [f'--user-data-dir={profile}', '--no-first-run', '--no-default-browser-check',
+            f'--app={url}']
+
+
+def own_profile(name: str) -> Path:
+    return SETTINGS_PATH.parent / 'browsers' / name.lower().replace(' ', '-')
+
+
+def find_browsers() -> 'Iterator[tuple[str, list[str], Path]]':
+    """The Chromium-family browsers installed, in order of preference: the
+    name `--browser` takes, the command that runs it, and gitr's profile
+    for it (chrome_args). Lazily, as the Flatpak checks take a while and
+    are mostly not needed."""
+    if sys.platform == 'darwin':
+        for app in CHROME_APPS:
+            if any(Path(d, f'{app}.app').exists() for d in ('/Applications', Path.home() / 'Applications')):
+                yield app, ['open', '-na', app, '--args'], own_profile(app)
+        return
+    seen = set()
+    for name in CHROMES:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        # Ubuntu's chromium-browser is a script running the snap
+        snap = Path('/snap/bin/chromium') if name == 'chromium-browser' else Path(exe)
+        if snap.parent == Path('/snap/bin') and snap.exists():
+            # Every snap command links to /usr/bin/snap: the snap's name
+            # tells them apart. A snap may not open hidden folders in the
+            # home directory (~/.local/state): its profile goes in the
+            # snap's own folder.
+            key, found = f'snap:{snap.name}', (name, [str(snap)],
+                                               Path.home() / 'snap' / snap.name / 'common' / 'gitr')
+        else:
+            key, found = os.path.realpath(exe), (name, [exe], own_profile(name))
+        # google-chrome and google-chrome-stable are one browser
+        if key not in seen:
+            seen.add(key)
+            yield found
+    if shutil.which('flatpak'):
+        for app in CHROME_FLATPAKS:
+            if subprocess.call(['flatpak', 'info', app], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0:
+                # in the app's own data folder, which its sandbox can write
+                yield app, ['flatpak', 'run', app], Path.home() / '.var' / 'app' / app / 'data' / 'gitr'
+
+
+BROWSER_HELP = ('a browser `--browser list` shows (or the path of a Chromium-family one), '
+                '"default" for a tab in the default browser, "none" to only print the address')
+
+
+def pick_browser(choice: 'str | None') -> 'tuple[str, list[str], Path] | str':
+    """What `--browser` (or GITR_BROWSER) names: a browser of
+    find_browsers(), or "default" or "none". Unset, the first browser found,
+    else the default one."""
+    b = find_browser(choice)
+    if b is None:
+        names = ', '.join(b[0] for b in find_browsers()) or 'none found'
+        sys.exit(f'gitr: no browser {choice!r} (Chromium-family ones here: {names}; '
+                 'or "default", "none")')
+    return b
+
+
+def find_browser(choice: 'str | None') -> 'tuple[str, list[str], Path] | str | None':
+    """pick_browser's answer, None for a choice that names nothing."""
+    if choice in ('default', 'none'):
+        return choice
+    if not choice:
+        return next(find_browsers(), 'default')
+    for b in find_browsers():
+        if b[0].lower() == choice.lower():
+            return b
+    path = Path(choice).expanduser()
+    if os.sep in choice and path.is_file() and os.access(path, os.X_OK):
+        return (path.name, [str(path)], own_profile(path.name))
+    return None
+
+
+def list_browsers() -> None:
+    env = os.environ.get('GITR_BROWSER') or None
+    found = list(find_browsers())
+    used = find_browser(env) if env else (found[0] if found else 'default')
+    used = used if isinstance(used, str) or used is None else used[0]
+    rows = [(name, f'{" ".join(cmd)}  (profile {tilde(str(profile))})') for name, cmd, profile in found]
+    rows += [('default', 'a tab in the default browser'), ('none', 'only print the address')]
+    for name, what in rows:
+        print(f'{"*" if name == used else " "} {name:<24} {what}')
+    if env and used is None:
+        print(f'GITR_BROWSER={env} names none of these: gitr will not start until it does')
+    else:
+        print('(* is used unless --browser names another' + (f'; GITR_BROWSER={env})' if env else ')'))
+
+
+def open_window(url: str, browser: 'tuple[str, list[str], Path] | str') -> bool:
+    """Opens the page in the browser pick_browser() gave: a Chromium-family
+    one's app window, or the default browser. False when it is not opened:
+    "none", or no screen to open it on (e.g. over ssh)."""
+    screen = os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')
+    ssh = os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_TTY')
+    if browser == 'none' or (not screen and (ssh or sys.platform.startswith('linux'))):
+        return False
+    if browser == 'default':
+        return webbrowser.open(url)
+    _, cmd, profile = browser
+    subprocess.Popen([*cmd, *chrome_args(profile, url)], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
+def standalone(argv: list[str], prog: str = 'gitr') -> None:
+    """`gitr [base]` (gitr.main passes its arguments)."""
+    ap = argparse.ArgumentParser(prog=prog, description='The review of this repository in a window '
+                                 '(`gitr help` lists the other commands).')
+    ap.add_argument('base', nargs='?',
+                    help='what to diff against (default: the last one used, else main or master)')
+    ap.add_argument('--browser', metavar='NAME',
+                    help=f'where to open the page: {BROWSER_HELP}; '
+                         '"list" lists them (default: $GITR_BROWSER, else the first listed)')
+    a = ap.parse_args(argv)
+    if a.browser == 'list':
+        return list_browsers()
+    browser = pick_browser(a.browser or os.environ.get('GITR_BROWSER') or None)
+    try:
+        top = os.path.realpath(git(os.getcwd(), 'rev-parse', '--show-toplevel').strip())
+        wts = list_worktrees(top)
+        # the main worktree names the repo; the switcher lists the others under it
+        repo = os.path.realpath(wts[0]['path'])
+    except (GitError, IndexError):
+        sys.exit('gitr: not in a git repository')
+    # the page knows a worktree by the path git lists it under, which may
+    # run through a symlink
+    wt = next((w['path'] for w in wts if os.path.realpath(w['path']) == top), top)
+    url = f'/#{urlencode({"wt": wt, **({"base": a.base} if a.base else {})})}'
+    first = repo_port(repo)
+    srv = None
+    for port in range(first, first + 10):
+        if serving(port, repo):
+            # another gitr has it: one more window on that one
+            if not open_window(f'http://{WINDOW_HOST}:{port}{url}', browser):
+                print(f'gitr: already served at http://{WINDOW_HOST}:{port}{url}', file=sys.stderr)
+            return
+        try:
+            srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+            break
+        except OSError:
+            continue
+    if srv is None:
+        sys.exit(f'gitr: ports {first} to {first + 9} are all taken')
+    Handler.state = State([{'path': repo, 'name': os.path.basename(repo)}])
+    Handler.standalone = True
+    Handler.last_request = time.monotonic()  # the window's start counts as one
+    full = f'http://{WINDOW_HOST}:{srv.server_port}{url}'
+    shown = open_window(full, browser)
+    print(f'gitr: {full}' + ('' if shown else ' (open it in a browser)'), file=sys.stderr)
+    print('  Ctrl+C stops it, or closing its windows', file=sys.stderr)
+
+    def watch() -> None:
+        while True:
+            time.sleep(0.5)
+            with Handler.pages_lock:
+                if Handler.pages or time.monotonic() < Handler.expect_until:
+                    continue
+                quiet = time.monotonic() - max(Handler.last_page_left, Handler.last_request)
+                if quiet > (GRACE_S if Handler.pages_seen else IDLE_S):
+                    break
+        srv.shutdown()
+
+    threading.Thread(target=watch, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

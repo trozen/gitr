@@ -22,9 +22,10 @@
   <span id="mergebase" class="dim"></span>
   <!-- notes, in this order; "news" takes the place of "changed" after a reload -->
   <span id="removed" class="chip" hidden>worktree removed</span>
+  <span id="gone" class="chip" hidden title="The server does not answer: gitr stopped (Ctrl+C, or its windows closed), or gitr-serve is down. Run it again; this page reconnects by itself.">server stopped</span>
   <span id="changed" class="chip" hidden><span>worktree changed<span id="changed-what"></span></span><button id="reload" class="chip-act">reload</button></span>
   <span id="news" class="chip" hidden><span id="news-text"></span><button id="news-close" class="chip-x" title="Clear the marks of the last reload">&#215;</button></span>
-  <span id="outside" class="chip" hidden title="review.json was written by something else (a gitr window, another tab, an agent); the comments it added or edited are flagged"><span id="outside-text"></span><button id="outside-close" class="chip-x" title="Clear the flags">&#215;</button></span>
+  <span id="outside" class="chip" hidden title="review.json was written by something else (another tab, gitr comments, an agent); the comments it added or edited are flagged"><span id="outside-text"></span><button id="outside-close" class="chip-x" title="Clear the flags">&#215;</button></span>
   <span id="updated" class="chip" hidden title="gitr-serve restarted or its page files changed, so the code running in this page may no longer fit it"><span>app changed</span><button id="reload-page" class="chip-act">reload</button></span>
   <span id="review">
     <span id="ccount" class="dim"></span>

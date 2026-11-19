@@ -1,4 +1,4 @@
-/* Colours follow gitr's C dict (Dracula). */
+/* Dracula colours. */
 :root {
   --bg: #282a36;
   --bg-side: #21222c;
@@ -195,7 +195,7 @@ h2 .grow { flex: 1; }
 /* a button ending the chip sits flush with its edge */
 .chip > button:last-child { margin-right: -8px; }
 .chip .hi { color: var(--hi); }
-#removed { color: var(--rem); }
+#removed, #gone { color: var(--rem); }
 #updated > span { color: var(--note); }
 #news, #outside { --hi: var(--new); }
 #news.missing { color: var(--dim); }

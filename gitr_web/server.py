@@ -48,7 +48,11 @@ SETTINGS_PATH = (Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local'
 # Where the prototype (`gitr serve`) kept them; read until web.json exists.
 OLD_SETTINGS_PATH = SETTINGS_PATH.with_name('serve.json')
 MIN_FILE_LINES = 4  # see the padding in Doc._add_file
-MAX_DOCS = 4  # a huge diff's document is tens of MB
+# Documents kept besides each worktree's last one (which the page keeps
+# to show again on switching back), and a bound on all of them together: a
+# huge diff's document is tens of MB.
+MAX_DOCS = 4
+MAX_DOC_LINES = 1_000_000
 # Past review diffs a reload is compared with, as hashes of their + and -
 # lines (see baseline()), so many more of them than documents.
 MAX_BASELINES = 64
@@ -443,10 +447,9 @@ class State:
         # review.json is read, changed and written back as a whole
         self._review_lock = threading.Lock()
         self._settings_lock = threading.Lock()
-        # Last document per (worktree, base): word-diff windows and the
-        # change check are served from it without recomputing the diff.
-        # Bounded by count, not by worktree, so another tab (or another base on
-        # the same worktree) keeps its document while this one reloads.
+        # Documents by (worktree, id), least recently used first: word-diff
+        # windows, comments and the change check are served from them without
+        # recomputing the diff. See _evict_docs.
         self._docs: OrderedDict[str, Doc] = OrderedDict()
         # (worktree, doc id) -> (base, baseline()), see new_since
         self._baselines: OrderedDict[str, tuple] = OrderedDict()
@@ -619,12 +622,13 @@ class State:
         doc_id = hashlib.sha1(f'{wt}\0{base}\0{time.time()}'.encode()).hexdigest()[:16]
         with self._lock:
             self._docs[f'{wt}\0{doc_id}'] = doc
-            while len(self._docs) > MAX_DOCS:
-                self._docs.popitem(last=False)
+            self._evict_docs()
             if not commit:
                 self._baselines[f'{wt}\0{doc_id}'] = (base, baseline(doc))
-                while len(self._baselines) > MAX_BASELINES:
-                    self._baselines.popitem(last=False)
+                # a kept document's stays: reload compares with it
+                old = [k for k in self._baselines if k not in self._docs]
+                for k in old[:max(0, len(self._baselines) - MAX_BASELINES)]:
+                    del self._baselines[k]
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
             'ahead': ahead, 'behind': behind, 'commit': shown,
@@ -714,6 +718,29 @@ class State:
             return doc
         text = diff_text(wt, merge_base(wt, doc.base), False) + untracked
         return Doc(parse_diff(text), doc.reindent)
+
+    def _evict_docs(self) -> None:
+        """Each worktree's most recently used document stays, as the page
+        shows it again when switched back to; of the others (another tab's,
+        another base's) the MAX_DOCS last used. Then, over MAX_DOC_LINES, the
+        least recently used go whatever they are, all but the newest."""
+        latest = {key.split('\0')[0]: key for key in self._docs}
+        others = [key for key in self._docs if latest[key.split('\0')[0]] != key]
+        for key in others[:max(0, len(others) - MAX_DOCS)]:
+            del self._docs[key]
+        total = sum(len(d.lines) for d in self._docs.values())
+        while total > MAX_DOC_LINES and len(self._docs) > 1:
+            total -= len(self._docs.popitem(last=False)[1].lines)
+
+    def has_doc(self, wt: str, doc_id: str) -> bool:
+        wt = self.check_worktree(wt)
+        key = f'{wt}\0{doc_id}'
+        with self._lock:
+            if key not in self._docs:
+                return False
+            # the page shows it again now and asks for its comments next
+            self._docs.move_to_end(key)
+            return True
 
     def _doc(self, wt: str, doc_id: str) -> 'Doc':
         with self._lock:
@@ -1317,6 +1344,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.export(q['wt'], q['id']))
             if url.path == '/api/viewed':
                 return self._json(self.state.all_viewed(q['wt']))
+            if url.path == '/api/kept':
+                return self._json({'kept': self.state.has_doc(q['wt'], q['id'])})
         except KeyError as e:
             return self._json({'error': f'missing parameter {e}'}, 400)
         except ValueError as e:

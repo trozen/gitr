@@ -165,10 +165,11 @@ whole diff in one read-only document as in gitr.
 - [x] Wrap and collapse re-indent into the settings popup: they change
       only how the diff is shown, not what is reviewed, so they are one
       choice per browser like the font sizes
-- [ ] Keep each project's state across switches: the loaded diff, scroll
+- [x] Keep each project's state across switches: the loaded diff, scroll
       position and open editors stay as they were, so a project that
       needs a reload still shows the pre-reload diff on return (with its
-      banner) until reload is clicked
+      banner) until reload is clicked; the server keeps each worktree's
+      last document for it
 - [x] Changes since the last reload: on reload, mark the lines that differ
       from the previous load (per file, the old diff text against the
       new one), so after an agent's follow-up only the new work stands

@@ -46,6 +46,7 @@ let activeFile = -1;
 let pinned = null;             // {file, scrollTop} after a click, see onScroll
 let decoWindow = [0, 0];
 let wordsByLine = new Map();   // line -> [startCol, endCol, ...]
+let wordsDone = false;         // all of the doc's windows are in wordsByLine
 let wordGen = 0;               // bumps on every load so stale fetches are dropped
 let current = null;            // {wt, base, commit} last requested
 let shown = null;              // {wt, base, commit} of the diff on screen, null while loading
@@ -499,6 +500,7 @@ function renderProjects(projects) {
 
 function openWorktree(path) {
   const { p, w } = worktrees.get(path);
+  if (path !== shown?.wt && kept.has(path)) return showKept(path);
   load(path, settingsFor(path).base, p.defaultBase, w.position);
 }
 
@@ -1151,7 +1153,41 @@ async function saveSettings(wt, base) {
 // `since`: the id of the diff whose lines the new one is compared with, to
 // mark what a reload brought (only the server's cache still has it).
 async function load(wt, base, defaultBase, restore, commit = null, since = null) {
-  if (shown && shown.wt !== wt) flushPosition();
+  const { gen, state } = startLoad(wt, base, defaultBase, restore, commit);
+  showProgress(`loading diff against ${base} ...`);
+  const t0 = performance.now();
+  let d;
+  try {
+    d = await api('/api/diff', { ...state, reindent: $('reindent').checked ? '1' : '0',
+                                 ...(since ? { since } : {}) });
+  } catch (e) {
+    if (gen === wordGen) {
+      showProgress('error: ' + e.message);
+      $('base').classList.add('bad');
+      $('base').title = e.message;
+    }
+    return;
+  }
+  if (gen !== wordGen) return;
+  await render(d, gen, state, since, restore, t0);
+}
+
+// Thrown while drawing, an error would leave "rendering" up for good.
+async function render(d, gen, state, since, restore, t0, k = null) {
+  try {
+    await showDiff(d, gen, state, since, restore, t0, k);
+  } catch (e) {
+    showProgress('error showing the diff: ' + e.message + '\n(reloading the page may help)');
+    throw e;
+  }
+}
+
+// What load() and showKept() do before the diff is there.
+function startLoad(wt, base, defaultBase, restore, commit) {
+  if (shown && shown.wt !== wt) {
+    flushPosition();
+    keep();
+  }
   // Another view: the notes about this one would stand until it renders, or
   // for good if it fails to load. A reload or re-render replaces them.
   if (!shown || shown.wt !== wt || shown.base !== base || (shown.commit || null) !== commit) {
@@ -1177,31 +1213,55 @@ async function load(wt, base, defaultBase, restore, commit = null, since = null)
   changesAt = 0;
   $('removed').hidden = true;
   shown = null;
-  showProgress(`loading diff against ${base} ...`);
-  const t0 = performance.now();
-  let d;
-  try {
-    d = await api('/api/diff', { ...state, reindent: $('reindent').checked ? '1' : '0',
-                                 ...(since ? { since } : {}) });
-  } catch (e) {
-    if (gen === wordGen) {
-      showProgress('error: ' + e.message);
-      $('base').classList.add('bad');
-      $('base').title = e.message;
-    }
-    return;
-  }
-  if (gen !== wordGen) return;
-  // Thrown while drawing, an error would leave "rendering" up for good.
-  try {
-    await showDiff(d, gen, state, since, restore, t0);
-  } catch (e) {
-    showProgress('error showing the diff: ' + e.message + '\n(reloading the page may help)');
-    throw e;
+  return { gen, state };
+}
+
+// --worktrees switched away from ------------------------------------------
+//
+// Each keeps its diff as it was left, with its place, an open comment
+// editor and the marks of its last reload, and shows it again on switching
+// back: a worktree an agent changed meanwhile says so in the banner, and
+// changes only when reload is clicked. The server keeps each worktree's
+// last document for the comments and word diff of the kept one.
+
+const KEEP_LINES = 1000000;  // all kept diffs together; the oldest go first
+const kept = new Map();      // worktree -> what keep() saved, oldest first
+
+function keep() {
+  if (!doc || !shown) return;
+  kept.delete(shown.wt);
+  kept.set(shown.wt, { d: doc, state: shown, defaultBase: current.defaultBase, pos: viewPosition(),
+                       editing, words: wordsDone ? wordsByLine : null, news: newsShown,
+                       reindent: $('reindent').checked, viewed, viewedStamp });
+  let total = 0;
+  for (const k of kept.values()) total += k.d.kinds.length;
+  for (const [wt, k] of kept) {
+    if (total <= KEEP_LINES) break;
+    kept.delete(wt);
+    total -= k.d.kinds.length;
   }
 }
 
-async function showDiff(d, gen, state, since, restore, t0) {
+async function showKept(wt) {
+  const k = kept.get(wt);
+  kept.delete(wt);
+  const before = wordGen;
+  let ok = false;
+  try { ok = (await api('/api/kept', { wt, id: k.d.id })).kept; } catch { /* load it anew */ }
+  // something else loaded meanwhile; kept again unless that was this worktree
+  if (wordGen !== before) { if (current?.wt !== wt) kept.set(wt, k); return; }
+  const { base, commit = null } = k.state;
+  // The server dropped it (it restarted, or too many big diffs since), or
+  // re-indenting was switched since: as reload does, with the changes since
+  // marked when it still can.
+  if (!ok || k.reindent !== $('reindent').checked)
+    return load(wt, base, k.defaultBase, k.pos, commit, commit ? null : k.d.id);
+  const { gen, state } = startLoad(wt, base, k.defaultBase, k.pos, commit);
+  await render(k.d, gen, state, null, k.pos, performance.now(), k);
+}
+
+// `k`: a kept diff shown again, see keep().
+async function showDiff(d, gen, state, since, restore, t0, k = null) {
   const { wt, base, commit } = state;
   const t1 = performance.now();
   showProgress(`rendering ${d.files.length} files, ${d.kinds.length} lines ...`);
@@ -1212,12 +1272,15 @@ async function showDiff(d, gen, state, since, restore, t0) {
   showCommitShown(d.commit);
   $('base').classList.remove('bad');
   $('base').title = 'Any branch, tag or commit; click for a list';
-  saveSettings(wt, base);  // only a base that loaded is worth remembering
+  // only a base that loaded is worth remembering; a kept one was, and may
+  // since have been changed in another tab
+  if (!k) saveSettings(wt, base);
   fileStarts = d.files.map((f) => f.start);
   let maxNo = 1;
   for (let i = 0; i < d.oldNo.length; i++) maxNo = Math.max(maxNo, d.oldNo[i], d.newNo[i]);
   numWidth = String(maxNo).length;
-  wordsByLine = new Map();
+  wordsByLine = k?.words || new Map();
+  wordsDone = !!k?.words;
   editing = null;
   outsideMarks = new Map();
   $('outside').hidden = true;
@@ -1230,12 +1293,15 @@ async function showDiff(d, gen, state, since, restore, t0) {
   editor.setScrollTop(0);
   if (restore) scrollToPosition(restore);
   initViewed(d);
+  // marks made after the diff loaded, not those it came with
+  if (k) ({ viewed, viewedStamp } = k);
   renderFiles();
   markHeadersInMinimap();
   // files still in the diff that were viewed and no longer are
   const nowViewed = viewedPaths(), inDiff = new Set(d.files.map((f) => f.path));
-  applyNews(d.news, since, [...wasViewed].filter((p) => inDiff.has(p) && !nowViewed.has(p)).length);
-  markNewFiles(d.news);
+  if (k) applyNews(k.news.news, k.news.since, k.news.unviewed);
+  else applyNews(d.news, since, [...wasViewed].filter((p) => inDiff.has(p) && !nowViewed.has(p)).length);
+  markNewFiles(newsShown.news);
   showViewed();
   updateDecorations(true);
   if (d.files.length) hideProgress();
@@ -1254,22 +1320,34 @@ async function showDiff(d, gen, state, since, restore, t0) {
     (d.behind ? `, which has ${d.behind} commit${d.behind === 1 ? '' : 's'} not in HEAD` : '');
   const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
   $('stats').textContent = `${d.files.length} files  +${add} -${del}  ${d.kinds.length} lines`;
-  setTiming(`git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +
-            `fetch ${timing.fetchMs} ms, render ${timing.renderMs} ms`);
+  if (k) setTiming(`kept diff, render ${timing.renderMs} ms`);
+  else setTiming(`git ${d.timing.git_ms} ms, parse ${d.timing.doc_ms} ms, ` +
+                 `fetch ${timing.fetchMs} ms, render ${timing.renderMs} ms`);
   onScroll();
-  loadComments(gen);
-  fetchWords(gen);
+  if (!wordsDone) fetchWords(gen);
   loadCommits(gen);
+  await loadComments(gen);
+  if (k && gen === wordGen) {
+    // not for a comment deleted meanwhile: there would be no editor to show
+    if (k.editing && !editing && (!k.editing.key || comments.some((c) => keyStr(c) === keyStr(k.editing)))) {
+      editing = k.editing;
+      renderZones(false);
+    }
+    // the banner if the worktree changed while away, the marks if viewed.json did
+    pollChanges();
+  }
 }
 
 // --what a reload brought ---------------------------------------------------
 
 let newsSince = null;          // id of the diff the marks compare with, see load()
+let newsShown = {};            // applyNews' arguments, for keep()
 
 // Returns the summary to show, if there is something new to say.
 // The note in the top bar stays until the next load, or its x clears the
 // marks with it.
 function applyNews(news, since, unviewed = 0) {
+  newsShown = { news, since, unviewed };
   newsSince = news && !news.missing ? since : null;
   $('news').hidden = !news;
   $('news').classList.toggle('missing', !!news?.missing);
@@ -1483,6 +1561,7 @@ async function fetchWords(gen) {
     }
     if (w <= decoWindow[1] && w + WORD_WINDOW > decoWindow[0]) updateWordDecorations();
   }
+  wordsDone = true;
   timing.wordsMs = Math.round(performance.now() - t0);
 }
 

@@ -169,6 +169,15 @@ has none (the note says so). When gitr-serve restarts or its page
 files change, an "app changed" note in the top bar offers to reload the
 page, whose code may no longer fit the server's.
 
+Switching to another worktree keeps the one left as it was: switching
+back shows the same diff again, at the same place, with an unsaved
+comment still open and the marks of its last reload, and the "worktree
+changed" note if an agent changed it meanwhile; it changes only when
+reload is clicked. The page keeps up to a million lines of such diffs
+(the least recently left go first); when the server no longer has one (it
+restarted, or many big diffs since), switching back loads the diff anew,
+with what changed marked as after a reload.
+
 As in gitr, collapsing re-indented lines shows a removed and added line that differ
 only in whitespace as one dimmed `~` line, and the right-click menu copies
 the file path, `path:line`, or `path:line` with the line (or the selection

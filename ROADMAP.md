@@ -18,25 +18,27 @@ now opens gitr-serve's page for the repository it is run in.
 
 ## Future
 
-- [ ] Side-by-side diff view (toggle between unified and split)
+- [ ] Side-by-side diff view (toggle between unified and split; Monaco's
+      `DiffEditor`)
 - [ ] Whole-file view: besides the continuous all-files diff, open one file
-      in its own view (or window) showing the entire file, with the diff
-      overlaid and switchable: off (plain file), inline unified, or two
-      files side by side. The point is to see the changed lines in the
-      context of the whole file, not just the hunks.
-- [ ] Viewed marks set automatically: a file counts as viewed once the
-      view scrolled past its end (a variant to try)
+      in its own view (an editor tab, or a window) showing the entire file,
+      with the diff overlaid and switchable: off (plain file), inline
+      unified, or two files side by side. The point is to see the changed
+      lines in the context of the whole file, not just the hunks.
 - [ ] Fog of war (experiment, branch `fog-of-war`): per-line exposure while
       on screen, minimap rows wiping clear after a dwell, seen state per hunk
       in `.gitr/seen.json`. Tried in use: the time-based per-line signal is
       too noisy to act on (a hunk on screen while reading another counts as
       seen, a skimmed one does not), and the shading is hard to read on the
       narrow minimap. Parked; the per-hunk content keys on that branch are
-      the basis for the viewed marks above.
+      the basis for the viewed marks. Marks set automatically once the view
+      scrolled past a file were dropped for the same reason: scrolling is
+      not reading, and wrong marks cost more than setting them by hand.
 - [ ] Hunk navigation (`j` / `k` to jump between `@@` hunks within a file)
 - [ ] Jump to `$EDITOR` at the correct line (`o`)
 - [ ] Fold / collapse individual file diffs
-- [ ] Syntax highlighting per language (no extra deps; or Monaco's own)
+- [ ] Syntax highlighting per language, per file in the combined view
+      (Monaco's own tokenizers)
 - [ ] Color theme override
 - [ ] Keyboard shortcut help (`?`)
 - [ ] Export diff as HTML
@@ -197,7 +199,6 @@ whole diff in one read-only document as in gitr.
       our own menu (or none) in the sidebar and bars, keeping the
       browser's where text can be selected or typed
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
-- [ ] Side-by-side and whole-file views (Monaco `DiffEditor` / editor tab)
 - [x] Viewed marks: a box per file and folder in the file list (and one
       for all files), in the gutter of each file and hunk header in the
       diff, and per file or hunk in the right-click menu; kept per hunk in
@@ -211,7 +212,6 @@ whole diff in one read-only document as in gitr.
       chevron only
 - [ ] Viewed marks: to try in use, collapsing viewed files (Monaco hides
       lines only through internal API), a key to mark and go to the next
-- [ ] Per-file syntax highlighting in the combined view
 - [x] Commits pane: base..HEAD as a graph, as gitk draws it (merges, the
       boundary, branch and tag labels, uncommitted changes on top); a
       click shows that commit alone, as git show does (header and message

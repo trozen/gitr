@@ -14,6 +14,7 @@ separately in line windows so the first paint never waits for them.
 import argparse
 import difflib
 import hashlib
+import heapq
 import json
 import os
 import re
@@ -73,7 +74,8 @@ K_FILE, K_HUNK, K_ADD, K_REM, K_CTX, K_META = 'f', 'h', 'a', 'r', 'c', 'm'
 K_REIND = 'i'
 K_COMMIT = 'k'  # the commit header and message before a single commit's diff
 EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
-MAX_COMMITS = 500
+MAX_COMMITS = 1000
+MAX_OLDER = 1000  # commits before the base the commits pane may ask for
 UNCOMMITTED = 'uncommitted'  # the commits pane's row for the working tree
 UNTRACKED = 'untracked'  # ... for the untracked files, above it
 ALL = 'all'  # ... for the whole review, as the older end of a range
@@ -685,10 +687,10 @@ class State:
         return {'commits': commits, 'rewritten': rewritten,
                 'files': files, 'add': add, 'del': rem}
 
-    def commits(self, wt: str, base: str) -> dict:
+    def commits(self, wt: str, base: str, older: int = 0) -> dict:
         wt = self.check_worktree(wt)
         changed, untracked = worktree_status(wt)
-        return {'commits': list_commits(wt, base), 'uncommitted': changed, 'untracked': untracked,
+        return {'commits': list_commits(wt, base, older), 'uncommitted': changed, 'untracked': untracked,
                 'head': git(wt, 'rev-parse', 'HEAD').strip()}
 
     # --viewed marks: .gitr/viewed.json in each worktree
@@ -1145,28 +1147,68 @@ def commit_header(wt: str, sha: str) -> 'tuple[list[str], dict]':
     return lines, {'hash': h, 'subject': subject}
 
 
-def list_commits(wt: str, base: str) -> list[dict]:
+def list_commits(wt: str, base: str, older: int = 0) -> list[dict]:
     """The commits in base..HEAD in graph order, newest first, then the
     boundary (the merge base, and anything merged in from base), as gitk
-    lists them. Long ranges are cut at MAX_COMMITS."""
+    lists them. Long ranges are cut at MAX_COMMITS. With `older`, the
+    boundary comes in graph order with that many of its ancestors, marked
+    old: history for context, outside the review."""
     if not base or base.startswith('-'):
         raise GitError(f'invalid base: {base!r}')
     commits = _log_commits(wt, '--boundary', f'--max-count={MAX_COMMITS + 1}', f'{base}..HEAD')
     if not commits:
         # Nothing since the base: git lists no boundary then, but the base
         # (its merge base with HEAD) is still what the review starts from.
-        commits = _log_commits(wt, '-n', '1', merge_base(wt, base))
+        commits = _log_commits(wt, '-n', '1', merge_base(wt, base), topo=False)
         commits[0]['boundary'] = True
     inside = [c for c in commits if not c['boundary']]
     if len(inside) > MAX_COMMITS:
         # cut: the boundary was not reached, and one commit too many came
         commits = inside[:MAX_COMMITS]
         commits[-1]['cut'] = True
+    elif older:
+        commits = inside + older_commits(wt, [c for c in commits if c['boundary']], older)
     return commits
 
 
-def _log_commits(wt: str, *args: str) -> list[dict]:
-    out = git(wt, 'log', '--topo-order', '--decorate=full',
+def older_commits(wt: str, boundary: list[dict], n: int) -> list[dict]:
+    """The boundary commits and n of their ancestors, newest first in graph
+    order, so lines run from the boundary on into the history."""
+    hashes = {c['hash'] for c in boundary}
+    # Newest first by date, not --topo-order: without a commit-graph file git
+    # would walk the whole history for that before printing the first line.
+    out = _log_commits(wt, f'--max-count={n + len(hashes)}', *hashes, topo=False)
+    older = [c for c in out if c['hash'] not in hashes][:n]
+    for c in older:
+        c['old'] = True
+    return graph_order(boundary + older)
+
+
+def graph_order(commits: list[dict]) -> list[dict]:
+    """No commit before any of its children (dates can be wrong), else
+    newest first."""
+    at = {c['hash']: c for c in commits}
+    children = {h: 0 for h in at}
+    for c in commits:
+        for p in set(c['parents']):
+            if p in children:
+                children[p] += 1
+    ready = [(-c['time'], i, c['hash']) for i, c in enumerate(commits) if not children[c['hash']]]
+    heapq.heapify(ready)
+    out = []
+    while ready:
+        c = at[heapq.heappop(ready)[2]]
+        out.append(c)
+        for p in set(c['parents']):
+            if p in children:
+                children[p] -= 1
+                if not children[p]:
+                    heapq.heappush(ready, (-at[p]['time'], len(out), p))
+    return out
+
+
+def _log_commits(wt: str, *args: str, topo: bool = True) -> list[dict]:
+    out = git(wt, 'log', *(['--topo-order'] if topo else []), '--decorate=full',
               '--format=%m%x00%H%x00%P%x00%an%x00%ae%x00%at%x00%D%x00%s%x00%b%x1e', *args, '--')
     commits = []
     for rec in out.split('\x1e'):
@@ -1375,7 +1417,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   q.get('reindent') == '1', q.get('commit') or None,
                                                   q.get('since') or None))
             if url.path == '/api/commits':
-                return self._json(self.state.commits(q['wt'], q['base']))
+                return self._json(self.state.commits(q['wt'], q['base'],
+                                                     max(0, min(int(q.get('older') or 0), MAX_OLDER))))
             if url.path == '/api/refs':
                 return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':

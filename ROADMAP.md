@@ -231,9 +231,9 @@ whole diff in one read-only document as in gitr.
 - [ ] Comment marks in the commits pane: per commit, the comments on lines
       it changed (found with blame on the commented lines), so it shows
       which commits have been reviewed and which not yet
-- [ ] Older commits in the commits pane: a number of commits before the
-      base (configurable, or a fixed number), faded like the base and not
-      part of "All changes", to look at or pick as a single commit
+- [x] Older commits in the commits pane: a number of commits before the
+      base (30 by default, set in the settings popup), faded like the base
+      and not part of "All changes", to look at or pick as a single commit
 - [ ] Phone view (Android, as an installed web app over `tailscale serve`):
       Monaco is not supported on mobile browsers and our comment controls
       need hover and right-click, so a separate light page rather than the

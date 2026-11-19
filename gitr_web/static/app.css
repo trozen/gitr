@@ -299,6 +299,8 @@ h2 .grow { flex: 1; }
 #commit-list .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #commit-list .age { flex: none; color: var(--dim); font-size: .92em; }
 #commit-list .boundary .subj { color: var(--dim); }
+#commit-list .old > * { opacity: .55; }
+#commit-list .old .subj { color: var(--dim); }
 #commit-list .uncommitted .subj { font-style: italic; }
 #commit-list .all .subj { font-weight: 600; }
 #commit-list .all .what { flex: none; color: var(--dim); font-size: .92em; }
@@ -333,6 +335,10 @@ h2 .grow { flex: 1; }
 #settings .set-row button { padding: 0 6px; }
 #settings .reload-row { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--sel); }
 #settings .size { min-width: 3ch; text-align: center; font-family: var(--mono); }
+#settings input.size { width: 5ch; font-size: inherit; background: var(--bg); color: var(--fg);
+                      border: 1px solid var(--sel); padding: 1px 2px; -moz-appearance: textfield; }
+#settings input.size::-webkit-inner-spin-button, #settings input.size::-webkit-outer-spin-button {
+  -webkit-appearance: none; margin: 0; }
 #cmenu { position: fixed; z-index: 40; min-width: 160px; padding: 4px 0; background: var(--bg-side);
   border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }

@@ -242,7 +242,10 @@ reload changed), a hunk that only moved stays viewed, and a hunk viewed in
 a single commit is viewed in the whole review too, while it is the same.
 The third icon of the left bar shows the commits between the base and
 HEAD as a graph, as gitk draws them, with the uncommitted changes and the
-untracked files on top, and the base at the bottom.
+untracked files on top, and the base at the bottom, followed by some
+older commits, faded, for context (how many is set in the settings popup,
+per browser; 0 hides them). They are not part of "All changes", but can be
+picked as any other commit.
 Clicking one shows only that commit, as `git show` does (a merge against
 its first parent), or only the uncommitted changes or untracked files.
 Shift-clicking a second row (or the compare icon in the pane's header,

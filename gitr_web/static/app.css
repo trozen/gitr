@@ -81,6 +81,8 @@ h2 .grow { flex: 1; }
 #projects .wt.sel { box-shadow: inset 2px 0 0 var(--file); background: #2c2e3a; }
 #projects .wt.sel.active { background: var(--sel); }
 .wt .branch { color: var(--file); }
+/* the multi-repo directory a checkout is in */
+.project .pre { color: var(--dim); }
 .err { color: var(--rem); padding: 1px 24px; white-space: pre-wrap; }
 
 .file .st { font-family: var(--mono); width: 1ch; text-align: center; }

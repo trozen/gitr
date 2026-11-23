@@ -504,14 +504,19 @@ function renderProjects(projects) {
   const box = $('projects');
   box.textContent = '';
   for (const p of projects) {
-    const group = el('div', 'group', [el('div', 'row project', [el('span', 'grow', p.name)])]);
+    // a checkout of a multi-repo directory: the directories leading to it
+    // as a paler prefix
+    const [dir, name] = projectParts(p);
+    const head = el('div', 'row project', [el('span', 'grow', [el('span', 'pre', dir && dir + ' \u203a '), name])]);
+    head.title = p.path;
+    const group = el('div', 'group', [head]);
     if (p.error) group.append(el('div', 'err', p.error));
     for (const w of p.worktrees) {
       const rel = w.path === p.path ? '' : w.path.split('/').pop();
       const row = el('div', 'row wt', [el('span', 'grow branch', wtLabel(w)), el('span', 'dim', rel)]);
       row.title = w.path;
       row.dataset.wt = w.path;
-      row.dataset.hay = [p.name, wtLabel(w), rel].join(' ').toLowerCase();
+      row.dataset.hay = [p.group || '', p.name, wtLabel(w), rel].join(' ').toLowerCase();
       row.classList.toggle('active', w.path === current?.wt);
       worktrees.set(w.path, { p, w });
       row.addEventListener('click', () => { showSwitcher(false); openWorktree(w.path); });
@@ -532,11 +537,14 @@ function openWorktree(path) {
 }
 
 const wtLabel = (w) => w.branch || (w.head ? w.head + ' (detached)' : '?');
+const projectName = (p) => (p.group ? p.group + '/' : '') + p.name;
+// a multi-repo directory's checkout as [its directory, the repo's folder]
+const projectParts = (p) => [p.group || '', p.name];
 
 function updateCrumb() {
   const entry = current && worktrees.get(current.wt);
   $('crumb-text').textContent = !current ? 'select a worktree'
-    : entry ? `${entry.p.name} \u203a ${wtLabel(entry.w)}` : current.wt;
+    : entry ? `${projectParts(entry.p).filter(Boolean).join(' \u203a ')} \u203a ${wtLabel(entry.w)}` : current.wt;
   $('crumb').title = (current ? current.wt + '\n' : '') + 'Switch project or worktree';
 }
 
@@ -700,7 +708,7 @@ function renderQuickOpen() {
   });
   let k = 0;
   for (const [path, { p, w }] of worktrees) {
-    const key = `${p.name}/${wtLabel(w)}`;
+    const key = `${projectName(p)}/${wtLabel(w)}`;
     const m = fuzzyMatch(q, key);
     if (m) wts.push({ wt: path, key, k, ...m });
     k++;
@@ -719,12 +727,12 @@ function renderQuickOpen() {
     if (it.wt) {
       if (it === wts[0]) box.append(el('h2', null, 'worktrees'));
       const { p, w } = worktrees.get(it.wt);
-      const cut = p.name.length + 1;
+      const cut = projectName(p).length + 1;
       const hits = new Set(it.hits);
       const rel = w.path === p.path ? '' : w.path.split('/').pop();
       const row = el('div', 'row' + (n === qoSel ? ' sel' : '') + (it.wt === current?.wt ? ' current' : ''), [
         el('span', 'qo-name', highlighted(wtLabel(w), hits, cut)),
-        el('span', 'qo-dir', [el('bdi', null, highlighted(p.name, hits, 0))]),
+        el('span', 'qo-dir', [el('bdi', null, highlighted(projectName(p), hits, 0))]),
         el('span', 'n', rel),
       ]);
       row.setAttribute('role', 'option');
@@ -1145,7 +1153,7 @@ function selectCommit(hash, keep = false) {
 
 // What the list shows; settings and positions are not part of it.
 function listSignature(projects) {
-  return JSON.stringify(projects.map((p) => [p.name, p.path, p.error,
+  return JSON.stringify(projects.map((p) => [p.group, p.name, p.path, p.error,
     p.worktrees.map((w) => [w.path, w.branch, w.head, w.detached])]));
 }
 

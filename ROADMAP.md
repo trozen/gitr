@@ -182,12 +182,12 @@ whole diff in one read-only document as in gitr.
       comments): every comment in diff order under its file, with kind,
       first line and line number; click to jump. Comments on files not in
       the current diff listed at the end
-- [ ] Multi-repo projects: a project directory that is not a git repo but
-      holds several (e.g. a workspace with one checkout per service). To
-      decide: list the sub-repos as separate entries under the project, or
-      review them as one combined diff with the repo name prefixed to each
-      path (one base per sub-repo, comments still in each repo's `.gitr/`);
-      and how agent worktrees map when each sub-repo has its own
+- [x] Multi-repo projects: a project directory that is not a git repo but
+      holds several (e.g. a workspace with one checkout per service) lists
+      its checkouts under it, each an ordinary repo with its worktrees
+- [ ] Maybe: one combined diff over a multi-repo directory's checkouts, the
+      repo name prefixed to each path (one base per checkout, comments still
+      in each repo's `.gitr/`), agent worktrees matched by branch name
 - [ ] Find pane in the sidebar, as VS Code's search view: every match
       listed under its file, click to jump; maybe filters (only added /
       removed lines) and the comment texts searched too. For now Monaco's

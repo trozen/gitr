@@ -5,6 +5,7 @@ their worktrees.
 Run:  gitr-serve [--port 4487] [repo ...]     (from a checkout: python3 gitr_web/server.py)
 With no repo arguments the project list is read from
 ~/.config/gitr/projects.json:  {"projects": ["~/dev/a", {"path": "~/dev/b", "name": "b"}]}
+A directory of checkouts: {"path": "~/dev/ws", "multi": true, "depth": 1}
 
 The browser gets the whole diff as one document (the same idea as gitr's
 single Text widget) plus per-line metadata; word-diff ranges are fetched
@@ -451,11 +452,13 @@ def _u16len(s: str) -> int:
 
 class State:
     def __init__(self, repos: list[dict]) -> None:
-        self.repos = repos
+        self._entries = repos
         self._lock = threading.Lock()
         # review.json is read, changed and written back as a whole
         self._review_lock = threading.Lock()
         self._settings_lock = threading.Lock()
+        self._repos_lock = threading.Lock()
+        self._repos: 'tuple[float, list[dict]] | None' = None  # (when, expand_repos())
         # Documents by (worktree, id), least recently used first: word-diff
         # windows, comments and the change check are served from them without
         # recomputing the diff. See _evict_docs.
@@ -464,15 +467,31 @@ class State:
         self._baselines: OrderedDict[str, tuple] = OrderedDict()
         self._md_dropped: set[str] = set()  # worktrees drop_review_md has run for
 
+    @property
+    def repos(self) -> list[dict]:
+        # Rescanned every few seconds, so a checkout added to a multi-repo
+        # directory shows up without a restart; not on every request, as each
+        # one checks its worktree against these.
+        with self._repos_lock:
+            now = time.monotonic()
+            if self._repos is None or now - self._repos[0] > REPOS_S:
+                self._repos = (now, expand_repos(self._entries))
+            return self._repos[1]
+
     def projects(self) -> list[dict]:
         out = []
+        with self._settings_lock:
+            saved = self._load_settings()
         for r in self.repos:
             entry = {'name': r['name'], 'path': r['path']}
+            if 'group' in r:
+                entry['group'] = r['group']
+            if 'error' in r:
+                out.append({**entry, 'error': r['error'], 'worktrees': []})
+                continue
             try:
                 entry['worktrees'] = list_worktrees(r['path'])
                 entry['defaultBase'] = default_base(r['path'])
-                with self._settings_lock:
-                    saved = self._load_settings()
                 entry['settings'] = saved['projects'].get(r['path'])
                 for w in entry['worktrees']:
                     real = os.path.realpath(w['path'])
@@ -1435,7 +1454,7 @@ class Events:
         projects = state.projects()
         # what the page's list shows (app.js listSignature); positions and
         # settings change with every scroll and are no news
-        sig = json.dumps([[p['name'], p['path'], p.get('error'),
+        sig = json.dumps([[p.get('group'), p['name'], p['path'], p.get('error'),
                            [[w['path'], w.get('branch'), w.get('head'), w.get('detached')]
                             for w in p['worktrees']]] for p in projects])
         if sig != self.projects_sig:
@@ -1728,7 +1747,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def read_config() -> dict:
-    return json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    try:
+        return json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    except ValueError as e:
+        # --reload restarts on every save of it, a half-written one included
+        sys.exit(f'gitr-serve: {tilde(str(CONFIG_PATH))}: {e}')
 
 
 def load_repos(args_repos: list[str]) -> list[dict]:
@@ -1737,9 +1760,97 @@ def load_repos(args_repos: list[str]) -> list[dict]:
     for it in items:
         path = it if isinstance(it, str) else it['path']
         path = os.path.realpath(os.path.expanduser(path))
-        name = it.get('name') if isinstance(it, dict) else None
-        repos.append({'path': path, 'name': name or os.path.basename(path)})
+        repo = {'path': path, 'name': os.path.basename(path)}
+        if isinstance(it, dict):
+            repo['name'] = it.get('name') or repo['name']
+            if it.get('multi'):
+                depth = it.get('depth', 1)
+                if type(depth) is not int or depth < 1:
+                    sys.exit(f'gitr-serve: {tilde(str(CONFIG_PATH))}: "depth" of {it["path"]} '
+                             f'is to be a whole number from 1, not {json.dumps(depth)}')
+                repo['multi'] = True
+                repo['depth'] = depth
+        repos.append(repo)
     return repos
+
+
+REPOS_S = 3  # how long a multi-repo directory's scan is used
+
+
+def git_dir_of(d: str) -> 'tuple[str, bool] | None':
+    """The repository a directory is a checkout of (its common git dir) and
+    whether it is a linked worktree; None if it is not a checkout or a bare
+    repo."""
+    dotgit = os.path.join(d, '.git')
+    if os.path.isdir(dotgit):
+        return os.path.realpath(dotgit), False
+    if os.path.isfile(dotgit):
+        try:
+            gitdir = Path(dotgit).read_text().strip().removeprefix('gitdir:').strip()
+        except OSError:
+            return None
+        gitdir = os.path.join(d, gitdir)
+        try:
+            # only a linked worktree's git dir has one
+            common = Path(gitdir, 'commondir').read_text().strip()
+        except OSError:
+            return os.path.realpath(gitdir), False  # a submodule, or --separate-git-dir
+        return os.path.realpath(os.path.join(gitdir, common)), True
+    if all(os.path.exists(os.path.join(d, n)) for n in ('HEAD', 'objects', 'refs')):
+        return os.path.realpath(d), False  # bare: its worktrees are listed under it
+    return None
+
+
+def sub_repos(path: str, depth: int = 1) -> list[str]:
+    """The checkouts and bare repos in a directory up to `depth` levels down
+    (a workspace with one checkout per service), not looking inside them
+    nor through symlinks. A linked worktree stands for its repo only when
+    the repo itself is not found: either lists all its worktrees."""
+    found = []  # (path, common git dir, linked)
+
+    def scan(d: str, depth: int) -> None:
+        try:
+            children = sorted((e for e in os.scandir(d) if e.is_dir() and not e.name.startswith('.')),
+                              key=lambda e: e.name)
+        except OSError:
+            return
+        for e in children:
+            if (g := git_dir_of(e.path)):
+                found.append((e.path, *g))
+            elif depth > 1 and not e.is_symlink():
+                scan(e.path, depth - 1)
+
+    scan(path, depth)
+    mains = {g for _, g, linked in found if not linked}
+    out, seen = [], set()
+    for p, g, linked in found:
+        if (linked and g in mains) or g in seen:
+            continue
+        seen.add(g)
+        out.append(p)
+    return out
+
+
+def expand_repos(entries: list[dict]) -> list[dict]:
+    """Configured entries with each multi-repo directory replaced by its
+    checkouts, named by their folder, with the directories leading to them
+    (from the configured one's name) as their group."""
+    out = []
+    for e in entries:
+        if not e.get('multi'):
+            out.append(e)
+            continue
+        if not os.path.isdir(e['path']):
+            out.append({**e, 'error': 'no such directory'})
+            continue
+        subs = sub_repos(e['path'], e['depth'])
+        for sub in subs:
+            rel = os.path.relpath(sub, e['path']).split(os.sep)
+            out.append({'path': os.path.realpath(sub), 'name': rel[-1],
+                        'group': '/'.join([e['name'], *rel[:-1]])})
+        if not subs:
+            out.append({**e, 'error': f"no git checkouts in it (depth {e['depth']})"})
+    return out
 
 
 RELOAD_CHILD_ENV = 'GITR_SERVE_CHILD'
@@ -1747,13 +1858,14 @@ RELOAD_CHILD_ENV = 'GITR_SERVE_CHILD'
 
 def supervise(argv: list[str]) -> None:
     """--reload: run the server in a child process and start a new one when
-    the Python source changes. A separate process rather than re-exec'ing
-    itself, so a save with a syntax error leaves the supervisor waiting for
+    the Python source or the config changes. A separate process rather
+    than re-exec'ing itself, so a save with a syntax error leaves the supervisor waiting for
     the next save instead of ending it. The page files are read from disk on
     every request and need no restart, only a browser reload, which is
     printed."""
     here = Path(__file__).resolve()
-    watched = [here, Path(gitr.__file__).resolve()]
+    # the config is stamped 0 while it is missing, so creating it counts
+    watched = [here, Path(gitr.__file__).resolve(), CONFIG_PATH]
 
     def stamp() -> tuple:
         out = []
@@ -1786,7 +1898,8 @@ def supervise(argv: list[str]) -> None:
                     print(f"gitr-serve: page changed ({', '.join(changed)}), reload the browser",
                           file=sys.stderr)
                     pages = now
-            print('gitr-serve: source changed, restarting', file=sys.stderr)
+            changed = [tilde(str(p)) for p, a, b in zip(watched, seen, stamp()) if a != b]
+            print(f"gitr-serve: {', '.join(changed)} changed, restarting", file=sys.stderr)
             child.terminate()
             child.wait()
     except KeyboardInterrupt:
@@ -1830,7 +1943,8 @@ def config_template(args_repos: list[str]) -> str:
         try:
             paths = [tilde(git(os.getcwd(), 'rev-parse', '--show-toplevel').strip())]
         except GitError:
-            pass
+            if sub_repos(os.getcwd()):
+                paths = [{'path': tilde(os.getcwd()), 'multi': True}]
     projects: list = paths or ['~/dev/repo-a', {'path': '~/dev/repo-b', 'name': 'b'}]
     return json.dumps({'projects': projects, 'allow_hosts': tailscale_names()}, indent=2)
 
@@ -1859,7 +1973,7 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
                          '`tailscale serve` (repeatable; added to "allow_hosts" in '
                          f'{CONFIG_PATH.name}); the server still listens on --host')
     ap.add_argument('--reload', action='store_true',
-                    help='restart when server.py or gitr.py changes (for development)')
+                    help=f'restart when server.py, gitr.py or {CONFIG_PATH.name} changes (for development)')
     ap.add_argument('--print-config', action='store_true',
                     help=f'print a {CONFIG_PATH.name} for the given repos (or the current one) '
                          f'to stdout, to save as {CONFIG_PATH}')
@@ -1889,7 +2003,8 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
         print(f'  also answering as {h}', file=sys.stderr)
     width = max(len(r['name']) for r in repos)
     for r in repos:
-        print(f"  {r['name']:<{width}}  {tilde(r['path'])}", file=sys.stderr)
+        multi = f" (multi-repo, depth {r['depth']})" if r.get('multi') else ''
+        print(f"  {r['name']:<{width}}  {tilde(r['path'])}{multi}", file=sys.stderr)
     serve(srv)
 
 

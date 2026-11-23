@@ -95,9 +95,10 @@ gitr serve ~/dev/repo-a                      # the same
 ```
 
 From a checkout, without installing: `python3 gitr_web/server.py`, with
-`--reload` to restart on changes to `gitr_web/server.py` or `gitr.py`. The
-page files under `gitr_web/static/` are read from disk on every request, so
-changes to them only need a browser refresh. The Monaco bundle under
+`--reload` to restart on changes to `gitr_web/server.py`, `gitr.py` or
+`~/.config/gitr/projects.json`. The page files under `gitr_web/static/` are
+read from disk on every request, so changes to them only need a browser
+refresh. The Monaco bundle under
 `gitr_web/static/monaco/` is built and committed; to move to another Monaco
 version, change it in `monaco/package.json` and run
 `cd monaco && npm install && npm run build` (Node is needed for that only).
@@ -108,6 +109,17 @@ With no repository arguments the list is read from
 ```json
 {"projects": ["~/dev/repo-a", {"path": "~/dev/repo-b", "name": "b"}]}
 ```
+
+A directory that is not a git repo but holds several (a workspace with one
+checkout per service, say) is listed as a heading with each checkout under
+it, picked up afresh with every listing, when its entry says so:
+
+```json
+{"projects": [{"path": "~/dev/workspace", "multi": true}]}
+```
+
+Only the checkouts directly in it are found; `"depth": 2` looks one level
+further down (never inside a checkout).
 
 `gitr-serve --print-config [repo ...]` prints one for the repos given (or the
 one you are in), ready to redirect into that file.

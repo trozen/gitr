@@ -236,6 +236,9 @@ whole diff in one read-only document as in gitr.
 - [x] Older commits in the commits pane: a number of commits before the
       base (30 by default, set in the settings popup), faded like the base
       and not part of "All changes", to look at or pick as a single commit
+- [x] The base's own commits in the commits pane: HEAD..base, as
+      `gitk HEAD base` draws them, faded, toggled by an icon in the pane's
+      header (on by default), so a branch behind its base shows it
 - [ ] Phone view (Android, as an installed web app over `tailscale serve`):
       Monaco is not supported on mobile browsers and our comment controls
       need hover and right-click, so a separate light page rather than the

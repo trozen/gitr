@@ -255,6 +255,13 @@ function initViews() {
   setView(VIEWS.includes(prefs.view) ? prefs.view : 'files');
   $('commit-all').addEventListener('click', () => selectCommit(null));
   $('range-mode').addEventListener('click', () => setRangeMode(rangeMode ? null : 'first'));
+  $('on-base').classList.toggle('on', onBaseShown());
+  $('on-base').addEventListener('click', () => {
+    prefs = { ...prefs, onBase: !onBaseShown() };
+    savePrefs();
+    $('on-base').classList.toggle('on', onBaseShown());
+    if (current) loadCommits(wordGen);
+  });
 }
 
 // In diff order under their files, as the zones are stacked; comments on
@@ -822,6 +829,12 @@ const LANE_W = 12;
 const OLDER_DEF = 30, OLDER_STEP = 5, OLDER_MAX = 1000;
 const olderCount = () => (Number.isFinite(prefs.older)
   ? Math.min(OLDER_MAX, Math.max(0, Math.round(prefs.older))) : OLDER_DEF);
+// The base's commits since the branch left it, per browser as well.
+const onBaseShown = () => prefs.onBase !== false;
+// listed for context, outside the review: older than the base, or the base's own
+const isFaded = (r) => !!(r?.old || r?.onBase);
+const commitsQuery = () => ({ wt: shown.wt, base: shown.base, older: olderCount(), onBase: onBaseShown() ? 1 : 0 });
+const FADED = .55;  // = the opacity of the faded rows' text in app.css
 const LANE_COLORS = ['#8be9fd', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c'];
 
 // Only the last request counts: a refresh still on its way when the older
@@ -831,7 +844,7 @@ let commitsSeq = 0;
 async function refreshCommits(gen) {
   const seq = ++commitsSeq;
   try {
-    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, older: olderCount() });
+    const r = await api('/api/commits', commitsQuery());
     // Most worktree changes are edits, which leave the list as it is: a
     // thousand rows and their graph are not redrawn for nothing.
     if (gen === wordGen && seq === commitsSeq && JSON.stringify(r) !== JSON.stringify(commitList)) {
@@ -845,7 +858,7 @@ async function loadCommits(gen) {
   const seq = ++commitsSeq;
   const at = doc.fingerprintAll;
   try {
-    const r = await api('/api/commits', { wt: shown.wt, base: shown.base, older: olderCount() });
+    const r = await api('/api/commits', commitsQuery());
     if (gen !== wordGen || seq !== commitsSeq) return;
     commitList = r;
     commitsFp = at;
@@ -863,7 +876,8 @@ async function loadCommits(gen) {
 // rest, so every merge from the base would draw a lane down to the end.
 // Each goes right below its last child instead, closing that lane at once.
 // With older commits listed the lanes go on into them anyway, and the
-// boundary keeps its place among them: some of it is older than the rest.
+// boundary keeps its place among them (the server's order). The base's own
+// commits end in the boundary like the review's: placed the same way.
 function commitRows() {
   if (!commitList) return [];
   const rows = commitList.commits.filter((c) => !c.boundary);
@@ -898,6 +912,8 @@ const LOCAL = new Set(['uncommitted', 'untracked']);  // rows that are no commit
 // first parent continues the column, further parents (a merge) take free
 // ones. Parents not in the list (beyond a cut) start no column. A line keeps
 // its colour along its branch, not per column: a new line takes the next.
+// A line from a faded commit (older than the base, or the base's own) is
+// faded down to its parent, also where it passes rows that are not.
 function commitGraph(rows) {
   const present = new Set(rows.map((r) => r.hash));
   const older = rows.some((r) => r.old);
@@ -910,14 +926,15 @@ function commitGraph(rows) {
     if (col === -1) { col = lanes.indexOf(null); if (col === -1) col = lanes.length; }
     for (let i = 0; i < lanes.length; i++) if (lanes[i] && lanes[i].hash === r.hash) lanes[i] = null;
     const parents = r.boundary && !older ? [] : r.parents.filter((p) => present.has(p));
+    const faded = isFaded(r);
     const outs = [];
     parents.forEach((p, n) => {
       let j = n === 0 ? col : lanes.findIndex((l) => l && l.hash === p);
       if (j === -1) {
         j = lanes.indexOf(null); if (j === -1) j = lanes.length;
-        lanes[j] = { hash: p, color: n === 0 ? color : colors++ };
-      } else if (n === 0) lanes[j] = { hash: p, color };
-      outs.push({ j, color: lanes[j].color });
+        lanes[j] = { hash: p, color: n === 0 ? color : colors++, faded };
+      } else if (n === 0) lanes[j] = { hash: p, color, faded };
+      outs.push({ j, color: lanes[j].color, faded });
     });
     while (lanes.length && lanes[lanes.length - 1] == null) lanes.pop();
     return { col, color, before, outs };
@@ -935,18 +952,22 @@ function drawGraph(svg, r, g, width, h) {
   svg.setAttribute('height', h);
   const x = (i) => LANE_W / 2 + i * LANE_W, mid = h / 2;
   const paint = (c) => LANE_COLORS[c % LANE_COLORS.length];
-  const line = (x1, y1, x2, y2, c) => svg.append(svgEl('path', {
+  const line = (x1, y1, x2, y2, c, faded) => svg.append(svgEl('path', {
     d: x1 === x2 ? `M${x1} ${y1}V${y2}` : `M${x1} ${y1}C${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${y2}`,
-    stroke: paint(c), 'stroke-width': 1.5, fill: 'none' }));
+    stroke: paint(c), 'stroke-width': 1.5, fill: 'none', opacity: faded ? FADED : 1 }));
   g.before.forEach((l, i) => {
     if (l == null) return;
-    if (l.hash === r.hash) line(x(i), 0, x(g.col), mid, l.color);
-    else line(x(i), 0, x(i), h, l.color);
+    if (l.hash === r.hash) line(x(i), 0, x(g.col), mid, l.color, l.faded);
+    else line(x(i), 0, x(i), h, l.color, l.faded);
   });
-  for (const o of g.outs) line(x(g.col), mid, x(o.j), h, o.color);
+  for (const o of g.outs) line(x(g.col), mid, x(o.j), h, o.color, o.faded);
   const color = LOCAL.has(r.hash) ? 'var(--note)' : paint(g.color);
-  svg.append(svgEl('circle', { cx: x(g.col), cy: mid, r: 3.5,
-    fill: r.boundary ? 'var(--bg-side)' : color, stroke: color, 'stroke-width': 1.5 }));
+  const dot = { cx: x(g.col), cy: mid, r: 3.5, 'stroke-width': 1.5 };
+  // a faded dot on a disc of the row's background, so the lines do not
+  // show through
+  if (isFaded(r)) svg.append(svgEl('circle', { ...dot, fill: 'var(--row-bg)', stroke: 'var(--row-bg)' }));
+  svg.append(svgEl('circle', { ...dot, fill: r.boundary ? 'var(--row-bg)' : color, stroke: color,
+                               opacity: isFaded(r) ? FADED : 1 }));
 }
 
 function age(sec) {
@@ -960,8 +981,12 @@ function renderCommits() {
   const box = $('commit-list');
   box.textContent = '';
   const rows = commitRows();
-  const inside = commitList ? commitList.commits.filter((c) => !c.boundary && !c.old).length : 0;
+  const inside = commitList ? commitList.commits.filter((c) => !c.boundary && !isFaded(c)).length : 0;
   const cut = commitList?.commits.some((c) => c.cut);
+  const theirs = commitList ? commitList.commits.filter((c) => c.onBase).length : 0;
+  const theirsCut = commitList?.commits.some((c) => c.onBaseCut);
+  $('on-base').title = (onBaseShown() ? 'Hide' : 'Show') + ` the commits on ${shown?.base || 'the base'} that HEAD does not have`
+    + (onBaseShown() && commitList ? ` (${theirs ? theirs + (theirsCut ? '+, only the newest listed' : '') : 'none'})` : '');
   $('commits-count').textContent = commitList ? `(${inside}${cut ? '+' : ''})` : '';
   if (!commitList) return;
   const graph = commitGraph(rows);
@@ -973,7 +998,7 @@ function renderCommits() {
                                        el('span', 'what', 'merge base to the working tree')]);
   all.firstChild.style.width = width + 'px';
   all.firstChild.style.flex = 'none';
-  all.title = `The whole review: ${current.base}'s merge base to the working tree, without the`
+  all.title = `The whole review: ${shown.base}'s merge base to the working tree, without the`
     + ' untracked files (shift-click "Untracked files" to add them)';
   all.dataset.hash = 'all';
   all.addEventListener('click', (e) => pickCommit('all', e.shiftKey));
@@ -986,7 +1011,7 @@ function renderCommits() {
       lab.title = `${ref.kind}${ref.head ? ' (checked out)' : ''}: ${ref.name}`;
       return lab;
     });
-    const cls = 'row cm' + (r.boundary ? ' boundary' : '') + (r.old ? ' old' : '')
+    const cls = 'row cm' + (r.boundary ? ' boundary' : '') + (r.old ? ' old' : '') + (r.onBase ? ' onbase' : '')
       + (LOCAL.has(r.hash) ? ' uncommitted' : '');
     const row = el('div', cls, [svg, ...(labels.length ? [el('span', 'refs', labels)] : []),
                                 el('span', 'subj', r.subject),
@@ -997,7 +1022,8 @@ function renderCommits() {
       : `${r.hash}\n${r.author} <${r.email}>\n${new Date(r.time * 1000).toLocaleString()}\n\n${r.subject}` +
         (r.body ? '\n\n' + r.body : '') +
         (r.boundary ? '\n\n(not between the base and HEAD: the merge base, or merged in from the base)' : '') +
-        (r.old ? '\n\n(older than the base: not part of "All changes")' : '');
+        (r.old ? '\n\n(older than the base: not part of "All changes")' : '') +
+        (r.onBase ? `\n\n(on ${shown.base}, not in HEAD: not part of "All changes")` : '');
     row.addEventListener('click', (e) => pickCommit(r.hash, e.shiftKey));
     row.addEventListener('contextmenu', (e) => { e.preventDefault(); commitMenu(r, e.clientX, e.clientY); });
     box.append(row);
@@ -1030,7 +1056,7 @@ function rangeHashes(older, newer) {
     return seen;
   };
   // from the merge base: the commits since it, not the boundary ones
-  const own = (h) => byHash.has(h) && !byHash.get(h).boundary && !byHash.get(h).old;
+  const own = (h) => byHash.has(h) && !byHash.get(h).boundary && !isFaded(byHash.get(h));
   if (older === 'all') return new Set([...reach(newer)].filter(own));
   const stop = reach(byHash.get(older)?.parents[0]);
   return new Set([...reach(newer)].filter((h) => !stop.has(h) && byHash.has(h)));
@@ -1050,12 +1076,15 @@ function markShownCommit() {
   // an end listed after a refresh no more: rebased away, or HEAD moved past it
   const missing = !!commitList && ![older, newer].every((h) => rows.some((r) => r.dataset.hash === h));
   $('commit-shown').classList.toggle('gone', missing);
-  if (missing)
+  if (missing) {
+    const where = ['between the base and HEAD', olderCount() && 'among the older commits',
+                   onBaseShown() && "among the base's own commits"].filter(Boolean).join(', nor ');
+    const hidden = onBaseShown() ? '' : " (the base's own commits are hidden)";
     $('commit-shown').title = c === 'uncommitted' ? 'There are no uncommitted changes now'
       : c === 'untracked' ? 'There are no untracked files now'
-      : c.includes('..') ? 'An end of this range is no longer between the base and HEAD'
-      : olderCount() ? 'This commit is no longer listed: not between the base and HEAD, nor among the older commits'
-      : 'This commit is no longer between the base and HEAD';
+      : c.includes('..') ? `An end of this range is no longer listed: not ${where}${hidden}`
+      : `This commit is no longer listed: not ${where}${hidden}`;
+  }
 }
 
 function showCommitShown(info) {
@@ -1132,8 +1161,13 @@ function pickCommit(hash, shift) {
       // newer end, except the uncommitted changes up to the untracked files.
       // From the merge base to the working tree is "All changes" itself.
       // An older commit comes before the merge base, so not after "All changes".
-      const ok = older === 'uncommitted' ? newer === 'untracked'
-        : !(older === 'all' && (newer === 'uncommitted' || commitRows().find((r) => r.hash === newer)?.old));
+      // The base's own commits are not on the way from the merge base to HEAD
+      // or the working tree: a range from them ends on them.
+      const byHash = new Map(commitRows().map((r) => [r.hash, r]));
+      const onBase = (h) => !!byHash.get(h)?.onBase;
+      const ok = onBase(older) !== onBase(newer) ? false
+        : older === 'uncommitted' ? newer === 'untracked'
+        : !(older === 'all' && (newer === 'uncommitted' || isFaded(byHash.get(newer))));
       if (ok) return selectCommit(`${older}..${newer}`, true);
     }
   }
@@ -2799,7 +2833,11 @@ function applyChanges(r) {
   const gen = wordGen, fp = doc.fingerprint;
   // The list follows the worktree quietly, untracked files included (it
   // counts them); the diff waits for reload.
-  if (r.fingerprintAll !== commitsFp && commitList) { commitsFp = r.fingerprintAll; refreshCommits(gen); }
+  // and the base's own commits with the base
+  if ((r.fingerprintAll !== commitsFp || r.baseTip !== commitList?.baseTip) && commitList) {
+    commitsFp = r.fingerprintAll;
+    refreshCommits(gen);
+  }
   // a view showing the untracked files changes with them, the others not
   const now = doc.fingerprintKind === 'all' ? r.fingerprintAll : r.fingerprint;
   if (now !== fp) {

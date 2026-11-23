@@ -707,11 +707,11 @@ class State:
         return {'commits': commits, 'rewritten': rewritten,
                 'files': files, 'add': add, 'del': rem}
 
-    def commits(self, wt: str, base: str, older: int = 0) -> dict:
+    def commits(self, wt: str, base: str, older: int = 0, on_base: bool = False) -> dict:
         wt = self.check_worktree(wt)
         changed, untracked = worktree_status(wt)
-        return {'commits': list_commits(wt, base, older), 'uncommitted': changed, 'untracked': untracked,
-                'head': git(wt, 'rev-parse', 'HEAD').strip()}
+        return {'commits': list_commits(wt, base, older, on_base), 'uncommitted': changed, 'untracked': untracked,
+                'head': git(wt, 'rev-parse', 'HEAD').strip(), 'baseTip': base_tip(wt, base)}
 
     # --viewed marks: .gitr/viewed.json in each worktree
 
@@ -1167,12 +1167,14 @@ def commit_header(wt: str, sha: str) -> 'tuple[list[str], dict]':
     return lines, {'hash': h, 'subject': subject}
 
 
-def list_commits(wt: str, base: str, older: int = 0) -> list[dict]:
+def list_commits(wt: str, base: str, older: int = 0, on_base: bool = False) -> list[dict]:
     """The commits in base..HEAD in graph order, newest first, then the
     boundary (the merge base, and anything merged in from base), as gitk
     lists them. Long ranges are cut at MAX_COMMITS. With `older`, the
     boundary comes in graph order with that many of its ancestors, marked
-    old: history for context, outside the review."""
+    old: history for context, outside the review. With `on_base`, the
+    commits of HEAD..base too (what the base got since the branch left it,
+    as `gitk HEAD base` shows them), marked onBase and all in graph order."""
     if not base or base.startswith('-'):
         raise GitError(f'invalid base: {base!r}')
     commits = _log_commits(wt, '--boundary', f'--max-count={MAX_COMMITS + 1}', f'{base}..HEAD')
@@ -1188,6 +1190,15 @@ def list_commits(wt: str, base: str, older: int = 0) -> list[dict]:
         commits[-1]['cut'] = True
     elif older:
         commits = inside + older_commits(wt, [c for c in commits if c['boundary']], older)
+    if on_base:
+        theirs = _log_commits(wt, f'--max-count={MAX_COMMITS + 1}', f'HEAD..{base}', topo=False)
+        if len(theirs) > MAX_COMMITS:
+            theirs = theirs[:MAX_COMMITS]
+            theirs[-1]['onBaseCut'] = True
+        for c in theirs:
+            c['onBase'] = True
+        if theirs:
+            commits = graph_order(commits + theirs)
     return commits
 
 
@@ -1300,6 +1311,13 @@ def worktree_status(wt: str) -> 'tuple[bool, int]':
 def ahead_behind(wt: str, base: str) -> tuple[int, int]:
     behind, ahead = git(wt, 'rev-list', '--left-right', '--count', f'{base}...HEAD').split()
     return int(ahead), int(behind)
+
+
+def base_tip(wt: str, base: str) -> str:
+    """The commit the base names: when it moves on and HEAD does not, the
+    diff stays the same, but the commits pane's lane of the base's own
+    commits changes."""
+    return git(wt, 'rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}').strip()
 
 
 def fingerprint(wt: str, merge_base: str, stat_untracked: bool) -> 'tuple[str, str]':
@@ -1499,7 +1517,7 @@ def view_stamps(state: 'State', wt: str, base: str, untracked: bool) -> 'dict | 
     try:
         wt = state.check_worktree(wt)
         tracked, every = fingerprint(wt, merge_base(wt, base), untracked)
-        return {'fingerprint': tracked, 'fingerprintAll': every,
+        return {'fingerprint': tracked, 'fingerprintAll': every, 'baseTip': base_tip(wt, base),
                 'review': gitr_stamp(wt, 'review.json'), 'viewed': gitr_stamp(wt, 'viewed.json')}
     except (GitError, OSError, ValueError):
         return None
@@ -1648,7 +1666,8 @@ class Handler(BaseHTTPRequestHandler):
                                                   q.get('since') or None))
             if url.path == '/api/commits':
                 return self._json(self.state.commits(q['wt'], q['base'],
-                                                     max(0, min(int(q.get('older') or 0), MAX_OLDER))))
+                                                     max(0, min(int(q.get('older') or 0), MAX_OLDER)),
+                                                     q.get('onBase') == '1'))
             if url.path == '/api/refs':
                 return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':
@@ -1659,6 +1678,7 @@ class Handler(BaseHTTPRequestHandler):
                 mb = merge_base(wt, q['base'])
                 tracked, every = fingerprint(wt, mb, shows_untracked(q.get('commit')))
                 return self._json({'fingerprint': tracked, 'fingerprintAll': every,
+                                   'baseTip': base_tip(wt, q['base']),
                                    'review': gitr_stamp(wt, 'review.json'),
                                    'viewed': gitr_stamp(wt, 'viewed.json'),
                                    'version': page_version()})

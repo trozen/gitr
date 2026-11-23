@@ -260,7 +260,10 @@ The third icon of the left bar shows the commits between the base and
 HEAD as a graph, as gitk draws them, with the uncommitted changes and the
 untracked files on top, and the base at the bottom, followed by some
 older commits, faded, for context (how many is set in the settings popup,
-per browser; 0 hides them). They are not part of "All changes", but can be
+per browser; 0 hides them). The branch icon in the pane's header adds the
+commits on the base that HEAD does not have, in a lane of their own and
+faded too, so a branch that fell behind its base shows by how much (on by
+default, per browser). Neither are part of "All changes", but they can be
 picked as any other commit.
 Clicking one shows only that commit, as `git show` does (a merge against
 its first parent), or only the uncommitted changes or untracked files.

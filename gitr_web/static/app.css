@@ -300,9 +300,15 @@ h2 .grow { flex: 1; }
 #commit-list svg.graph { flex: none; margin: -1px 0; overflow: visible; }
 #commit-list .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #commit-list .age { flex: none; color: var(--dim); font-size: .92em; }
+/* what the graph's hollow and faded dots are filled with: the row's own */
+#commit-list .cm { --row-bg: var(--bg-side); }
+#commit-list .cm:hover { --row-bg: #2c2e3a; }
+#commit-list .cm.active { --row-bg: var(--sel); }
 #commit-list .boundary .subj { color: var(--dim); }
-#commit-list .old > * { opacity: .55; }
-#commit-list .old .subj { color: var(--dim); }
+/* not the graph: a line passing such a row would change colour there
+   (drawGraph fades the lines from these commits, and their dots) */
+#commit-list .old > :not(svg), #commit-list .onbase > :not(svg) { opacity: .55; }
+#commit-list .old .subj, #commit-list .onbase .subj { color: var(--dim); }
 #commit-list .uncommitted .subj { font-style: italic; }
 #commit-list .all .subj { font-weight: 600; }
 #commit-list .all .what { flex: none; color: var(--dim); font-size: .92em; }

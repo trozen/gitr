@@ -20,6 +20,8 @@
      over the selection, so an opaque colour would hide it. */
   --add-bg: rgba(80, 250, 123, .06);
   --rem-bg: rgba(255, 85, 85, .06);
+  --add-all-bg: rgba(80, 250, 123, .15);
+  --rem-all-bg: rgba(255, 85, 85, .15);
   --add-hi: rgba(80, 250, 123, .22);
   --rem-hi: rgba(255, 85, 85, .25);
   --head-bg: rgba(189, 147, 249, .18);  /* = HEADER_BG in app.js over --bg */
@@ -212,6 +214,8 @@ h2 .grow { flex: 1; }
 /* Monaco decorations */
 .l-add { background: var(--add-bg); }
 .l-rem { background: var(--rem-bg); }
+.l-add-all { background: var(--add-all-bg); }
+.l-rem-all { background: var(--rem-all-bg); }
 /* A file header is a two-line tinted band (name, first hunk) with a line
    above it; any later hunk header, as in gitr, only a thin line above (on
    the gutter too, across the view). */

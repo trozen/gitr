@@ -13,6 +13,7 @@ separately in line windows so the first paint never waits for them.
 """
 
 import argparse
+import bisect
 import difflib
 import hashlib
 import heapq
@@ -195,6 +196,9 @@ class Doc:
         # (removed line numbers, added line numbers) per run of removed lines
         # followed by added lines; the word-diff pass works on these.
         self.blocks: list[tuple[list[int], list[int]]] = []
+        # The re-indent pass's unpaired lines in runs of both removed and
+        # added lines (word_ranges finds the other runs' itself).
+        self.lone: list[int] = []
         # Post-image line a comment on this line is stored under (a removed
         # line uses the position it sits at); 0 where no comment can go.
         self.anchor_no: list[int] = []
@@ -359,9 +363,11 @@ class Doc:
             elif act[0] == 'rem':
                 d = next(ri)
                 self._line_of[id(d)] = self._push(d.text, K_REM, old=d.old_line_no, anchor=d.new_line_no)
+                self.lone.append(self._line_of[id(d)])
             else:
                 d = next(ai)
                 self._line_of[id(d)] = self._push(d.text, K_ADD, new=d.new_line_no, anchor=d.new_line_no)
+                self.lone.append(self._line_of[id(d)])
         for d in run:
             if d.kind not in ('removed', 'added'):
                 self._push(d.text, K_META)
@@ -379,7 +385,9 @@ class Doc:
     def word_ranges(self, first: int, last: int) -> list[int]:
         """Changed-token column ranges for the blocks starting in
         [first, last], flattened as line, startCol, endCol (Monaco 1-based,
-        endCol exclusive)."""
+        endCol exclusive). A line of such a block left unpaired, added or
+        removed whole, comes as line, 0, 0: the page tints it as one, not as
+        an edited line."""
         out: list[int] = []
         for rem_lines, add_lines in self.blocks:
             if rem_lines[0] < first:
@@ -395,9 +403,15 @@ class Doc:
                     ri += 1
                     ai += 1
                 elif act[0] == 'rem':
+                    out += (rem_lines[ri], 0, 0)
                     ri += 1
                 else:
+                    out += (add_lines[ai], 0, 0)
                     ai += 1
+        for ln in self.lone[bisect.bisect_left(self.lone, first):]:
+            if ln > last:
+                break
+            out += (ln, 0, 0)
         return out
 
     def _token_ranges(self, line_old: int, line_new: int, out: list[int]) -> None:

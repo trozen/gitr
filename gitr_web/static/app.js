@@ -1551,12 +1551,39 @@ function foldingRanges() {
 // 'g' is not a server kind: the second line of a file's header band, which
 // is the file's first hunk header (or the empty line of a hunkless file).
 // Only hunk headers further down are drawn as plain separated lines.
-const LINE_CLASS = { a: 'l-add', r: 'l-rem', f: 'l-file', g: 'l-file2', h: 'l-head', k: 'l-commit' };
+// 'A' and 'R' are not server kinds either: lines added or removed whole,
+// tinted stronger than an edited line ('a', 'r'), whose changed words carry
+// the bright tint; else a new line next to an edited one reads as the
+// edited line's unchanged part. An added line is an edited one only if its
+// run of changed lines removes some too and the word diff paired it, which
+// the word ranges tell (a [0, 0] entry for a line it left unpaired).
+const LINE_CLASS = { a: 'l-add', r: 'l-rem', A: 'l-add-all', R: 'l-rem-all',
+                     f: 'l-file', g: 'l-file2', h: 'l-head', k: 'l-commit' };
 const MARGIN_CLASS = { f: 'l-file', g: 'l-file2', h: 'l-head' };
 const decoKind = (ln) => {
   const k = doc.kinds[ln - 1];
+  if (k === 'a' || k === 'r')
+    return mixedRuns()[ln - 1] && wordsByLine.get(ln)?.[0] !== 0 ? k : k.toUpperCase();
   return k === 'h' && doc.kinds[ln - 2] === 'f' ? 'g' : k;
 };
+
+// Per line, 1 where its run of changed lines both adds and removes. A "\ No
+// newline at end of file" line ('m') can sit inside a run.
+function mixedRuns() {
+  if (doc.mixed) return doc.mixed;
+  const kinds = doc.kinds, n = kinds.length;
+  const mixed = new Uint8Array(n);
+  for (let i = 0; i < n;) {
+    let j = i, add = false, rem = false;
+    for (; j < n && 'arim'.includes(kinds[j]); j++) {
+      add ||= kinds[j] === 'a';
+      rem ||= kinds[j] === 'r';
+    }
+    if (add && rem) mixed.fill(1, i, j);
+    i = Math.max(j, i + 1);
+  }
+  return (doc.mixed = mixed);
+}
 
 // Unlike the line backgrounds these cover the whole document (one per
 // file), since the minimap shows all of it.
@@ -1630,7 +1657,7 @@ function updateWordDecorations() {
     if (!r) continue;
     const cls = doc.kinds[ln - 1] === 'a' ? 'w-add' : 'w-rem';
     for (let i = 0; i < r.length; i += 2)
-      list.push({ range: new monaco.Range(ln, r[i], ln, r[i + 1]), options: { inlineClassName: cls } });
+      if (r[i]) list.push({ range: new monaco.Range(ln, r[i], ln, r[i + 1]), options: { inlineClassName: cls } });
   }
   wordDecos.set(list);
 }
@@ -1653,12 +1680,20 @@ async function fetchWords(gen) {
       flat = await api('/api/words', { wt: current.wt, id: doc.id, from: w, to: w + WORD_WINDOW - 1 });
     } catch { return; }
     if (gen !== wordGen) return;
+    // A block's lines can run past the window it starts in, so what is
+    // redrawn goes by the lines that came.
+    let shown = false, lone = false;
     for (let i = 0; i < flat.length; i += 3) {
       let r = wordsByLine.get(flat[i]);
       if (!r) wordsByLine.set(flat[i], (r = []));
       r.push(flat[i + 1], flat[i + 2]);
+      if (flat[i] >= decoWindow[0] && flat[i] <= decoWindow[1]) {
+        shown = true;
+        lone ||= flat[i + 1] === 0;
+      }
     }
-    if (w <= decoWindow[1] && w + WORD_WINDOW > decoWindow[0]) updateWordDecorations();
+    if (lone) updateDecorations(true);
+    else if (shown) updateWordDecorations();
   }
   wordsDone = true;
   timing.wordsMs = Math.round(performance.now() - t0);

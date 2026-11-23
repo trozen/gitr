@@ -705,8 +705,16 @@ def _pair_lines_for_word_diff(
     def nws_tokens(text: str) -> list[str]:
         return [t for t in re.findall(r'\w+|[^\w\s]|\s+', text) if not t.isspace()]
 
+    # Similarity counts words only: punctuation is shared by unrelated
+    # lines of code (`print(f(x))` and `p = g(h(3))` match on half their
+    # tokens), so it paired them and highlighted nearly all of both.
+    def sim_tokens(toks: list[str]) -> list[str]:
+        return [t for t in toks if t[0].isalnum() or t[0] == '_'] or toks
+
     tok_rem = [nws_tokens(line) for line in rem_lines]
     tok_add = [nws_tokens(line) for line in add_lines]
+    sim_rem = [sim_tokens(t) for t in tok_rem]
+    sim_add = [sim_tokens(t) for t in tok_add]
 
     thr = WORD_DIFF_MIN_RATIO
     if m * n > WORD_DIFF_MAX_BLOCK:
@@ -716,7 +724,7 @@ def _pair_lines_for_word_diff(
         result: list[tuple] = []
         k = min(m, n)
         for i in range(k):
-            sm = _word_matcher(tok_rem[i], tok_add[i])
+            sm = _word_matcher(sim_rem[i], sim_add[i])
             if sm.real_quick_ratio() >= thr and sm.quick_ratio() >= thr and sm.ratio() >= thr:
                 result.append(('pair', rem_lines[i], add_lines[i], tok_rem[i] == tok_add[i]))
             else:
@@ -726,14 +734,14 @@ def _pair_lines_for_word_diff(
         result.extend(('add', line) for line in add_lines[k:])
         return result
     sims = [[0.0] * n for _ in range(m)]
-    for j, b in enumerate(tok_add):
+    for j, b in enumerate(sim_add):
         # One matcher per added line: set_seq2 builds the b-side index that
         # every removed line is compared against, so reuse it instead of
         # rebuilding it m times.  The autojunk choice is per pair.
         exact = difflib.SequenceMatcher(None, autojunk=False)
         exact.set_seq2(b)
         junk: 'difflib.SequenceMatcher | None' = None
-        for i, a in enumerate(tok_rem):
+        for i, a in enumerate(sim_rem):
             if _use_autojunk(a, b):
                 if junk is None:
                     junk = difflib.SequenceMatcher(None, autojunk=True)

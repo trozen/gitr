@@ -246,6 +246,7 @@ whole diff in one read-only document as in gitr.
       one file at a time with a file picker, tap a line to comment, the
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
+- [ ] Integration with herdr, or gitr as a herdr plugin
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"
       above). Not carried over: pipe mode, the window's keys (postponed

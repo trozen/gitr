@@ -22,7 +22,14 @@ gitr comments list|add|rm|accept ...   # read and write comments
 gitr serve [repos]          # gitr-serve: many repos and worktrees
 ```
 
-No test suite yet. Syntax check:
+Tests (`unittest`-style, throwaway git repos in temp dirs, no network):
+```bash
+uv run pytest                               # pytest from the dev group
+python3 -m unittest discover -s tests -t .  # the same, stdlib only
+```
+They cover diff parsing, comment anchoring, the word diff pairing, the
+word ranges and gitr-serve's git queries (commit marks, commits, refs); the
+page itself is untested. Syntax check:
 ```bash
 python3 -c "import ast; ast.parse(open('gitr.py').read())"
 ```

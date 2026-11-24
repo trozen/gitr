@@ -8,6 +8,12 @@ version = "0.1.0.dev0"
 description = "Review coding agents' changes: a Git diff viewer in the browser"
 requires-python = ">=3.10"
 
+# For a checkout only (`uv run pytest`); the package itself needs only the
+# standard library, and the tests run without pytest too:
+# python3 -m unittest discover -s tests -t .
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [project.scripts]
 gitr = "gitr:main"
 gitr-serve = "gitr_web.server:main"

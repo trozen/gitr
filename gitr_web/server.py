@@ -1292,10 +1292,15 @@ def removed_by(wt: str, mb: str, file: str, anchors: list) -> 'list[str | None]'
     want = sorted({o for o in olds if o})
     if not want:
         return [None] * len(anchors)
+    try:
+        head = git(wt, 'rev-parse', 'HEAD').strip()
+    except GitError:
+        return [None] * len(anchors)
+    if head == mb:  # no commits since the base: HEAD has the line still
+        return [UNCOMMITTED if o else None for o in olds]
     args = [x for ln in want for x in ('-L', f'{ln},{ln}')]
     try:
         out = git(wt, 'blame', '--porcelain', '--reverse', f'{mb}..HEAD', *args, '--', file)
-        head = git(wt, 'rev-parse', 'HEAD').strip()
     except GitError:
         return [None] * len(anchors)
     last = {}  # old line -> the last commit that still had it

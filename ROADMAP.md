@@ -254,9 +254,9 @@ whole diff in one read-only document as in gitr.
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
 - [ ] UI polish, before the herdr integration
-- [ ] Tests: a small suite for the parts most changed of late (diff
-      parsing, comment anchoring, the word diff pairing), before the
-      release
+- [x] Tests: a small suite for the parts most changed of late (diff
+      parsing, comment anchoring, the word diff pairing, the commit marks),
+      `python3 -m unittest discover -s tests -t .`; the page has none
 - [ ] Release on PyPI (`uv tool install gitr`): a license, version 0.1.0,
       the metadata, install steps in the README for the package rather
       than a checkout

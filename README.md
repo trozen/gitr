@@ -1,20 +1,91 @@
 # gitr
 
-A Git diff viewer for reviewing what coding agents changed, in a browser
-window: the whole review against a base as one diff, with a file list,
-comments an agent can read back, viewed marks, and the branch's commits.
+A Git diff viewer for reviewing what coding agents changed. It opens your
+branch's whole change against a base as one continuous diff in a browser
+window, with a file list, review comments the agent can read back, viewed
+marks, and the branch's commits. Everything stays in the repository: no
+account, no cloud service, no internet needed.
+
+![gitr reviewing an agent's branch: the file list, the diff with comments](https://raw.githubusercontent.com/trozen/gitr/master/docs/screenshot.png)
+
+- **One diff for the whole review**: every changed file in one scrolling
+  view, word-level highlights on edited lines, re-indented lines collapsed.
+- **Comments an agent can act on**: comment any line as a note, bad or
+  good; `gitr export` (or "copy for agent") turns them into a message
+  for the agent, and `gitr comments` lets an agent or a script read and
+  write them too. They follow their lines as the code changes.
+- **Keep up with the agent**: the page notices when the worktree changes,
+  and after a reload marks what is new since you last looked.
+- **Viewed marks** per file and hunk; a hunk the agent changes comes back
+  unviewed.
+- **Commits pane**: the branch as a graph, any commit or range on its own,
+  and per commit how many comments its lines carry.
+- **Server mode** (`gitr serve`): one page for many repositories and all
+  their worktrees, one per agent, running where the agents run and
+  reachable over SSH or Tailscale. It pairs well with
+  [herdr](https://herdr.dev), which runs the agents themselves: herdr for
+  driving them, gitr for reviewing what they changed.
 
 ## Install
 
 ```bash
-uv tool install .            # installs gitr and gitr-serve
+uv tool install gitr      # or: pipx install gitr
 ```
 
-Or just point an alias at the script directly (no install step needed):
+It needs Python 3.10+, git, and a browser; nothing else (the page's
+editor, Monaco, comes bundled). A Chromium-family browser (Chrome,
+Chromium, Edge, Brave, Vivaldi, Opera) gives it a window of its own;
+with others it opens in a tab.
+
+## Quick start
 
 ```bash
-alias gitr=~/path/to/gitr/gitr.py
+cd my-repo
+gitr                      # review this worktree against main / master
+gitr develop              # ... against another base
 ```
+
+A typical round with an agent working in a worktree:
+
+1. Run `gitr` in the worktree and read through the diff.
+2. Comment on lines: hover the gutter and click `+`, or right-click a line
+   for one-click presets. Mark files viewed as you go.
+3. Hand the comments to the agent: "copy for agent" in the top bar, or let
+   the agent run `gitr export` itself.
+4. When the agent has made changes, the page says so; reload, and what
+   changed since is marked, so you review only the follow-up.
+
+### Many agents at once
+
+When several agents work in parallel, each in a worktree of its own (and
+perhaps on another machine), run the server instead, where the
+repositories are:
+
+```bash
+gitr serve ~/dev/my-repo ~/dev/other-repo   # then open http://127.0.0.1:4487/
+```
+
+Or list them once in a config file, and plain `gitr serve` serves them:
+
+```bash
+mkdir -p ~/.config/gitr
+gitr serve --print-config ~/dev/my-repo ~/dev/other-repo > ~/.config/gitr/projects.json
+gitr serve
+```
+
+The page lists every worktree of those repositories; switch between them
+from the top left (or Ctrl+P), each keeping its own base, comments,
+viewed marks and scroll position, and each telling you when its agent has
+changed something. The config can also list a directory of checkouts, and
+the page can be installed as an app; see [`gitr serve`](#gitr-serve).
+
+This is where [herdr](https://herdr.dev) fits in: herdr runs the agents
+(a pane each, their state at a glance, sessions that survive a dropped
+connection), and `gitr serve` on the same machine shows what each of them
+changed, for you to review and comment on, and for the agents to read
+back with `gitr export`.
+
+![The commits pane: one commit shown, comments per commit](https://raw.githubusercontent.com/trozen/gitr/master/docs/commits.png)
 
 ## Usage
 
@@ -31,30 +102,15 @@ gitr --browser none          # only print the address
 `GITR_BROWSER` takes the same values, for a choice that sticks; `--browser`
 wins over it.
 
-`gitr` serves the repository it is run in, alone, and opens the page on the
-current worktree: in a Chromium-family browser's app mode (a window with no
-tabs or address bar) when one is installed (Chrome, Chromium, Edge, Brave,
-Vivaldi, Opera; also as a snap or a Flatpak), else in a tab of the default
-browser (Firefox, Safari), where everything works the same but the tab
-cannot close itself. The app window runs in a browser profile of
-gitr's own (under `~/.local/state/gitr/browsers/`; a snap's or a Flatpak's
-in its own folder, which its sandbox can write), apart from your
-browsing: quitting the browser leaves it open, and the browser's session
-restore never brings back a window of a gitr that has stopped. The base is the one last used for the
-worktree, else `main` or `master`; the switcher lists the repository's
-other worktrees. It runs until Ctrl+C, which closes its windows too, or
-until its last window closes (a page reload does not count); either end
-follows within a fraction of a second. A browser
-that puts a minimized window to sleep to save memory closes its
-connection, which counts as closing it: the window then closes when it
-wakes. A page that cannot close itself (a tab in a browser without app
-mode) says "server stopped" instead, and reconnects when `gitr` runs
-again. The window opens where the last one was closed. Each repository
-gets a port of its own, the same every time, so the page's settings (font
-sizes, wrapping) stay with it; running `gitr` again
-while one serves the repository just opens another window on it. Over ssh,
-with no screen to open the window on, it prints the address instead. The
-page is the same as gitr-serve's below, which describes it.
+`gitr` serves the repository it is run in and opens it in a Chromium-family
+browser's app mode: a window of its own, in a browser profile of gitr's
+own, apart from your browsing. Without such a browser it opens a tab in
+the default one. The base is the one last used for the worktree, else
+`main` or `master`.
+
+It runs until Ctrl+C or until its last window closes. Running it again in
+the same repository opens another window on the running one; over ssh it
+prints the address instead.
 
 ## Comments from the command line
 
@@ -75,33 +131,26 @@ gitr comments rm src/foo.py:42           # by id (any unique prefix) or path:lin
 ```
 
 A comment from `add` goes on that line of the file as it is in the working
-tree, with no diff involved: the page shows it on that
-line whether their diff has it added or unchanged (a line outside every
-hunk is listed after the diff). `list` gives the lines as they are now,
-flagged when a line's text changed, its file is gone, or it is a removed
-line (a comment from the page). A line takes one
-comment from `add`; remove the old one first, or edit it in the page.
+tree, with no diff involved: the page shows it on that line whether their
+diff has it added or unchanged (a line outside every hunk is listed after
+the diff). `list` gives the lines as they are now, flagged when a line's
+text changed, its file is gone, or it is a removed line (a comment from the
+page). A line takes one comment from `add`; remove the old one first, or
+edit it in the page.
 
-## gitr-serve
+Keep `.gitr/` out of commits (e.g. in a global gitignore), or agents may
+commit it.
 
-`gitr-serve` is the same page for several repositories and all their
+## gitr serve
+
+`gitr serve` is the same page for several repositories and all their
 worktrees. It runs where the repositories are (e.g. a remote machine with
 agents working in worktrees), in the foreground.
 
 ```bash
-gitr-serve ~/dev/repo-a ~/dev/repo-b         # http://127.0.0.1:4487/
-gitr-serve --port 9000 ~/dev/repo-a
-gitr serve ~/dev/repo-a                      # the same
+gitr serve ~/dev/repo-a ~/dev/repo-b         # these repos, on http://127.0.0.1:4487/
+gitr serve                                   # the repos in ~/.config/gitr/projects.json
 ```
-
-From a checkout, without installing: `python3 gitr_web/server.py`, with
-`--reload` to restart on changes to `gitr_web/server.py`, `gitr.py` or
-`~/.config/gitr/projects.json`. The page files under `gitr_web/static/` are
-read from disk on every request, so changes to them only need a browser
-refresh. The Monaco bundle under
-`gitr_web/static/monaco/` is built and committed; to move to another Monaco
-version, change it in `monaco/package.json` and run
-`cd monaco && npm install && npm run build` (Node is needed for that only).
 
 With no repository arguments the list is read from
 `~/.config/gitr/projects.json`:
@@ -110,9 +159,13 @@ With no repository arguments the list is read from
 {"projects": ["~/dev/repo-a", {"path": "~/dev/repo-b", "name": "b"}]}
 ```
 
+`gitr serve --print-config [repo ...]` prints one for the repos given (or
+the one you are in), ready to redirect into that file; then plain
+`gitr serve` serves them, and with `--reload` picks up changes to the file.
+
 A directory that is not a git repo but holds several (a workspace with one
-checkout per service, say) is listed as a heading with each checkout under
-it, picked up afresh with every listing, when its entry says so:
+checkout per service, say) is listed with each checkout under it, picked
+up afresh with every listing, when its entry says so:
 
 ```json
 {"projects": [{"path": "~/dev/workspace", "multi": true}]}
@@ -121,8 +174,7 @@ it, picked up afresh with every listing, when its entry says so:
 Only the checkouts directly in it are found; `"depth": 2` looks one level
 further down (never inside a checkout).
 
-`gitr-serve --print-config [repo ...]` prints one for the repos given (or the
-one you are in), ready to redirect into that file.
+### From another machine
 
 The server listens on localhost only and has no authentication, so reach it
 from another machine through SSH or Tailscale rather than exposing the port.
@@ -142,12 +194,12 @@ for your tailnet only. On the remote machine:
 
 ```bash
 tailscale serve --bg --https 4487 4487
-gitr-serve --allow-host remote-host.your-tailnet.ts.net
+gitr serve --allow-host remote-host.your-tailnet.ts.net
 # then open https://remote-host.your-tailnet.ts.net:4487/
 ```
 
 The same port number as the server's own does not clash with it: Tailscale
-listens on the tailnet address, gitr-serve on 127.0.0.1. A port of its own
+listens on the tailnet address, `gitr serve` on 127.0.0.1. A port of its own
 also leaves the default one (443) to whatever else the machine serves;
 `tailscale serve --bg 4487` would take it over. `tailscale serve
 status` shows what is served where. The allowed name does not depend on the
@@ -174,132 +226,20 @@ on different local ports (e.g. `ssh -L 4488:127.0.0.1:4487 remote-host` for
 the remote one) or one of them through Tailscale; each app is named after its
 server's hostname.
 
-Pick a worktree with the `project > branch` button at the top left; the
-base defaults to `main` / `master` and can be any ref. Clicking the base
-field lists the default, the branch's upstream, the branches of the
-project's other worktrees, the branch's recent commits (to review only
-what came after one), and all branches and tags, each with how many
-commits HEAD is ahead of (and behind) it; typing filters the list, and
-Enter takes the text as typed (a commit hash, `HEAD~3`). The counts for the
-current base are also shown next to the merge-base. The base is
-remembered per worktree on the server (`~/.local/state/gitr/web.json`); a
-worktree opened for the first time starts from the one last used in its
-project (a base that is a commit rather than a branch or tag stays with
-its worktree). The review leaves untracked files out; the commits pane
-shows them (below). Wrapping long lines and collapsing re-indented ones
-are set in the settings popup (the gear), per browser. Monaco is
-bundled in the package, so the page needs no internet access.
+## Development
 
-When the worktree changes, a "worktree changed" note with a reload button
-appears in the top bar within about a second (the view never re-renders by
-itself). The server checks the worktrees open pages show and sends what
-changed over one stream per browser, shared by its tabs; hidden tabs are
-not checked for. It says what
-a reload would bring, compared with the diff on screen: the new commits,
-and how many changed lines would appear and go, in how many files. After
-the reload those changes stay marked, so an agent's follow-up stands out
-from what was already reviewed: an orange bar at the left of each new
-changed line, an orange line where changed lines went, marks in the
-scrollbar and the minimap, and a bar on those files (and their folders) in
-the file list. A note in the top bar sums them up; its x clears the
-marks, which otherwise stay until the next reload (or another base or
-commit). The server keeps what the
-marks are measured against in memory, so a reload just after it restarted
-has none (the note says so). When gitr-serve restarts or its page
-files change, an "app changed" note in the top bar offers to reload the
-page, whose code may no longer fit the server's.
+From a checkout, without installing: `python3 gitr_web/server.py`, with
+`--reload` to restart on changes to `gitr_web/server.py`, `gitr.py` or
+`~/.config/gitr/projects.json`. The page files under `gitr_web/static/` are
+read from disk on every request, so changes to them only need a browser
+refresh. Tests: `uv run pytest` (or `python3 -m unittest discover -s tests
+-t .`). The Monaco bundle under `gitr_web/static/monaco/` is built and
+committed; to move to another Monaco version, change it in
+`monaco/package.json` and run `cd monaco && npm install && npm run build`
+(Node is needed for that only).
 
-Switching to another worktree keeps the one left as it was: switching
-back shows the same diff again, at the same place, with an unsaved
-comment still open and the marks of its last reload, and the "worktree
-changed" note if an agent changed it meanwhile; it changes only when
-reload is clicked. The page keeps up to a million lines of such diffs
-(the least recently left go first); when the server no longer has one (it
-restarted, or many big diffs since), switching back loads the diff anew,
-with what changed marked as after a reload.
+## License
 
-As in gitr, collapsing re-indented lines shows a removed and added line that differ
-only in whitespace as one dimmed `~` line, and the right-click menu copies
-the file path, `path:line`, or `path:line` with the line (or the selection
-holding it) in a `diff` code fence for pasting into an agent's chat.
-
-Comment on a line with the `+` that appears in the gutter on hover, or
-right-click a line for gitr's one-click presets; click a comment to edit it.
-Each comment has "accept" (it becomes a good comment ending in "(accepted)",
-e.g. once the agent has dealt with it), "copy" (the comment with its location
-and line, as "copy for agent" gives them) and "delete". The arrows next to
-the comment count jump to the next and previous comment. Comments on files
-not in the current diff are listed in a section after its last line. The
-icons at the top of the left bar switch the sidebar between the changed
-files and a list of all comments by file; clicking a comment scrolls to it,
-and its x (on hover) deletes it. Files, folders, comments and commits
-have right-click menus of their own (mark viewed, copy the path, edit or
-delete a comment, ...). The file list's header has collapse all and
-expand all, and "Reveal in file list" in the right-click menu shows the
-file of that line in the list, opening its folders. "Find..." in the same
-menu (or Ctrl+F in the diff) opens Monaco's find, starting from the
-selected text. Ctrl+P (or the magnifier in the file list's header, or "Go
-to file..." in the right-click menu) opens a list of the changed files to
-jump to, as in VS Code, followed by the worktrees of all projects to
-switch to: type parts of the name (`srvpy` finds `server.py`, `wtag` the
-`agent-1` worktree of `wt`), pick with the arrows and Enter or a click.
-The project switcher takes the arrows and Enter too.
-The box at the end of each row in the file list marks a file (or all the
-files of a folder, or in the list's header all files) as viewed; a folder
-folds from its chevron. The same box is in the diff's gutter at each file
-header and (in a file of several hunks) each hunk header, where other
-lines show the + that adds a comment, and right-clicking a line marks its file or
-hunk. Viewed hunks are dimmed, marked grey in the scrollbar and shaded in
-the minimap; a half-filled box is a file with some hunks viewed, and the
-arrows in the list's header go to the next and previous hunk not viewed
-yet. The marks are
-kept per hunk in the worktree's `.gitr/viewed.json`, under the hunk's
-changed lines rather than its place, so when an agent changes a hunk only
-that one comes back unviewed (the reload note counts the viewed files a
-reload changed), a hunk that only moved stays viewed, and a hunk viewed in
-a single commit is viewed in the whole review too, while it is the same.
-The third icon of the left bar shows the commits between the base and
-HEAD as a graph, as gitk draws them, with the uncommitted changes and the
-untracked files on top, and the base at the bottom, followed by some
-older commits, faded, for context (how many is set in the settings popup,
-per browser; 0 hides them). The branch icon in the pane's header adds the
-commits on the base that HEAD does not have, in a lane of their own and
-faded too, so a branch that fell behind its base shows by how much (on by
-default, per browser). Neither are part of "All changes", but they can be
-picked as any other commit. A dot and a count after a commit's subject,
-as the file list has them, are the comments on lines that commit changed (the commit `git blame` names for the line;
-for a removed line, the one that removed it), coloured by the most severe
-kind, so it shows which commits the review has got to.
-Clicking one shows only that commit, as `git show` does (a merge against
-its first parent), or only the uncommitted changes or untracked files.
-Shift-clicking a second row (or the compare icon in the pane's header,
-then two clicks) shows everything from one to the other combined, both
-included (from the older commit's parent). "Uncommitted changes" and
-"Untracked files" can be the newer end (the working tree, without and with
-the untracked files), and "All changes" the older one (from the merge
-base): shift-clicking from "All changes" to "Untracked files" shows the
-whole review with the untracked files. The "All changes" row at the
-top of the list, or the x on the note in the top bar, goes back to the
-whole review. Right-clicking a commit copies its hash or subject, or makes
-it the base, to review only what came after it. Comments can be read and written there too; they are
-placed on that commit's version of the file, and the agent export always
-describes the whole review and the untracked files (so a comment on a file
-an agent created but did not add keeps its line).
-Comments are stored in the worktree's `.gitr/review.json`, which `gitr`
-and gitr-serve share. "copy for agent"
-puts the agent export on the clipboard; an agent in the worktree can read
-the same with `gitr export` (or `gitr comments list`, see above). When `review.json` changes from outside the page (another
-tab, `gitr comments`, an agent), the comments reload by themselves, a note
-in the top bar says how many were added, edited and removed, and the added
-and edited ones are flagged; the note's x clears the flags, which otherwise
-stay until the next such change or another diff. Keep `.gitr/` out of commits (e.g. in a global gitignore), or
-agents may commit it.
-
-## Requirements
-
-Python 3.10+, no other dependencies (the page's Monaco editor is bundled), and a browser.
-
-## Credits
-
-gitr-serve's icons are from [Codicons](https://github.com/microsoft/vscode-codicons)
-by Microsoft, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+MIT, see [LICENSE](https://github.com/trozen/gitr/blob/master/LICENSE). Bundled: [Monaco Editor](https://github.com/microsoft/monaco-editor)
+(MIT) and [Codicons](https://github.com/microsoft/vscode-codicons) by
+Microsoft, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

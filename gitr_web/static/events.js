@@ -72,7 +72,7 @@ function connect() {
     all({ type: 'open' });
   };
   // EventSource would try again every second for as long as the server is
-  // away (a page left open on a stopped gitr-serve): slower and slower instead.
+  // away (a page left open on a stopped gitr serve): slower and slower instead.
   es.onerror = () => {
     open = false;
     es.close();

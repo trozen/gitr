@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""gitr-serve: the gitr diff view and review in the browser, for many repos and
+"""gitr serve: the gitr diff view and review in the browser, for many repos and
 their worktrees.
 
-Run:  gitr-serve [--port 4487] [repo ...]     (from a checkout: python3 gitr_web/server.py)
+Run:  gitr serve [--port 4487] [repo ...]     (from a checkout: python3 gitr_web/server.py)
 With no repo arguments the project list is read from
 ~/.config/gitr/projects.json:  {"projects": ["~/dev/a", {"path": "~/dev/b", "name": "b"}]}
 A directory of checkouts: {"path": "~/dev/ws", "multi": true, "depth": 1}
@@ -1938,7 +1938,7 @@ def read_config() -> dict:
         return json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
     except ValueError as e:
         # --reload restarts on every save of it, a half-written one included
-        sys.exit(f'gitr-serve: {tilde(str(CONFIG_PATH))}: {e}')
+        sys.exit(f'gitr serve: {tilde(str(CONFIG_PATH))}: {e}')
 
 
 def load_repos(args_repos: list[str]) -> list[dict]:
@@ -1953,7 +1953,7 @@ def load_repos(args_repos: list[str]) -> list[dict]:
             if it.get('multi'):
                 depth = it.get('depth', 1)
                 if type(depth) is not int or depth < 1:
-                    sys.exit(f'gitr-serve: {tilde(str(CONFIG_PATH))}: "depth" of {it["path"]} '
+                    sys.exit(f'gitr serve: {tilde(str(CONFIG_PATH))}: "depth" of {it["path"]} '
                              f'is to be a whole number from 1, not {json.dumps(depth)}')
                 repo['multi'] = True
                 repo['depth'] = depth
@@ -2068,7 +2068,7 @@ def supervise(argv: list[str]) -> None:
     # A plain `kill` of the supervisor must not leave the server running.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     # Shows when an installed copy, not the checkout being edited, is watched.
-    print(f"gitr-serve: --reload watching {', '.join(tilde(str(p)) for p in watched)} "
+    print(f"gitr serve: --reload watching {', '.join(tilde(str(p)) for p in watched)} "
           f"and the page in {tilde(str(STATIC_DIR))}", file=sys.stderr)
     child = None
     try:
@@ -2082,11 +2082,11 @@ def supervise(argv: list[str]) -> None:
                 if now != pages:
                     changed = sorted(str(p.relative_to(STATIC_DIR)) for p in now.keys() | pages.keys()
                                      if now.get(p) != pages.get(p))
-                    print(f"gitr-serve: page changed ({', '.join(changed)}), reload the browser",
+                    print(f"gitr serve: page changed ({', '.join(changed)}), reload the browser",
                           file=sys.stderr)
                     pages = now
             changed = [tilde(str(p)) for p, a, b in zip(watched, seen, stamp()) if a != b]
-            print(f"gitr-serve: {', '.join(changed)} changed, restarting", file=sys.stderr)
+            print(f"gitr serve: {', '.join(changed)} changed, restarting", file=sys.stderr)
             child.terminate()
             child.wait()
     except KeyboardInterrupt:
@@ -2168,8 +2168,9 @@ def tailscale_names() -> list[str]:
     return [name] if name else []
 
 
-def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
-    """`gitr-serve`, or `gitr serve` (gitr.main passes its arguments)."""
+def main(argv: 'list[str] | None' = None, prog: str = 'gitr serve') -> None:
+    """`gitr serve` (gitr.main passes its arguments), or server.py run from a
+    checkout."""
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(prog=prog, description='gitr diff view and review in the browser')
     ap.add_argument('repos', nargs='*', help=f'repositories (default: {CONFIG_PATH})')
@@ -2188,22 +2189,22 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
     if a.print_config:
         print(config_template(a.repos))
         # stderr, so a redirect to the config file gets the JSON alone
-        print(f'gitr-serve: save as {CONFIG_PATH}, e.g. with: '
-              f'gitr-serve --print-config ... > {CONFIG_PATH}', file=sys.stderr)
+        print(f'gitr serve: save as {CONFIG_PATH}, e.g. with: '
+              f'gitr serve --print-config ... > {CONFIG_PATH}', file=sys.stderr)
         return
     if a.reload and not os.environ.get(RELOAD_CHILD_ENV):
         return supervise(argv)
     repos = load_repos(a.repos)
     if not repos:
-        sys.exit(f'gitr-serve: no repositories given and none in {CONFIG_PATH}\n'
-                 f'  create it with: gitr-serve --print-config [repo ...] > {CONFIG_PATH}')
+        sys.exit(f'gitr serve: no repositories given and none in {CONFIG_PATH}\n'
+                 f'  create it with: gitr serve --print-config [repo ...] > {CONFIG_PATH}')
     Handler.state = State(repos)
     ALLOWED_HOSTS.add(a.host.lower())
     # Machine settings: they apply also when the repos come from the command line.
     allow = [*read_config().get('allow_hosts', []), *a.allow_host]
     ALLOWED_HOSTS.update(h.lower().rstrip('.') for h in allow)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print(f'gitr-serve: http://{a.host}:{a.port}/', file=sys.stderr)
+    print(f'gitr serve: http://{a.host}:{a.port}/', file=sys.stderr)
     found = '' if CONFIG_PATH.exists() else ' (not found)'
     print(f'  config {tilde(str(CONFIG_PATH))}{found}', file=sys.stderr)
     for h in allow:
@@ -2219,7 +2220,7 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr-serve') -> None:
 #
 # `gitr` in a repository serves it alone, as the Tk window it replaced did:
 # started from the terminal, ended with Ctrl+C or a while after its window
-# closed. The page's .gitr files are shared with gitr-serve, so the two can
+# closed. The page's .gitr files are shared with gitr serve, so the two can
 # show the same worktree.
 
 # The last page's stream closing is the page going: the server stops then,

@@ -11,8 +11,8 @@ with the ability to attach persistent local comments to specific diff lines.
 
 gitr began as a Tk window (`git diff | gitr`, `gitr master`): a diff with a
 file list, a minimap, word diff, line comments in `.gitr/review.json` and
-the agent export. gitr-serve below grew from it and replaced it: `gitr`
-now opens gitr-serve's page for the repository it is run in.
+the agent export. gitr serve below grew from it and replaced it: `gitr`
+now opens gitr serve's page for the repository it is run in.
 
 ---
 
@@ -67,7 +67,7 @@ now opens gitr-serve's page for the repository it is run in.
       one shared port for every repo's `gitr` (one server for all of them),
       installed once and opened with `--app-id`. Dropped for now
 - [x] Changes pushed on the events stream instead of the page polling
-      for them every few seconds, in gitr-serve too: one stream per
+      for them every few seconds, in gitr serve too: one stream per
       browser, held by a SharedWorker for all its tabs (HTTP/1.1 allows
       six connections per host), which posts what each visible tab shows
       to `/api/watch`. A server thread checks those views every second
@@ -102,7 +102,7 @@ or `bad` and defaults to `note` when absent.
 
 ---
 
-## Web version: `gitr-serve`
+## Web version: `gitr serve`
 
 A browser-based gitr for agent work on a remote machine: several projects,
 each with one worktree per agent. A small server runs next to the worktrees
@@ -128,10 +128,10 @@ whole diff in one read-only document as in gitr.
 
 ### Later
 
-- [ ] `gitr-serve start|stop|status` as a user daemon: install and drive a
+- [ ] `gitr serve start|stop|status` as a user daemon: install and drive a
       systemd user unit (`systemctl --user`, with `loginctl enable-linger`
       so it survives logout) rather than self-daemonizing; plain
-      `gitr-serve` stays the foreground mode the unit runs
+      `gitr serve` stays the foreground mode the unit runs
 - [x] Font sizes (diff, comments, sidebar, top and status bar) in a
       settings popup, from the gear at the bottom of an activity bar left
       of the sidebar (as in VS Code); kept per browser

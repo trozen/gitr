@@ -32,7 +32,7 @@ usage: gitr [--browser NAME] [base]   this repository's review in a window
 commands:
   export      print the review comments as text for a coding agent
   comments    read and write comments: list, add, rm, accept
-  serve       gitr-serve: many repositories and their worktrees
+  serve       one page for many repositories and their worktrees
   help        this text
 
 `gitr <command> --help` shows a command's options.
@@ -130,7 +130,7 @@ def _git_diff(refs: list[str], merge_base: bool) -> str:
 @contextmanager
 def _locked(gitr_dir: 'Path | None', name: str):
     """An exclusive lock on .gitr/<name>, for a read-change-write of a file
-    that the page's server (gitr or gitr-serve) and the CLI may all write."""
+    that the page's server (gitr or gitr serve) and the CLI may all write."""
     lock = None
     if fcntl is not None and gitr_dir is not None:
         try:
@@ -294,7 +294,7 @@ class ReviewStore:
     @contextmanager
     def _writing(self):
         """Each change goes into the file as it is now, under a lock: gitr,
-        gitr-serve and `gitr comments` may all write it, and one
+        gitr serve and `gitr comments` may all write it, and one
         that kept its own copy would otherwise undo the others' changes."""
         with _locked(self._gitr_dir, 'review.lock'):
             self._load()
@@ -355,7 +355,7 @@ class ReviewStore:
 
 class ViewedStore:
     """The hunks marked as viewed, in .gitr/viewed.json: {"viewed": {key:
-    unix time marked}}. A key is a hunk's content (hunk_key in gitr-serve),
+    unix time marked}}. A key is a hunk's content (hunk_key in gitr serve),
     so a hunk an agent changes is no longer viewed, and one that only moved
     still is. Keys of hunks no longer in the diff stay, as they may be in
     another view of it (another base, a single commit); the oldest go once
@@ -649,7 +649,7 @@ def _resolve_anchors(review: 'ReviewStore',
 def _export_items_from_store(review: 'ReviewStore', repo_root: Path,
                              diff_files: list[DiffFile]) -> list[_ExportItem]:
     """The export for a diff: anchors are matched against the parsed diff
-    the way gitr-serve does (same target
+    the way gitr serve does (same target
     line and side; the text decides between exact and moved)."""
     anchors = _resolve_anchors(review, lambda f: _read_text_safe(repo_root / f))
 
@@ -671,7 +671,7 @@ def _export_items_from_store(review: 'ReviewStore', repo_root: Path,
     return items
 
 
-# --word diff (gitr-serve's word ranges) ---------------------------------------
+# --word diff (gitr serve's word ranges) ---------------------------------------
 
 WORD_DIFF_MIN_RATIO = 0.35       # below this similarity, a plain line diff
 WORD_DIFF_AUTOJUNK_TOKENS = 300  # longer lines use difflib's junk heuristic (much faster)
@@ -827,7 +827,7 @@ def _pair_lines_for_word_diff(
 # page takes), with no diff involved; the views place it on
 # that line whether their diff shows it added or unchanged (_same_line).
 
-_ACCEPTED = '(accepted)'  # gitr-serve's "accept" marks the text the same way
+_ACCEPTED = '(accepted)'  # gitr serve's "accept" marks the text the same way
 
 
 def _comment_id(file: str, entry: dict) -> str:
@@ -964,7 +964,7 @@ def _comments_add(args: argparse.Namespace) -> None:
     for c in _cli_comments(root, review):
         if c.file == rel and c.anchor.target_line_no == n and c.anchor.side != '-':
             sys.exit(f'gitr: {rel}:{n} already has a comment: {_cli_line(c)}\n'
-                     '  remove it first (gitr comments rm), or edit it in gitr or gitr-serve')
+                     '  remove it first (gitr comments rm), or edit it in gitr or gitr serve')
     snap = review.write_snapshot(content)
     if snap is None:
         sys.exit(f'gitr: cannot write a snapshot to {root / ".gitr"}')
@@ -989,7 +989,7 @@ def _comments_accept(args: argparse.Namespace) -> None:
     if a.kind == 'good' and a.comment.rstrip().endswith(_ACCEPTED):
         print('already accepted: ' + _cli_line(c))
         return
-    # as gitr-serve's accept: the marker once, whatever the kind was
+    # as gitr serve's accept: the marker once, whatever the kind was
     text = a.comment if a.comment.rstrip().endswith(_ACCEPTED) else a.comment.rstrip() + ' ' + _ACCEPTED
     review.add(c.file, a.snapshot, a.snap_line_no, a.side, a.line_text, text, 'good')
     a.comment, a.kind = text, 'good'

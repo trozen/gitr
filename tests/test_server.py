@@ -1,4 +1,4 @@
-"""gitr-serve's diff document and its git queries, on throwaway repos."""
+"""gitr serve's diff document and its git queries, on throwaway repos."""
 
 import unittest
 from pathlib import Path

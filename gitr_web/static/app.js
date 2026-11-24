@@ -2914,7 +2914,7 @@ function flash(msg) {
 // Whether the server still answers. `gitr`'s window closes when its server
 // stopped (Ctrl+C, or minutes without a page: a page the browser froze
 // meanwhile finds out on waking); a browser lets a page close only the
-// window it opened in, so elsewhere, and for gitr-serve, which may just be
+// window it opened in, so elsewhere, and for gitr serve, which may just be
 // restarting, a note says so. Asked twice before giving up, as one
 // failed request may be a hiccup. A server that stops on its own says so
 // first (the 'bye' event); this is for one that crashed or was killed.

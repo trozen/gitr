@@ -726,7 +726,8 @@ class State:
         wt = self.check_worktree(wt)
         changed, untracked = worktree_status(wt)
         return {'commits': list_commits(wt, base, older, on_base), 'uncommitted': changed, 'untracked': untracked,
-                'head': git(wt, 'rev-parse', 'HEAD').strip(), 'baseTip': base_tip(wt, base)}
+                'head': git(wt, 'rev-parse', 'HEAD').strip(), 'baseTip': base_tip(wt, base),
+                'refs': refs_stamp(wt)}
 
     def commit_marks(self, wt: str, base: str) -> dict:
         wt = self.check_worktree(wt)
@@ -1472,6 +1473,13 @@ def base_tip(wt: str, base: str) -> str:
     return git(wt, 'rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}').strip()
 
 
+def refs_stamp(wt: str) -> str:
+    """Changes when a branch, remote branch or tag moves (a push moves only
+    its remote branch): the commits pane's labels follow."""
+    out = git(wt, 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags')
+    return hashlib.sha1(out.encode()).hexdigest()[:16]
+
+
 def fingerprint(wt: str, merge_base: str, stat_untracked: bool) -> 'tuple[str, str]':
     """Cheap change detector: HEAD, the status listing and the size/mtime of
     every listed path. Agents editing a file change its mtime even when the
@@ -1669,7 +1677,7 @@ def view_stamps(state: 'State', wt: str, base: str, untracked: bool) -> 'dict | 
     try:
         wt = state.check_worktree(wt)
         tracked, every = fingerprint(wt, merge_base(wt, base), untracked)
-        return {'fingerprint': tracked, 'fingerprintAll': every, 'baseTip': base_tip(wt, base),
+        return {'fingerprint': tracked, 'fingerprintAll': every, 'baseTip': base_tip(wt, base), 'refs': refs_stamp(wt),
                 'review': gitr_stamp(wt, 'review.json'), 'viewed': gitr_stamp(wt, 'viewed.json')}
     except (GitError, OSError, ValueError):
         return None
@@ -1832,7 +1840,7 @@ class Handler(BaseHTTPRequestHandler):
                 mb = merge_base(wt, q['base'])
                 tracked, every = fingerprint(wt, mb, shows_untracked(q.get('commit')))
                 return self._json({'fingerprint': tracked, 'fingerprintAll': every,
-                                   'baseTip': base_tip(wt, q['base']),
+                                   'baseTip': base_tip(wt, q['base']), 'refs': refs_stamp(wt),
                                    'review': gitr_stamp(wt, 'review.json'),
                                    'viewed': gitr_stamp(wt, 'viewed.json'),
                                    'version': page_version()})

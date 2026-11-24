@@ -3040,8 +3040,9 @@ function applyChanges(r) {
   const gen = wordGen, fp = doc.fingerprint;
   // The list follows the worktree quietly, untracked files included (it
   // counts them); the diff waits for reload.
-  // and the base's own commits with the base
-  if ((r.fingerprintAll !== commitsFp || r.baseTip !== commitList?.baseTip) && commitList) {
+  // and the base's own commits with the base, the labels with the refs
+  if ((r.fingerprintAll !== commitsFp || r.baseTip !== commitList?.baseTip
+       || (r.refs && r.refs !== commitList?.refs)) && commitList) {
     commitsFp = r.fingerprintAll;
     refreshCommits(gen);
   }

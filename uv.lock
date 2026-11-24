@@ -24,7 +24,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gitr"
+name = "gitr-review"
 version = "0.1.0"
 source = { editable = "." }
 

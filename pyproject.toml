@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]  # license as an SPDX expression
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gitr"
+name = "gitr-review"  # "gitr" is refused on PyPI as too close to "git-r"
 version = "0.1.0"
 description = "Review coding agents' changes: a Git diff viewer in the browser"
 readme = "README.md"

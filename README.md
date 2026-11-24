@@ -29,8 +29,10 @@ account, no cloud service, no internet needed.
 ## Install
 
 ```bash
-uv tool install gitr      # or: pipx install gitr
+uv tool install gitr-review      # or: pipx install gitr-review
 ```
+
+The package is `gitr-review` on PyPI; the command it installs is `gitr`.
 
 It needs Python 3.10+, git, and a browser; nothing else (the page's
 editor, Monaco, comes bundled). A Chromium-family browser (Chrome,

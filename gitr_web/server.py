@@ -2122,7 +2122,7 @@ def gitr_version() -> str:
         pass
     try:
         from importlib.metadata import version
-        return version('gitr')
+        return version('gitr-review')
     except Exception:
         return ''
 

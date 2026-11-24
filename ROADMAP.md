@@ -257,7 +257,8 @@ whole diff in one read-only document as in gitr.
 - [x] Tests: a small suite for the parts most changed of late (diff
       parsing, comment anchoring, the word diff pairing, the commit marks),
       `python3 -m unittest discover -s tests -t .`; the page has none
-- [ ] Release on PyPI (`uv tool install gitr`): a license, version 0.1.0,
+- [ ] Release on PyPI (`uv tool install gitr-review`; "gitr" is refused as
+      too close to the abandoned "git-r", asked for under PEP 541): a license, version 0.1.0,
       the metadata, install steps in the README for the package rather
       than a checkout
 - [ ] Integration with herdr, or gitr as a herdr plugin

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gitr</title>
+<meta name="application-title" content="gitr">
 <link rel="stylesheet" href="monaco/editor.css">
 <link rel="stylesheet" href="app.css">
 <link rel="manifest" href="manifest.webmanifest">
@@ -15,9 +16,9 @@
 <header id="topbar">
   <button id="crumb" title="Switch project or worktree"><span id="crumb-text">select a worktree</span></button>
   <div id="bar-items">
-  <label class="base">base <input id="base" type="search" role="combobox" aria-autocomplete="list" aria-controls="base-list"
+  <label class="base">base <span class="base-field"><input id="base" type="search" role="combobox" aria-autocomplete="list" aria-controls="base-list"
     aria-expanded="false" spellcheck="false" size="14" autocomplete="off"
-    title="Any branch, tag or commit; click for a list"></label>
+    title="Any branch, tag or commit; click for a list"><span id="base-chev"></span></span></label>
   <span id="commit-shown" class="chip" hidden><span id="commit-shown-text"></span><button id="commit-all" class="chip-x" title="Back to all changes (merge base to the working tree)">&#215;</button></span>
   <span id="mergebase" class="dim"></span>
   <!-- notes, in this order; "news" takes the place of "changed" after a reload -->
@@ -95,6 +96,7 @@
       <div class="set-row" id="older-row" title="Commits from before the base, shown faded below the review's own"><span class="grow">Older commits</span></div>
       <div class="set-row reload-row">
         <button id="reload-app" title="Load the page again, e.g. after gitr-serve changed">reload the app</button>
+        <span class="grow"></span><span id="gitr-version" class="dim"></span>
       </div>
     </div>
   </main>

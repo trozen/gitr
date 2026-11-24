@@ -70,9 +70,12 @@ function init() {
     getInitialState: () => lineState,
     tokenize(line) {
       const c = line[0];
+      // a file header's status letter in the file list's colour for it
+      if (/^[AMDRCT] /.test(line))
+        return { tokens: [{ startIndex: 0, scopes: 'status-' + c }, { startIndex: 1, scopes: 'fileheader' }],
+                 endState: lineState };
       const scope = c === '+' ? 'inserted' : c === '-' ? 'deleted' : c === ' ' ? 'context'
-        : c === '@' ? 'hunk' : c === '\\' ? 'meta' : c === '~' ? 'reindent'
-        : /^[AMDRCT] /.test(line) ? 'fileheader' : 'meta';
+        : c === '@' ? 'hunk' : c === '\\' ? 'meta' : c === '~' ? 'reindent' : 'meta';
       return { tokens: [{ startIndex: 0, scopes: scope }], endState: lineState };
     },
   });
@@ -84,6 +87,13 @@ function init() {
       { token: 'deleted', foreground: 'ff5555' },
       { token: 'hunk', foreground: 'ffb86c' },
       { token: 'fileheader', foreground: 'ffffff', fontStyle: 'bold' },  // white, as the minimap's file labels
+      // .st-A and the rest in app.css
+      { token: 'status-A', foreground: '50fa7b', fontStyle: 'bold' },
+      { token: 'status-M', foreground: 'bd93f9', fontStyle: 'bold' },
+      { token: 'status-D', foreground: 'ff5555', fontStyle: 'bold' },
+      { token: 'status-R', foreground: 'ff79c6', fontStyle: 'bold' },
+      { token: 'status-C', foreground: 'ff79c6', fontStyle: 'bold' },
+      { token: 'status-T', foreground: 'bd93f9', fontStyle: 'bold' },
       { token: 'context', foreground: 'f8f8f2' },
       { token: 'meta', foreground: '6272a4' },
       { token: 'reindent', foreground: '6272a4' },  // gitr's colour for it
@@ -111,7 +121,7 @@ function init() {
     automaticLayout: true, ...fontOptions(fontSize('diff')), scrollBeyondLastLine: true,
     minimap: { enabled: true, renderCharacters: true, size: 'proportional', scale: 1, maxColumn: 120,
                showSlider: 'always', sectionHeaderFontSize: MINIMAP_LABEL_PX },
-    lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 16,
+    lineNumbers: lineNumber, lineNumbersMinChars: 9, lineDecorationsWidth: 20,
     // Folding regions only for the sticky headers; the gutter of a header
     // is the viewed box's, as a line's is the comment +.
     glyphMargin: false, folding: true, showFoldingControls: 'never',
@@ -138,6 +148,7 @@ function init() {
   initComments();
 
   initBasePicker();
+  initMenus();
   $('reload').addEventListener('click', () => current && load(current.wt, current.base, null, viewPosition(),
                                                                  current.commit, shown && doc?.id));
   // Per browser, as the font sizes: they change how the diff looks, not
@@ -210,6 +221,19 @@ function applyFont(f) {
   if (!f.css) editor.updateOptions(fontOptions(px));
   else document.documentElement.style.setProperty(f.css, px + 'px');
   if (f.out) f.out.textContent = px;
+  if (f.reset) f.reset.classList.toggle('off', px === f.def);
+}
+
+// A setting's - value + and its reset, which shows only off the default
+// (as VS Code's settings have it).
+const DISCARD_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M3.5 2v3.5L4 6h3.5V5H4.979l.941-.941a3.552 3.552 0 1 1 5.023 5.023L5.746 14.28l.72.72 5.198-5.198A4.57 4.57 0 0 0 5.2 3.339l-.7.7V2h-1z"/></svg>';
+function stepper(out, titles, def) {
+  const down = el('button', null, '\u2212'), up = el('button', null, '+');
+  const reset = el('button', 'reset');
+  reset.innerHTML = DISCARD_SVG;
+  [down.title, up.title] = titles;
+  reset.title = `Back to ${def}`;
+  return { down, up, reset, box: [el('span', 'stepper', [down, out, up]), reset] };
 }
 
 function setFont(f, px) {
@@ -296,6 +320,10 @@ function renderCommentList() {
     ]);
     row.title = c.text;
     row.addEventListener('click', () => scrollToComment(i));
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      commentMenu(c, e.clientX, e.clientY, () => scrollToComment(i));
+    });
     box.append(row);
   });
 }
@@ -310,25 +338,24 @@ function reloadPage() {
 function initSettings() {
   const panel = $('settings'), btn = $('settings-btn');
   for (const f of FONTS) {
-    const down = el('button', null, '-'), up = el('button', null, '+');
-    const reset = el('button', null, 'reset');
-    down.title = 'Smaller'; up.title = 'Larger'; reset.title = `Back to ${f.def}`;
     f.out = el('span', 'size');
+    const { down, up, reset, box } = stepper(f.out, ['Smaller', 'Larger'], f.def);
+    f.reset = reset;
     down.addEventListener('click', () => setFont(f, fontSize(f.key) - 1));
     up.addEventListener('click', () => setFont(f, fontSize(f.key) + 1));
     reset.addEventListener('click', () => setFont(f, f.def));
-    $('font-rows').append(el('div', 'set-row', [el('span', 'grow', f.label), down, f.out, up, reset]));
+    $('font-rows').append(el('div', 'set-row', [el('span', 'grow', f.label), ...box]));
     applyFont(f);
   }
-  const down = el('button', null, '-'), up = el('button', null, '+');
-  const reset = el('button', null, 'reset');
-  down.title = 'Fewer'; up.title = 'More'; reset.title = `Back to ${OLDER_DEF}`;
   const out = el('input', 'size');
+  const { down, up, reset, box } = stepper(out, ['Fewer', 'More'], OLDER_DEF);
+  reset.classList.toggle('off', olderCount() === OLDER_DEF);
   out.type = 'number'; out.min = 0; out.max = OLDER_MAX;
   out.value = olderCount();
   const setOlder = (n) => {
     n = Number.isFinite(n) ? Math.min(OLDER_MAX, Math.max(0, Math.round(n))) : olderCount();
     out.value = n;
+    reset.classList.toggle('off', n === OLDER_DEF);
     if (n === olderCount()) return;
     prefs = { ...prefs, older: n };
     savePrefs();
@@ -341,7 +368,7 @@ function initSettings() {
   down.addEventListener('click', () => setOlder(olderCount() - OLDER_STEP));
   up.addEventListener('click', () => setOlder(olderCount() + OLDER_STEP));
   reset.addEventListener('click', () => setOlder(OLDER_DEF));
-  $('older-row').append(down, out, up, reset);
+  $('older-row').append(...box);
   const show = (on) => { panel.hidden = !on; btn.classList.toggle('on', on); };
   btn.addEventListener('click', () => show(panel.hidden));
   // An installed app has no browser reload button.
@@ -456,6 +483,16 @@ function initBasePicker() {
   // also when the field already has the focus, e.g. after Enter
   input.addEventListener('click', () => { if (pop.hidden) showBasePicker(); });
   input.addEventListener('input', () => { baseTyped = true; if (!pop.hidden) renderBaseList(); });
+  // The chevron opens and closes the list. preventDefault: the label
+  // around it would focus the field, which opens it again.
+  const chev = $('base-chev');
+  chev.addEventListener('mousedown', (e) => e.preventDefault());
+  chev.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!pop.hidden) input.blur();
+    else if (document.activeElement === input) showBasePicker();
+    else input.focus();
+  });
   // Enter takes the text as typed: any ref or commit, listed or not.
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') applyBase(input.value);
@@ -553,7 +590,18 @@ function updateCrumb() {
   $('crumb-text').textContent = !current ? 'select a worktree'
     : entry ? `${projectParts(entry.p).filter(Boolean).join(' \u203a ')} \u203a ${wtLabel(entry.w)}` : current.wt;
   $('crumb').title = (current ? current.wt + '\n' : '') + 'Switch project or worktree';
+  // the version, and which worktree: several windows tell apart in the
+  // taskbar; the server's title names its machine ("gitr - host")
+  document.title = [APP_TITLE.replace('gitr', 'gitr' + (gitrVersion ? ' ' + gitrVersion : '')),
+                    current ? $('crumb-text').textContent : ''].filter(Boolean).join(' - ');
+  // An installed app's window shows its manifest name instead, unless this
+  // says otherwise (Chrome 134 and later; not 157 for one)
+  document.querySelector('meta[name=application-title]').content = document.title;
+  // hence the version in the settings too
+  $('gitr-version').textContent = gitrVersion ? 'gitr ' + gitrVersion : '';
 }
+let gitrVersion = '';
+const APP_TITLE = document.title;
 
 function showSwitcher(on) {
   const sw = $('switcher');
@@ -1453,8 +1501,11 @@ async function showDiff(d, gen, state, since, restore, t0, k = null) {
                           bytes: d.text.length });
   $('mergebase').textContent = '';
   $('mergebase').append('merge-base ' + d.mergeBase + '  ', ...aheadBehind(d.ahead, d.behind));
-  $('mergebase').title = `HEAD is ${d.ahead} commit${d.ahead === 1 ? '' : 's'} ahead of ${base}` +
-    (d.behind ? `, which has ${d.behind} commit${d.behind === 1 ? '' : 's'} not in HEAD` : '');
+  const mbc = d.mergeBaseCommit;
+  $('mergebase').title = `HEAD is ${d.ahead} commit${d.ahead === 1 ? '' : 's'} ahead of ${base}`
+    + (d.behind ? `, which has ${d.behind} commit${d.behind === 1 ? '' : 's'} not in HEAD` : '')
+    + (mbc ? `\n\nmerge base ${d.mergeBase}: ${mbc.subject}\n${mbc.author}, `
+             + `${new Date(mbc.time * 1000).toLocaleString()} (${age(mbc.time) === 'now' ? 'just now' : age(mbc.time) + ' ago'})` : '');
   const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
   $('stats').textContent = `${d.files.length} files  +${add} -${del}  ${d.kinds.length} lines`;
   if (k) setTiming(`kept diff, render ${timing.renderMs} ms`);
@@ -1965,6 +2016,7 @@ function renderFiles() {
         ]);
         row.title = f.oldPath && 'RC'.includes(f.status) ? `${f.oldPath} -> ${f.path}` : f.path;
         row.addEventListener('click', () => jumpToFile(i));
+        row.addEventListener('contextmenu', (e) => { e.preventDefault(); fileMenu(i, e.clientX, e.clientY); });
         into.append(row);
         fileRows[i] = row;
         fileDirs[i] = ancestors;
@@ -1988,10 +2040,15 @@ function renderFiles() {
       dirEntries.push(entry);
       // Only the chevron: a click meant for the viewed box at the other end
       // of the row would otherwise fold the folder when it missed.
-      chev.addEventListener('click', () => {
+      entry.toggle = () => {
         if (collapsed.has(path)) collapsed.delete(path); else collapsed.add(path);
         showCollapsed(entry, collapsed.has(path));
         setActive(activeFile, true);
+      };
+      chev.addEventListener('click', entry.toggle);
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        dirMenu(entry, collapsed.has(path), e.clientX, e.clientY);
       });
       showCollapsed(entry, collapsed.has(path));
       into.append(row, kids);
@@ -2502,6 +2559,11 @@ function commentBox(c) {
   const box = el('div', 'c-box c-' + c.kind, parts);
   box.title = 'click to edit';
   box.addEventListener('click', () => openEditor(c.line, c));
+  box.addEventListener('contextmenu', (e) => {
+    if (String(getSelection()).trim()) return;  // the browser's, to copy it
+    e.preventDefault();
+    commentMenu(c, e.clientX, e.clientY);
+  });
   return box;
 }
 
@@ -2655,8 +2717,74 @@ function commitMenu(r, x, y) {
     // the base's merge base with HEAD is the commit itself when it is an ancestor
     item('Review changes after this commit (use as base)', () => applyBase(r.hash));
   }
+  if (r.hash === 'uncommitted' && commitList?.untracked)
+    item('Show with the untracked files', () => { commitAnchor = 'uncommitted'; pickCommit('untracked', true); });
+  if (r.hash === 'untracked')
+    item('Show all changes with the untracked files', () => { commitAnchor = 'all'; pickCommit('untracked', true); });
   if (!m.childElementCount) return;
   placeMenu(m, x, y);
+}
+
+// The page's menu for a list row, from fill(item, sep).
+function listMenu(x, y, fill) {
+  const m = $('cmenu');
+  m.textContent = '';
+  const item = (label, fn, cls) => {
+    const it = el('div', 'c-item' + (cls ? ' ' + cls : ''), label);
+    it.addEventListener('click', () => { hideMenu(); fn(); });
+    m.append(it);
+  };
+  fill(item, () => m.append(el('div', 'c-sep')));
+  if (m.childElementCount) placeMenu(m, x, y);
+}
+
+function fileMenu(i, x, y) {
+  const f = doc.files[i];
+  listMenu(x, y, (item, sep) => {
+    item('Show in the diff', () => jumpToFile(i));
+    const on = viewedState([i]) === 'all';
+    item(on ? 'Mark file not viewed' : 'Mark file viewed', () => markViewed(fileHunks[i], !on));
+    sep();
+    item(`Copy "${f.path}"`, () => copyText(f.path, `copied ${f.path}`));
+    if (f.oldPath && f.oldPath !== f.path) item(`Copy "${f.oldPath}"`, () => copyText(f.oldPath, `copied ${f.oldPath}`));
+  });
+}
+
+function dirMenu(entry, isCollapsed, x, y) {
+  listMenu(x, y, (item, sep) => {
+    item(isCollapsed ? 'Expand' : 'Collapse', entry.toggle);
+    item('Collapse all', () => collapseAll(true));
+    item('Expand all', () => collapseAll(false));
+    sep();
+    const on = viewedState(entry.files) === 'all';
+    item(on ? 'Mark folder not viewed' : 'Mark folder viewed',
+         () => markViewed(entry.files.flatMap((i) => fileHunks[i]), !on));
+    sep();
+    item(`Copy "${entry.path}/"`, () => copyText(entry.path + '/', `copied ${entry.path}/`));
+  });
+}
+
+function commentMenu(c, x, y, show) {
+  listMenu(x, y, (item, sep) => {
+    if (show) item('Show in the diff', show);
+    item('Edit comment...', () => { show?.(); openEditor(c.line, c); });
+    sep();
+    item('Copy text', () => copyText(c.text, 'copied the comment'));
+    sep();
+    item('Delete comment', () => saveComment(c, '', c.kind));
+  });
+}
+
+// Outside the lists and the diff, which have menus of their own, the page
+// is an app's window: no browser menu, but in text fields and on selected
+// text, where its copy and paste are of use.
+function initMenus() {
+  document.addEventListener('contextmenu', (e) => {
+    if (e.defaultPrevented || e.target.closest('input, textarea, [contenteditable]')) return;
+    if (String(getSelection()).trim() && !e.target.closest('.monaco-editor')) return;
+    e.preventDefault();
+  });
+  api('/api/version', {}).then((r) => { gitrVersion = r.gitr || ''; updateCrumb(); }).catch(() => {});
 }
 
 function hideMenu() { $('cmenu').hidden = true; }

@@ -673,6 +673,7 @@ class State:
                     del self._baselines[k]
         return {
             'id': doc_id, 'worktree': wt, 'base': base, 'mergeBase': mb[:10],
+            'mergeBaseCommit': commit_summary(wt, mb),
             'ahead': ahead, 'behind': behind, 'commit': shown,
             'fingerprint': fps[with_untracked], 'fingerprintAll': fps[1],
             'fingerprintKind': 'all' if with_untracked else 'tracked',
@@ -1186,6 +1187,15 @@ def commit_header(wt: str, sha: str) -> 'tuple[list[str], dict]':
     lines += ['    ' + l if l else '' for l in body.rstrip('\n').split('\n')]
     lines.append('')
     return lines, {'hash': h, 'subject': subject}
+
+
+def commit_summary(wt: str, sha: str) -> 'dict | None':
+    """A commit's subject, author and time, for the merge base's tooltip."""
+    try:
+        subject, author, at = git(wt, 'log', '-1', '--format=%s%x00%an%x00%at', sha, '--').rstrip('\n').split('\0')
+    except (GitError, ValueError):
+        return None
+    return {'subject': subject, 'author': author, 'time': int(at)}
 
 
 NO_COMMIT = '0' * 40  # what git blame gives a line not committed yet
@@ -1797,7 +1807,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/alive':
                 return self._json({'standalone': Handler.standalone})
             if url.path == '/api/version':
-                return self._json({'version': page_version()})
+                return self._json({'version': page_version(), 'gitr': GITR_VERSION})
             if url.path == '/api/projects':
                 if q.get('expect'):
                     Handler.expect_until = time.monotonic() + EXPECT_S
@@ -2085,6 +2095,26 @@ def page_stamp() -> dict:
         except OSError:
             pass
     return out
+
+
+def gitr_version() -> str:
+    """gitr's own version, for the window title: a checkout's
+    pyproject.toml, else the installed package's."""
+    pyproject = Path(__file__).resolve().parent.parent / 'pyproject.toml'
+    try:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    try:
+        from importlib.metadata import version
+        return version('gitr')
+    except Exception:
+        return ''
+
+
+GITR_VERSION = gitr_version()
 
 
 def page_version() -> str:

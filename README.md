@@ -232,7 +232,9 @@ the comment count jump to the next and previous comment. Comments on files
 not in the current diff are listed in a section after its last line. The
 icons at the top of the left bar switch the sidebar between the changed
 files and a list of all comments by file; clicking a comment scrolls to it,
-and its x (on hover) deletes it. The file list's header has collapse all and
+and its x (on hover) deletes it. Files, folders, comments and commits
+have right-click menus of their own (mark viewed, copy the path, edit or
+delete a comment, ...). The file list's header has collapse all and
 expand all, and "Reveal in file list" in the right-click menu shows the
 file of that line in the list, opening its folders. "Find..." in the same
 menu (or Ctrl+F in the diff) opens Monaco's find, starting from the

@@ -193,12 +193,14 @@ whole diff in one read-only document as in gitr.
       listed under its file, click to jump; maybe filters (only added /
       removed lines) and the comment texts searched too. For now Monaco's
       own find widget (Ctrl+F in the diff) does the searching
+- [x] Right-click outside the diff: the page's own menu on every list row
+      (files and folders, the comments panel, the comment boxes, commits),
+      none elsewhere, the browser's only in text fields and on selected
+      text
 - [ ] Less browser outside the diff, so the page acts like an app: there
       Ctrl+F opens the browser's find (which sees only the diff lines on
-      screen, as Monaco draws no others) and a right-click the browser's
-      menu. To decide: Ctrl+F opening the diff's find from anywhere, and
-      our own menu (or none) in the sidebar and bars, keeping the
-      browser's where text can be selected or typed
+      screen, as Monaco draws no others). To decide: Ctrl+F opening the
+      diff's find from anywhere
 - [ ] Tabs: open a file or a subdirectory as its own view of the diff
 - [x] Viewed marks: a box per file and folder in the file list (and one
       for all files), in the gutter of each file and hunk header in the
@@ -252,6 +254,12 @@ whole diff in one read-only document as in gitr.
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
 - [ ] UI polish, before the herdr integration
+- [ ] Tests: a small suite for the parts most changed of late (diff
+      parsing, comment anchoring, the word diff pairing), before the
+      release
+- [ ] Release on PyPI (`uv tool install gitr`): a license, version 0.1.0,
+      the metadata, install steps in the README for the package rather
+      than a checkout
 - [ ] Integration with herdr, or gitr as a herdr plugin
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"

@@ -185,14 +185,23 @@ h2 .grow { flex: 1; }
 #qo-list .n { font-family: monospace; font-size: .92em; }
 #qo-list .st { font-family: var(--mono); width: 1ch; text-align: center; }
 .pop .none { padding: 2px 12px 6px; color: var(--dim); }
-#base { font-family: var(--mono); font-size: .92em; background: var(--bg); color: var(--fg);
-        border: 1px solid var(--sel); padding: 1px 4px; }
+/* the base field drawn as a dropdown, which it also is (the base picker) */
+.base-field { display: inline-flex; align-items: center; gap: 6px; padding: 1px 7px 1px 5px; cursor: text;
+              background: var(--bg); border: 1px solid var(--sel); border-radius: 3px; }
+.base-field:hover { border-color: var(--dim); }
+.base-field:focus-within { border-color: var(--file); }
+.base-field:has(#base.bad) { border-color: var(--rem); }
+#base-chev { flex: none; align-self: stretch; display: flex; align-items: center; padding: 0 2px; cursor: pointer; }
+#base-chev::after { content: ""; width: 4px; height: 4px; margin-bottom: 3px;
+  border: solid var(--dim); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+#base-chev:hover::after { border-color: var(--fg); }
+#base { font-family: var(--mono); font-size: .92em; background: none; color: var(--fg);
+        border: none; padding: 0; }
 /* A search field (so that password managers leave it alone), drawn as the
    plain text field it was. */
 #base { -webkit-appearance: none; appearance: none; }
 #base::-webkit-search-cancel-button, #base::-webkit-search-decoration { -webkit-appearance: none; display: none; }
-#base:focus { outline: none; border-color: var(--file); }
-#base.bad { border-color: var(--rem); }
+#base:focus { outline: none; }
 /* Top bar notes: the colour goes on the part that matters (.hi, or the
    whole text where all of it does). */
 .chip { display: flex; align-items: center; padding: 0 8px; border-radius: 3px; background: var(--sel);
@@ -268,7 +277,7 @@ h2 .grow { flex: 1; }
 .c-zone { padding: 4px 0; font: var(--font); }
 /* #measure sizes a comment box before it is placed in its zone */
 .c-zone, #measure { font-size: var(--comment-px); }
-.c-box { box-sizing: border-box; border-left: 3px solid var(--c); border-radius: 3px; padding: 4px 10px;
+.c-box { box-sizing: border-box; border: solid var(--c); border-width: 0 3px; border-radius: 3px; padding: 4px 10px;
   background: color-mix(in srgb, var(--c) 20%, var(--bg-side)); color: var(--fg); cursor: pointer; }
 .c-head { display: flex; align-items: center; gap: 10px; font-size: .85em; }
 .c-head .grow { flex: 1; }
@@ -294,6 +303,12 @@ h2 .grow { flex: 1; }
 .c-kindbtn { color: var(--c); background: none; border-color: transparent; font-family: monospace; font-size: .85em; }
 .c-kindbtn.on { border-color: var(--c); }
 .c-del { color: var(--rem); }
+/* A comment's actions dim until the box is pointed at: the comment is
+   what should stand out */
+.c-box .c-act { color: var(--dim); }
+.c-box:hover .c-act { color: var(--fg); }
+.c-box:hover .c-act.c-good { color: var(--c); }
+.c-box:hover .c-act.c-del { color: var(--rem); }
 #measure { position: absolute; visibility: hidden; left: 0; top: 0; pointer-events: none; }
 /* An activity bar as in VS Code (48px there), left of the sidebar */
 #activity { flex: none; width: 40px; display: flex; flex-direction: column; align-items: center;
@@ -314,7 +329,7 @@ h2 .grow { flex: 1; }
 #commit-list .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #commit-list .age { flex: none; color: var(--dim); font-size: .92em; }
 /* a comment count right after the subject, the age still at the end */
-#commit-list .subj:has(+ .n-cmt) { flex: 0 1 auto; }
+#commit-list .subj:has(+ .n-cmt) { flex: 0 1000 auto; }  /* shrinking before the labels */
 #commit-list .n-cmt { flex: none; margin-right: auto; font-family: monospace; font-size: .92em; }
 /* what the graph's hollow and faded dots are filled with: the row's own */
 #commit-list .cm { --row-bg: var(--bg-side); }
@@ -330,7 +345,7 @@ h2 .grow { flex: 1; }
 #commit-list .all .what { flex: none; color: var(--dim); font-size: .92em; }
 #commit-list .cut { padding: 4px 12px; color: var(--dim); font-style: italic; }
 /* all of a row's labels together leave the subject most of the row */
-#commit-list .refs { flex: 0 1 auto; max-width: 40%; min-width: 0; display: flex; gap: 4px; overflow: hidden; }
+#commit-list .refs { flex: 0 1 auto; max-width: 40%; min-width: min-content; display: flex; gap: 4px; overflow: hidden; }
 .ref-label { flex: 0 1 auto; min-width: 2.5em; font-size: .85em; line-height: 1.3; padding: 0 4px;
   border-radius: 3px; color: var(--bg); overflow: hidden; text-overflow: ellipsis; }
 .ref-label.k-branch { background: var(--add); }
@@ -356,11 +371,16 @@ h2 .grow { flex: 1; }
   background: var(--bg-side); border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #settings .set-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; }
 #settings .grow, #statusbar .grow { flex: 1; }
-#settings .set-row button { padding: 0 6px; }
 #settings .reload-row { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--sel); }
-#settings .size { min-width: 3ch; text-align: center; font-family: var(--mono); }
-#settings input.size { width: 5ch; font-size: inherit; background: var(--bg); color: var(--fg);
-                      border: 1px solid var(--sel); padding: 1px 2px; -moz-appearance: textfield; }
+/* - value +, one box; the values in a column */
+#settings .stepper { display: inline-flex; border: 1px solid var(--sel); border-radius: 3px; overflow: hidden; }
+#settings .stepper button { width: 22px; padding: 0; border: none; border-radius: 0; background: var(--sel); }
+#settings .stepper button:hover { background: color-mix(in srgb, var(--sel) 75%, var(--fg)); }
+#settings .size { width: 5ch; text-align: center; font-family: var(--mono); background: var(--bg); color: var(--fg); }
+#settings input.size { font-size: inherit; border: none; padding: 0; -moz-appearance: textfield; }
+#settings button.reset { display: flex; padding: 2px; border: none; background: none; color: var(--dim); }
+#settings button.reset:hover { color: var(--fg); }
+#settings button.reset.off { visibility: hidden; }
 #settings input.size::-webkit-inner-spin-button, #settings input.size::-webkit-outer-spin-button {
   -webkit-appearance: none; margin: 0; }
 #cmenu { position: fixed; z-index: 40; min-width: 160px; padding: 4px 0; background: var(--bg-side);

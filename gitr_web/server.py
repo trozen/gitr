@@ -727,6 +727,13 @@ class State:
         return {'commits': list_commits(wt, base, older, on_base), 'uncommitted': changed, 'untracked': untracked,
                 'head': git(wt, 'rev-parse', 'HEAD').strip(), 'baseTip': base_tip(wt, base)}
 
+    def commit_marks(self, wt: str, base: str) -> dict:
+        wt = self.check_worktree(wt)
+        with self._review_lock:
+            store = ReviewStore(Path(wt) / '.gitr')
+        return {'marks': comment_commits(wt, base, store),
+                'stamp': gitr_stamp(wt, 'review.json')}
+
     # --viewed marks: .gitr/viewed.json in each worktree
 
     def viewed(self, wt: str, doc: 'Doc') -> dict:
@@ -1179,6 +1186,127 @@ def commit_header(wt: str, sha: str) -> 'tuple[list[str], dict]':
     lines += ['    ' + l if l else '' for l in body.rstrip('\n').split('\n')]
     lines.append('')
     return lines, {'hash': h, 'subject': subject}
+
+
+NO_COMMIT = '0' * 40  # what git blame gives a line not committed yet
+
+
+def comment_commits(wt: str, base: str, store: ReviewStore) -> 'dict[str, dict[str, int]]':
+    """Per commit, how many comments of each kind sit on lines it changed:
+    the commit that last changed the line (git blame of the working tree),
+    or for a removed line the one that removed it (the child, on the way to
+    HEAD, of the last commit that still had it). Lines not committed yet
+    count for the UNCOMMITTED row, untracked files for the UNTRACKED one."""
+    anchors = _resolve_anchors(store, lambda f: _read_text_safe(Path(wt) / f))
+    if not anchors:
+        return {}
+    untracked = {rel for code, rel in status_entries(wt) if code == '??'}
+    marks: dict[str, dict[str, int]] = {}
+
+    def count(where: str, kind: str) -> None:
+        marks.setdefault(where, {}).setdefault(kind, 0)
+        marks[where][kind] += 1
+
+    mb = None
+    for file, alist in anchors.items():
+        live = [a for a in alist if a.side != '-']
+        if file in untracked:
+            for a in live:
+                count(UNTRACKED, a.kind)
+        elif live:
+            text = _read_text_safe(Path(wt) / file)
+            n = len(text.splitlines()) if text is not None else 0
+            live = [a for a in live if 1 <= a.target_line_no <= n]
+            for a, sha in zip(live, blame_lines(wt, file, [a.target_line_no for a in live])):
+                if sha:
+                    count(UNCOMMITTED if sha == NO_COMMIT else sha, a.kind)
+        removed = [a for a in alist if a.side == '-']
+        if removed:
+            mb = mb or merge_base(wt, base)
+            for a, sha in zip(removed, removed_by(wt, mb, file, removed)):
+                if sha:
+                    count(sha, a.kind)
+    return marks
+
+
+def blame_lines(wt: str, file: str, lines: list[int]) -> 'list[str | None]':
+    """The commit that last changed each of these lines of the working
+    tree's file, in one git blame."""
+    if not lines:
+        return []
+    args = [x for ln in sorted(set(lines)) for x in ('-L', f'{ln},{ln}')]
+    try:
+        out = git(wt, 'blame', '--porcelain', *args, '--', file)
+    except GitError:
+        # git blame refuses a file added to the index but not in HEAD yet
+        try:
+            new = not git(wt, 'ls-tree', '--name-only', 'HEAD', '--', file).strip()
+        except GitError:
+            new = False
+        return [NO_COMMIT if new else None] * len(lines)
+    found = {}
+    for line in out.splitlines():
+        parts = line.split(' ')
+        # a line's header: <sha> <line in that commit> <line now> [<group size>]
+        if len(parts) in (3, 4) and len(parts[0]) == 40 and parts[2].isdigit():
+            found[int(parts[2])] = parts[0]
+    return [found.get(ln) for ln in lines]
+
+
+def removed_by(wt: str, mb: str, file: str, anchors: list) -> 'list[str | None]':
+    """The commit that removed each of these removed lines since the merge
+    base, UNCOMMITTED if it still is in HEAD. A line is found among the
+    diff's removed lines by its text, the nearest to where the comment sits;
+    one removed and added again within the branch is not in that diff, and
+    gets None."""
+    try:
+        diff = git(wt, 'diff', '--no-color', '--no-ext-diff', '-U0', mb, '--', file)
+    except GitError:
+        return [None] * len(anchors)
+    gone: list[tuple[int, int, str]] = []  # old line, where it sits now, text
+    old = new = 0
+    for line in diff.splitlines():
+        m = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)', line)
+        if m:
+            old, new = int(m.group(1)), int(m.group(2))
+        elif line.startswith('-') and not line.startswith('---'):
+            gone.append((old, new, line[1:]))
+            old += 1
+        elif line.startswith('+') and not line.startswith('+++'):
+            new += 1
+    olds = []
+    for a in anchors:
+        hits = [g for g in gone if g[2] == a.line_text[1:]]
+        olds.append(min(hits, key=lambda g: abs(g[1] - a.target_line_no))[0] if hits else None)
+    want = sorted({o for o in olds if o})
+    if not want:
+        return [None] * len(anchors)
+    args = [x for ln in want for x in ('-L', f'{ln},{ln}')]
+    try:
+        out = git(wt, 'blame', '--porcelain', '--reverse', f'{mb}..HEAD', *args, '--', file)
+        head = git(wt, 'rev-parse', 'HEAD').strip()
+    except GitError:
+        return [None] * len(anchors)
+    last = {}  # old line -> the last commit that still had it
+    for line in out.splitlines():
+        parts = line.split(' ')
+        if len(parts) in (3, 4) and len(parts[0]) == 40 and parts[2].isdigit():
+            last[int(parts[2])] = parts[0]
+    children: dict[str, 'str | None'] = {}
+
+    def child(sha: str) -> 'str | None':
+        if sha not in children:
+            out = git(wt, 'rev-list', '--ancestry-path', '--parents', f'{sha}..HEAD')
+            # oldest last; the first commit after it on the way to HEAD
+            kids = [ln.split()[0] for ln in out.splitlines() if sha in ln.split()[1:]]
+            children[sha] = kids[-1] if kids else None
+        return children[sha]
+
+    res = []
+    for o in olds:
+        sha = last.get(o) if o else None
+        res.append(None if sha is None else UNCOMMITTED if sha == head else child(sha))
+    return res
 
 
 def list_commits(wt: str, base: str, older: int = 0, on_base: bool = False) -> list[dict]:
@@ -1682,6 +1810,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.commits(q['wt'], q['base'],
                                                      max(0, min(int(q.get('older') or 0), MAX_OLDER)),
                                                      q.get('onBase') == '1'))
+            if url.path == '/api/commit-marks':
+                return self._json(self.state.commit_marks(q['wt'], q['base']))
             if url.path == '/api/refs':
                 return self._json(list_refs(self.state.check_worktree(q['wt'])))
             if url.path == '/api/words':

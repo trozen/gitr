@@ -843,6 +843,9 @@ let commitsSeq = 0;
 
 async function refreshCommits(gen) {
   const seq = ++commitsSeq;
+  // an edit can move a commented line from a commit to the uncommitted
+  // changes even when the list stays as it is
+  refreshMarks(gen);
   try {
     const r = await api('/api/commits', commitsQuery());
     // Most worktree changes are edits, which leave the list as it is: a
@@ -863,11 +866,45 @@ async function loadCommits(gen) {
     commitList = r;
     commitsFp = at;
     renderCommits();
+    refreshMarks(gen);
   } catch (e) {
     if (gen !== wordGen || seq !== commitsSeq) return;
     commitList = null;
     $('commit-list').textContent = '';
     $('commit-list').append(el('div', 'empty', 'commits: ' + e.message));
+  }
+}
+
+// Per commit, the comments on lines it changed (server.py comment_commits),
+// marked as the files are (a dot and the count in the colour of the most
+// severe kind): which commits the review has got to. Fetched apart from the
+// list, as comments change on their own.
+let commitMarks = null;  // {marks: {hash: {kind: count}}, stamp, wt, base}
+let marksSeq = 0;
+
+async function refreshMarks(gen) {
+  const seq = ++marksSeq;
+  try {
+    const r = await api('/api/commit-marks', { wt: shown.wt, base: shown.base });
+    if (gen !== wordGen || seq !== marksSeq) return;
+    commitMarks = { ...r, wt: shown.wt, base: shown.base };
+    paintMarks();
+  } catch { /* transient; the next refresh retries */ }
+}
+
+function paintMarks() {
+  // another worktree's (whose commits can be the same) until its own come
+  const marks = commitMarks?.wt === shown?.wt && commitMarks.base === shown.base ? commitMarks.marks : {};
+  for (const row of $('commit-list').querySelectorAll('.cm')) {
+    row.querySelector('.n-cmt')?.remove();
+    const m = marks[row.dataset.hash];
+    if (!m) continue;
+    const kinds = Object.keys(m).sort((a, b) => SEVERITY[b] - SEVERITY[a]);
+    const n = kinds.reduce((t, k) => t + m[k], 0);
+    const mark = el('span', 'n n-cmt c-' + kinds[0], '\u25cf' + n);
+    mark.title = `${plural(n, 'comment')} on lines this changed: ` + kinds.map((k) => `${m[k]} ${k}`).join(', ');
+    // after the subject, as the file list has it after the name
+    row.querySelector('.subj').after(mark);
   }
 }
 
@@ -1030,6 +1067,7 @@ function renderCommits() {
     return { row, svg };
   });
   if (cut) box.append(el('div', 'cut', `only the newest ${inside} commits are listed`));
+  paintMarks();
   if (!made.length) return markShownCommit();
   // Rows are as tall as the sidebar font makes them; the graph is drawn to
   // fit. A hidden pane has no heights: drawn when it is shown.
@@ -1636,6 +1674,11 @@ function updateDecorations(force) {
     if (cls) list.push({ range: new monaco.Range(runStart, 1, end, 1),
                          options: { isWholeLine: true, className: cls,
                                     marginClassName: MARGIN_CLASS[runKind] } });
+    // an edited line's text dimmed too, its changed words (w-add, w-rem)
+    // in full colour
+    if (runKind === 'a' || runKind === 'r')
+      list.push({ range: new monaco.Range(runStart, 1, end, Infinity),
+                  options: { inlineClassName: 'e-' + runKind } });
   };
   for (let ln = from + 1; ln <= to; ln++) {
     const k = decoKind(ln);
@@ -2255,6 +2298,7 @@ function commentsPerFile() {
 function applyComments(r) {
   comments = r.comments;
   commentStamp = r.stamp;
+  if (r.stamp && commitMarks && r.stamp !== commitMarks.stamp) refreshMarks(wordGen);
   const T = monaco.editor;
   // An orphan sits after its file's last line, which is not the line it
   // was written on: marked in the minimap and scrollbar, but no gutter bar

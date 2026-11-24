@@ -39,7 +39,8 @@ now opens gitr-serve's page for the repository it is run in.
 - [ ] Fold / collapse individual file diffs
 - [ ] Syntax highlighting per language, per file in the combined view
       (Monaco's own tokenizers)
-- [ ] Color theme override
+- [ ] Colour themes, picked in the settings popup (Dracula stays the
+      default)
 - [ ] Keyboard shortcut help (`?`)
 - [ ] Export diff as HTML
 - [x] Comments from the command line: `gitr comments list|add|rm|accept`
@@ -230,9 +231,13 @@ whole diff in one read-only document as in gitr.
 - [x] Commits pane with no commits since the base: it said only "no
       commits since the base", while with commits the base shows as the
       boundary commit at the bottom; the base commit shows there too
-- [ ] Comment marks in the commits pane: per commit, the comments on lines
-      it changed (found with blame on the commented lines), so it shows
-      which commits have been reviewed and which not yet
+- [x] Comment marks in the commits pane: per commit, the comments on lines
+      it changed (found with blame on the commented lines, reverse blame
+      for removed ones), marked as in the file list, so it
+      shows which commits have been reviewed and which not yet
+- [ ] Git blame in the page: which commit last changed a line (author,
+      date, subject), e.g. in the gutter or on hover, with a click to show
+      that commit; details to decide
 - [x] Older commits in the commits pane: a number of commits before the
       base (30 by default, set in the settings popup), faded like the base
       and not part of "All changes", to look at or pick as a single commit
@@ -246,6 +251,7 @@ whole diff in one read-only document as in gitr.
       one file at a time with a file picker, tap a line to comment, the
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
+- [ ] UI polish, before the herdr integration
 - [ ] Integration with herdr, or gitr as a herdr plugin
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"

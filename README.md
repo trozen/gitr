@@ -264,7 +264,10 @@ per browser; 0 hides them). The branch icon in the pane's header adds the
 commits on the base that HEAD does not have, in a lane of their own and
 faded too, so a branch that fell behind its base shows by how much (on by
 default, per browser). Neither are part of "All changes", but they can be
-picked as any other commit.
+picked as any other commit. A dot and a count after a commit's subject,
+as the file list has them, are the comments on lines that commit changed (the commit `git blame` names for the line;
+for a removed line, the one that removed it), coloured by the most severe
+kind, so it shows which commits the review has got to.
 Clicking one shows only that commit, as `git show` does (a merge against
 its first parent), or only the uncommitted changes or untracked files.
 Shift-clicking a second row (or the compare icon in the pane's header,

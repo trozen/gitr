@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -705,9 +706,10 @@ def _pair_lines_for_word_diff(
     def nws_tokens(text: str) -> list[str]:
         return [t for t in re.findall(r'\w+|[^\w\s]|\s+', text) if not t.isspace()]
 
-    # Similarity counts words only: punctuation is shared by unrelated
-    # lines of code (`print(f(x))` and `p = g(h(3))` match on half their
-    # tokens), so it paired them and highlighted nearly all of both.
+    # Similarity counts words only, each by its length: punctuation is
+    # shared by unrelated lines of code (`print(f(x))` and `p = g(h(3))`
+    # match on half their tokens), and counted per token, a version bump
+    # (`websockets==16.0`, `websockets==17.4`) matched on one word in three.
     def sim_tokens(toks: list[str]) -> list[str]:
         return [t for t in toks if t[0].isalnum() or t[0] == '_'] or toks
 
@@ -715,8 +717,34 @@ def _pair_lines_for_word_diff(
     tok_add = [nws_tokens(line) for line in add_lines]
     sim_rem = [sim_tokens(t) for t in tok_rem]
     sim_add = [sim_tokens(t) for t in tok_add]
+    len_rem = [sum(map(len, t)) for t in sim_rem]
+    len_add = [sum(map(len, t)) for t in sim_add]
+    bag_rem: list['Counter[str] | None'] = [None] * m
+    bag_add: list['Counter[str] | None'] = [None] * n
 
     thr = WORD_DIFF_MIN_RATIO
+
+    def similarity(i: int, j: int, sm: difflib.SequenceMatcher) -> float:
+        """The share of the two lines' word characters in matching words,
+        0 when that is below the threshold; `sm` has the added line as seq2."""
+        if tok_rem[i] == tok_add[j]:  # whitespace apart, blank lines too
+            return 1.0
+        total = len_rem[i] + len_add[j]
+        if not total or 2 * min(len_rem[i], len_add[j]) < thr * total:
+            return 0.0
+        # Most cross pairs in a big block are far below the threshold: the
+        # words both have, ignoring order, bound the matching from above.
+        if bag_rem[i] is None:
+            bag_rem[i] = Counter(sim_rem[i])
+        if bag_add[j] is None:
+            bag_add[j] = Counter(sim_add[j])
+        if 2 * sum(len(t) * k for t, k in (bag_rem[i] & bag_add[j]).items()) < thr * total:
+            return 0.0
+        sm.set_seq1(sim_rem[i])
+        a = sim_rem[i]
+        same = sum(len(t) for blk in sm.get_matching_blocks() for t in a[blk.a:blk.a + blk.size])
+        r = 2 * same / total
+        return r if r >= thr else 0.0
     if m * n > WORD_DIFF_MAX_BLOCK:
         # The optimal matching is quadratic (a 500x500 block takes seconds);
         # pair lines in order instead, as git's word diff does, and only
@@ -724,8 +752,7 @@ def _pair_lines_for_word_diff(
         result: list[tuple] = []
         k = min(m, n)
         for i in range(k):
-            sm = _word_matcher(sim_rem[i], sim_add[i])
-            if sm.real_quick_ratio() >= thr and sm.quick_ratio() >= thr and sm.ratio() >= thr:
+            if similarity(i, i, _word_matcher(sim_rem[i], sim_add[i])):
                 result.append(('pair', rem_lines[i], add_lines[i], tok_rem[i] == tok_add[i]))
             else:
                 result.append(('rem', rem_lines[i]))
@@ -749,13 +776,8 @@ def _pair_lines_for_word_diff(
                 sm = junk
             else:
                 sm = exact
-            sm.set_seq1(a)
-            # Only pairs at or above the threshold feed the DP, and most cross
-            # pairs in a big block are far below it: the two cheap upper
-            # bounds let us skip the expensive ratio() for those.
-            if sm.real_quick_ratio() < thr or sm.quick_ratio() < thr:
-                continue
-            sims[i][j] = sm.ratio()
+            # Only pairs at or above the threshold feed the DP.
+            sims[i][j] = similarity(i, j, sm)
 
     # dp[i][j] = best total similarity pairing rem[0..i-1] with add[0..j-1]
     dp     = [[0.0] * (n + 1) for _ in range(m + 1)]

@@ -254,13 +254,19 @@ whole diff in one read-only document as in gitr.
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
 - [ ] UI polish, before the herdr integration
+- [ ] A count on the comments button in the left pane: how many comments
+      the review holds, coloured as the worst of them (bad over note over
+      good)
 - [x] Tests: a small suite for the parts most changed of late (diff
       parsing, comment anchoring, the word diff pairing, the commit marks),
       `python3 -m unittest discover -s tests -t .`; the page has none
-- [ ] Release on PyPI (`uv tool install gitr-review`; "gitr" is refused as
-      too close to the abandoned "git-r", asked for under PEP 541): a license, version 0.1.0,
-      the metadata, install steps in the README for the package rather
-      than a checkout
+- [x] Release on PyPI: 0.1.0 as `gitr-review` (`uv tool install
+      gitr-review`), MIT, the README for the package rather than a checkout
+- [ ] The name `gitr` on PyPI: refused as too close to the abandoned
+      `git-r`; asked for under PEP 541 in
+      https://github.com/pypi/support/issues/13278 (a long queue). If
+      granted, publish as `gitr` and make `gitr-review` a release that
+      depends on it
 - [ ] Integration with herdr, or gitr as a herdr plugin
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"

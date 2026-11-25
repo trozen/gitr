@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitr-review"  # "gitr" is refused on PyPI as too close to "git-r"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "Review coding agents' changes: a Git diff viewer in the browser"
 readme = "README.md"
 license = "MIT"

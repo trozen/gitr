@@ -8,3 +8,12 @@ platforms = ["linux"]
 # once herdr's server is up; gitr serve stops when herdr's server does
 [[startup]]
 command = ["python3", "start.py"]
+
+# herdr runs startup hooks only when its server starts, not on install:
+# `herdr plugin action invoke start --plugin gitr` starts it now (a running
+# gitr serve is left alone)
+[[actions]]
+id = "start"
+title = "Start gitr serve"
+contexts = ["workspace"]
+command = ["python3", "start.py"]

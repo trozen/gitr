@@ -185,6 +185,7 @@ herdr's server runs:
 
 ```bash
 herdr plugin install trozen/gitr/herdr-plugin
+herdr plugin action invoke start --plugin gitr   # start it now, not at herdr's next start
 ```
 
 From herdr's next start, it serves the repositories open in herdr's panes,

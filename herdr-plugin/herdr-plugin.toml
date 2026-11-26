@@ -1,6 +1,6 @@
 id = "gitr"
 name = "gitr"
-version = "0.2.0.dev0"  # gitr's, in pyproject.toml: the plugin runs the gitr next to it
+version = "0.2.0"  # gitr's, in pyproject.toml: the plugin runs the gitr next to it
 min_herdr_version = "0.9.5"
 description = "gitr serve alongside herdr: a review page for the repos open in herdr's panes"
 platforms = ["linux"]

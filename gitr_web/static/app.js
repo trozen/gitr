@@ -660,12 +660,18 @@ async function showPlugin() {
     }
     if (updated === false) return idle('up to date');
     status.textContent = updated ? 'updated, restarting\u2026' : 'restarting?\u2026';
-    // the server hands over to the new copy within seconds: the page
-    // follows it once it answers as another server
+    // the server hands over to the new copy within seconds; the page is
+    // left as it is (a comment half written), to be reloaded when the user
+    // likes: the button above, or the notice of a new version
     for (let i = 0; i < 60; i++) {
       await new Promise((ok) => setTimeout(ok, 1000));
       const v = await api('/api/version', {}).then((x) => x.version, () => null);
-      if (v && was && v !== was) { location.reload(); return; }
+      if (v && was && v !== was) {
+        noteVersion(v);
+        status.textContent = 'updated; reload the app to use it';
+        btn.hidden = true;
+        return;
+      }
     }
     idle(updated ? 'updated, but gitr serve did not restart (see gitr status)' : 'no restart; see gitr status');
   }

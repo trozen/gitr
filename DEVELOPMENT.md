@@ -29,3 +29,21 @@ restarting herdr, run the hook once by hand: `python3 herdr-plugin/start.py`
 the plugin, `~/.local/state/herdr/plugins/gitr/gitr-serve.log`).
 `herdr plugin list` shows the plugin, `herdr plugin log list` the hook's
 runs.
+
+## Releasing
+
+A tag publishes it: `.github/workflows/publish.yml` checks that the tag
+is the version, runs the tests, builds and uploads to PyPI.
+
+1. Set the version (e.g. `0.2.0`) in `pyproject.toml` and in
+   `herdr-plugin/herdr-plugin.toml` (a test checks they agree), run
+   `uv lock`, commit.
+2. Tag and push: `git tag v0.2.0 && git push origin master v0.2.0`.
+3. Approve the run on GitHub, if the `pypi` environment asks for it.
+4. Back to a development version (`0.3.0.dev0`), commit.
+
+Set up once: on pypi.org, gitr-review > Settings > Publishing > Add a
+trusted publisher (GitHub: owner `trozen`, repository `gitr`, workflow
+`publish.yml`, environment `pypi`); on GitHub, Settings > Environments >
+New environment `pypi` (with required reviewers, for an approval per
+release).

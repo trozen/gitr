@@ -267,7 +267,7 @@ whole diff in one read-only document as in gitr.
       https://github.com/pypi/support/issues/13278 (a long queue). If
       granted, publish as `gitr` and make `gitr-review` a release that
       depends on it
-- [ ] Publish to PyPI from GitHub Actions on a `v*` tag, with Trusted
+- [x] Publish to PyPI from GitHub Actions on a `v*` tag, with Trusted
       Publishing (no token): check the tag against the version in
       `pyproject.toml`, run the tests, `uv build`, `uv publish`; a `pypi`
       environment that asks for approval. Before the next release

@@ -1,0 +1,33 @@
+# A release: push a tag vX.Y.Z of the version in pyproject.toml, and this
+# builds it and publishes it to PyPI. No token: PyPI trusts this workflow
+# (Trusted Publishing, set up once on pypi.org for gitr-review), and the
+# "pypi" environment can be made to wait for an approval on GitHub.
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # what Trusted Publishing authenticates with
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: The tag is the version
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME, but pyproject.toml says $version"
+            exit 1
+          fi
+      - name: Tests
+        run: uv run pytest
+      - name: Build
+        run: uv build
+      - name: Publish
+        run: uv publish --trusted-publishing always

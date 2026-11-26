@@ -33,6 +33,7 @@ commands:
   export      print the review comments as text for a coding agent
   comments    read and write comments: list, add, rm, accept
   serve       one page for many repositories and their worktrees
+  status      what of gitr runs: gitr serve, this repository's, herdr's plugin
   help        this text
 
 `gitr <command> --help` shows a command's options.
@@ -1029,7 +1030,7 @@ def _main_comments(argv: list[str]) -> None:
 
 # The first argument names one of these, or it is the base of the default
 # command, the window; after `--` it is the base.
-COMMANDS = ('export', 'comments', 'serve', 'help')
+COMMANDS = ('export', 'comments', 'serve', 'status', 'help')
 
 
 def main() -> None:
@@ -1056,6 +1057,8 @@ def main() -> None:
     from gitr_web import server
     if cmd == 'serve':
         server.main(rest, prog='gitr serve')
+    elif cmd == 'status':
+        server.status(rest)
     else:
         server.standalone(rest)
 

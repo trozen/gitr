@@ -267,7 +267,29 @@ whole diff in one read-only document as in gitr.
       https://github.com/pypi/support/issues/13278 (a long queue). If
       granted, publish as `gitr` and make `gitr-review` a release that
       depends on it
-- [ ] Integration with herdr, or gitr as a herdr plugin
+- [ ] Publish to PyPI from GitHub Actions on a `v*` tag, with Trusted
+      Publishing (no token): check the tag against the version in
+      `pyproject.toml`, run the tests, `uv build`, `uv publish`; a `pypi`
+      environment that asks for approval. Before the next release
+- [ ] Branches `main` (the default, moved only by releases) and `devel`
+      (daily work) instead of `master`: herdr installs and updates a
+      plugin from the default branch, and the plugin runs the gitr of its
+      checkout, so plain installs would get releases only, no `--ref`
+- [x] Integration with herdr, or gitr as a herdr plugin
+- [x] herdr plugin (`herdr-plugin/`): its `[[startup]]` hook starts
+      `gitr serve --herdr`, which serves the repos open in herdr's panes
+      besides the configured ones and stops with herdr's server (after a
+      wait for a live handoff) or when the plugin is disabled; it runs the
+      gitr of the plugin's own checkout (herdr clones the whole repo), else
+      `gitr` from PATH, and writes a `gitr` launcher for the shell
+- [x] `gitr status`: gitr serve, the running `gitr` windows, herdr's plugin
+- [ ] herdr plugin from GitHub: check that an install keeps the whole repo,
+      then the `herdr-plugin` topic on the repo for herdr's marketplace
+- [ ] herdr: the agents' state (working, waiting, done) in the worktree list
+- [ ] herdr: comments sent to the agent's pane (`herdr agent prompt`), next
+      to "copy for agent"
+- [ ] herdr: gitr shown in herdr's UI, e.g. "gitr is running" in the tab
+      bar's status area, or the review state per workspace in the sidebar
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"
       above). Not carried over: pipe mode, the window's keys (postponed

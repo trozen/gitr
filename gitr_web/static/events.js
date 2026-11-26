@@ -44,7 +44,7 @@ async function postWatch() {
   const subs = {};
   for (const { sub } of pages.values())
     if (sub) subs[sub.key] = { wt: sub.wt, base: sub.base, commit: sub.commit };
-  const body = JSON.stringify({ id, subs });
+  const body = JSON.stringify({ id, subs, pages: pages.size });  // pages: for `gitr status`
   if (body === posted) return;
   posting = true;
   let ok = false;

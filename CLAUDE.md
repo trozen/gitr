@@ -20,6 +20,9 @@ gitr export master          # review comments as text for a coding agent
 gitr export --kinds bad,note   # only these kinds
 gitr comments list|add|rm|accept ...   # read and write comments
 gitr serve [repos]          # many repos and worktrees in one page (or ~/.config/gitr/projects.json)
+gitr serve --herdr          # ... and the repos open in herdr's panes, stopping with herdr's server
+gitr status                 # what of gitr runs: gitr serve, this repo's window server, herdr's plugin
+herdr plugin link herdr-plugin   # the herdr plugin from this checkout (see DEVELOPMENT.md)
 ```
 
 Tests (`unittest`-style, throwaway git repos in temp dirs, no network):
@@ -38,6 +41,7 @@ python3 -c "import ast; ast.parse(open('gitr.py').read())"
 
 - `gitr.py`: the command line (`main()` dispatches to the window, `export`, `comments`, `serve`) and what the server shares with it: `parse_diff()` (raw diff to `DiffFile`s of `DiffLine(text, kind)`, `kind` one of `added | removed | context | hunk | fileheader`), `ReviewStore` (comments in `.gitr/review.json`, anchored to snapshots of the file in `.gitr/snapshots/`, remapped by difflib on read), `ViewedStore` (`.gitr/viewed.json`), the anchor matching and the agent export (`_format_export`), and the word-diff line pairing.
 - `gitr_web/server.py`: a stdlib HTTP server serving the page (`static/`). `main()` is gitr serve, for many repos and their worktrees; `standalone()` is `gitr`, one repo on a port of its own, opened in a Chromium-family browser's app mode in a profile of gitr's own, ending on Ctrl+C (which tells the pages, so `gitr`'s windows close) or when the last page dropped its `/api/events` stream (after a short wait if the page was just asked for again: a reload). That stream (one per browser, held by the shared worker `static/events.js` for all its tabs) carries the changes: the pages post what they show to `/api/watch`, and `Events.run` checks those views and pushes what changed; the page's polls only stand in while it is down. The whole diff is one Monaco document plus per-line metadata (`Doc`); word-diff ranges are fetched in windows. Run from a checkout with `python3 gitr_web/server.py --reload`.
+- `herdr-plugin/`: herdr's plugin, its startup hook `start.py`: starts `gitr serve --herdr --reload` (detached, ending itself with herdr's server) from the plugin's own checkout (herdr installs a plugin as a clone of the whole repo), else `gitr` from PATH, and writes a `gitr` launcher into the plugin's config directory. `Herdr` in server.py is the socket client: the repos of herdr's panes, and the subscription whose end stops the server.
 
 ## Constraints
 

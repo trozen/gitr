@@ -1,5 +1,7 @@
 """gitr serve's diff document and its git queries, on throwaway repos."""
 
+import os
+import re
 import unittest
 from pathlib import Path
 
@@ -139,6 +141,53 @@ class CommitsTest(RepoTest):
         self.assertEqual(server.refs_stamp(r.path), before)
         r.git('update-ref', 'refs/remotes/origin/main', first)  # what a push or fetch does
         self.assertNotEqual(server.refs_stamp(r.path), before)
+
+
+class HerdrReposTest(RepoTest):
+    """--herdr: a pane's directory to the repo it belongs to."""
+
+    def test_repo_of_dir(self):
+        r = self.repo
+        r.write('src/a', '1\n')
+        r.commit('base')
+        real = os.path.realpath(r.path)
+        self.assertEqual(server.repo_of_dir(os.path.join(r.path, 'src')), real)
+        wt = os.path.join(os.path.dirname(r.path), os.path.basename(r.path) + '-wt')
+        r.git('worktree', 'add', '-q', '-b', 'agent', wt)
+        try:
+            self.assertEqual(server.repo_of_dir(wt), real)  # a linked worktree: its repo
+        finally:
+            r.git('worktree', 'remove', '--force', wt)
+        self.assertIsNone(server.repo_of_dir('/'))
+        self.assertIsNone(server.repo_of_dir(os.path.join(r.path, '.git', 'objects')))
+
+    def test_not_the_home_directory(self):
+        # a repo of dotfiles in ~ is no project of a pane outside the others
+        self.repo.write('.bashrc', 'x\n')
+        self.repo.commit('dotfiles')
+        sub = os.path.join(self.repo.path, 'Downloads')
+        os.mkdir(sub)
+        old = os.environ.get('HOME')
+        os.environ['HOME'] = self.repo.path
+        try:
+            self.assertIsNone(server.repo_of_dir(sub))
+            self.assertIsNone(server.repo_of_dir(self.repo.path))
+        finally:
+            if old is None:
+                del os.environ['HOME']
+            else:
+                os.environ['HOME'] = old
+
+
+class HerdrPluginTest(unittest.TestCase):
+    def test_version_is_gitrs(self):
+        # the plugin runs the gitr of its checkout: herdr's marketplace
+        # shows the plugin's version, which is to say which gitr it is
+        root = Path(__file__).resolve().parent.parent
+        version = r'^version = "([^"]+)"'
+        manifest = re.search(version, (root / 'herdr-plugin' / 'herdr-plugin.toml').read_text(), re.M)
+        project = re.search(version, (root / 'pyproject.toml').read_text(), re.M)
+        self.assertEqual(manifest.group(1), project.group(1))
 
 
 if __name__ == '__main__':

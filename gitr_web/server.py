@@ -465,14 +465,16 @@ def _u16len(s: str) -> int:
 # --state -----------------------------------------------------------------------
 
 class State:
-    def __init__(self, repos: list[dict]) -> None:
+    def __init__(self, repos: list[dict], herdr: 'Herdr | None' = None) -> None:
         self._entries = repos
+        self._herdr = herdr
         self._lock = threading.Lock()
         # review.json is read, changed and written back as a whole
         self._review_lock = threading.Lock()
         self._settings_lock = threading.Lock()
         self._repos_lock = threading.Lock()
         self._repos: 'tuple[float, list[dict]] | None' = None  # (when, expand_repos())
+        self._refreshing = False
         # Documents by (worktree, id), least recently used first: word-diff
         # windows, comments and the change check are served from them without
         # recomputing the diff. See _evict_docs.
@@ -488,9 +490,25 @@ class State:
         # one checks its worktree against these.
         with self._repos_lock:
             now = time.monotonic()
-            if self._repos is None or now - self._repos[0] > REPOS_S:
-                self._repos = (now, expand_repos(self._entries))
-            return self._repos[1]
+            if self._repos is not None and now - self._repos[0] <= REPOS_S:
+                return self._repos[1]
+            if self._repos is not None and self._refreshing:
+                return self._repos[1]  # another request is at it
+            self._refreshing = True
+        # Outside the lock: herdr may be slow to answer (up to its timeout),
+        # and the requests in the meantime make do with the last list.
+        try:
+            repos = expand_repos(self._entries)
+            if self._herdr:
+                known = {r['path'] for r in repos}
+                repos += [{'path': p, 'name': os.path.basename(p)}
+                          for p in self._herdr.repos() if p not in known]
+        finally:
+            with self._repos_lock:
+                self._refreshing = False
+        with self._repos_lock:
+            self._repos = (time.monotonic(), repos)
+            return repos
 
     def projects(self) -> list[dict]:
         out = []
@@ -1532,6 +1550,7 @@ class Stream:
 
     def __init__(self) -> None:
         self.subs: dict[str, tuple[str, str, 'str | None']] = {}
+        self.pages = 0  # the browser's pages of this server, hidden ones too
         self.sent: dict[str, dict] = {}
         self.out: list[bytes] = []
         self.lock = threading.Lock()
@@ -1565,8 +1584,8 @@ class Events:
         self.version: 'str | None' = None
         self.due: dict[tuple, float] = {}  # view -> when to check it next
 
-    def watch(self, sid: str, subs: dict) -> None:
-        if not isinstance(subs, dict):
+    def watch(self, sid: str, subs: dict, pages: int = 0) -> None:
+        if not isinstance(subs, dict) or type(pages) is not int:
             raise ValueError('subs')
         parsed = {}
         for key, sub in subs.items():
@@ -1579,6 +1598,7 @@ class Events:
             if st is None:
                 raise KeyError('no such stream')
             st.subs = parsed
+            st.pages = pages
             st.sent = {k: v for k, v in st.sent.items() if k in parsed}
         self.wake.set()
 
@@ -1645,6 +1665,13 @@ class Events:
             for st in streams:
                 st.push('projects', projects)
 
+
+    def page_count(self) -> int:
+        """The pages open, of all browsers: each browser's shared worker
+        (events.js) counts its own, hidden ones and ones with nothing to
+        show too, which post no view."""
+        with self.lock:
+            return sum(st.pages for st in self.streams.values())
 
     def bye(self) -> None:
         """Tell every page the server is stopping (`gitr`'s windows close),
@@ -1790,8 +1817,11 @@ class Handler(BaseHTTPRequestHandler):
         return host in ALLOWED_HOSTS
 
     def do_GET(self) -> None:
-        if urlparse(self.path).path == '/api/events':
+        url = urlparse(self.path)
+        if url.path == '/api/events':
             return self._get()  # held open: it counts as a page, not as a request
+        if url.path == '/api/version' and url.query == 'probe=1':
+            return self._get()  # `gitr status` asking must not keep `gitr` up
         self._counted(self._get)
 
     def do_POST(self) -> None:
@@ -1820,7 +1850,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/alive':
                 return self._json({'standalone': Handler.standalone})
             if url.path == '/api/version':
-                return self._json({'version': page_version(), 'gitr': GITR_VERSION})
+                return self._json({'version': page_version(), 'gitr': GITR_VERSION,
+                                   'herdr': Handler.state._herdr is not None, 'pages': EVENTS.page_count(),
+                                   'pid': os.getpid()})
             if url.path == '/api/projects':
                 if q.get('expect'):
                     Handler.expect_until = time.monotonic() + EXPECT_S
@@ -1892,7 +1924,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/viewed':
                 return self._json(self.state.mark_viewed(req))
             if path == '/api/watch':
-                EVENTS.watch(req['id'], req['subs'])
+                EVENTS.watch(req['id'], req['subs'], req.get('pages', 0))
                 return self._json({})
             if path == '/api/comments/clear':
                 return self._json(self.state.clear_comments(req['wt'], req['id']))
@@ -2040,6 +2072,133 @@ def expand_repos(entries: list[dict]) -> list[dict]:
     return out
 
 
+# --herdr ----------------------------------------------------------------------
+#
+# gitr serve next to herdr (https://herdr.dev), which runs the agents: the
+# repos open in its panes are served besides the configured ones, and the
+# server ends with herdr's. herdr's plugin (herdr-plugin/ in this repo)
+# starts it; herdr has no services of its own to stop it again.
+
+HERDR_SOCKET = Path.home() / '.config' / 'herdr' / 'herdr.sock'
+# herdr hands its sessions over to a new server (an upgrade) on the same
+# socket: gitr waits this long for one before taking herdr's end for its own
+HERDR_HANDOFF_S = 20
+# Started by herdr's plugin (start.py names it here), the server ends when
+# the plugin is disabled or uninstalled, which herdr tells no one: it is
+# asked this often.
+HERDR_PLUGIN_ENV = 'GITR_HERDR_PLUGIN'
+HERDR_PLUGIN_S = 5
+
+
+class Herdr:
+    def __init__(self, sock: str) -> None:
+        self.sock = sock
+        self._last: list[str] = []
+
+    def call(self, method: str, params: 'dict | None' = None) -> dict:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(3)
+            s.connect(self.sock)
+            s.sendall(json.dumps({'id': 'gitr', 'method': method, 'params': params or {}}).encode() + b'\n')
+            buf = b''
+            while not buf.endswith(b'\n'):
+                chunk = s.recv(65536)
+                if not chunk:
+                    raise OSError('herdr closed the connection')
+                buf += chunk
+        reply = json.loads(buf)
+        if 'error' in reply:
+            raise OSError(f"herdr: {reply['error']}")
+        return reply['result']
+
+    def repos(self) -> list[str]:
+        """The repos herdr's panes are in, by their main checkout (a linked
+        worktree stands for its repo, which lists all its worktrees). While
+        herdr cannot be asked, the ones it last had."""
+        try:
+            panes = self.call('pane.list')['panes']
+        except (OSError, ValueError, KeyError, TypeError):
+            return self._last
+        out: list[str] = []
+        for d in sorted({d for p in panes for d in (p.get('cwd'), p.get('foreground_cwd')) if d}):
+            repo = repo_of_dir(d)
+            if repo and repo not in out:
+                out.append(repo)
+        self._last = out
+        return out
+
+    def watch_all(self) -> None:
+        """herdr's server, and the plugin when it started this one, in
+        threads that end this process when they go."""
+        threading.Thread(target=self.watch, daemon=True).start()
+        if os.environ.get(HERDR_PLUGIN_ENV):
+            threading.Thread(target=self.watch_plugin, args=(os.environ[HERDR_PLUGIN_ENV],), daemon=True).start()
+
+    def watch_plugin(self, plugin_id: str) -> None:
+        while True:
+            time.sleep(HERDR_PLUGIN_S)
+            try:
+                plugins = self.call('plugin.list', {'plugin_id': plugin_id})['plugins']
+            except (OSError, ValueError, KeyError, TypeError):
+                continue  # herdr away: watch() decides
+            if not any(p.get('plugin_id') == plugin_id and p.get('enabled') for p in plugins):
+                print(f'gitr serve: herdr plugin {plugin_id} disabled or removed, stopping', file=sys.stderr)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+
+    def watch(self) -> None:
+        """Until herdr's server is gone: then end this one, as Ctrl+C would.
+        A subscription is a connection herdr keeps open, so it closing is
+        herdr stopping (or handing over to a new server)."""
+        while True:
+            try:
+                with socket.socket(socket.AF_UNIX) as s:
+                    s.connect(self.sock)
+                    s.sendall(json.dumps({'id': 'gitr-watch', 'method': 'events.subscribe', 'params': {
+                        'subscriptions': [{'type': 'workspace.closed'}]}}).encode() + b'\n')
+                    while s.recv(65536):
+                        pass
+            except OSError:
+                pass
+            end = time.monotonic() + HERDR_HANDOFF_S
+            while time.monotonic() < end:
+                try:
+                    self.call('ping')
+                    # herdr is there, but closed the subscription: not again
+                    # at once, should it keep refusing it
+                    time.sleep(1)
+                    break
+                except (OSError, ValueError):
+                    time.sleep(0.5)
+            else:
+                print('gitr serve: herdr stopped, stopping too', file=sys.stderr)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+
+
+def repo_of_dir(d: str) -> 'str | None':
+    """The checkout a directory is in (it or one above it), as its repo's
+    main checkout, or the bare repo of a linked worktree. Not the home
+    directory (a repo of dotfiles is no project, and would bring in every
+    pane outside one), nor anything inside a .git directory."""
+    d = os.path.realpath(d)
+    home = os.path.realpath(os.path.expanduser('~'))
+    if '.git' in Path(d).parts:
+        return None
+    while d != home:
+        g = git_dir_of(d)
+        if g:
+            common, linked = g
+            if not linked:
+                return d
+            return os.path.dirname(common) if os.path.basename(common) == '.git' else common
+        up = os.path.dirname(d)
+        if up == d:
+            return None
+        d = up
+    return None
+
+
 RELOAD_CHILD_ENV = 'GITR_SERVE_CHILD'
 
 
@@ -2078,6 +2237,11 @@ def supervise(argv: list[str]) -> None:
             pages = page_stamp()
             while stamp() == seen:
                 time.sleep(0.5)
+                # A server that ended well by itself (--herdr: herdr stopped)
+                # ends the supervisor; one that failed (a save with a syntax
+                # error) is started again on the next save.
+                if child.poll() == 0:
+                    return
                 now = page_stamp()
                 if now != pages:
                     changed = sorted(str(p.relative_to(STATIC_DIR)) for p in now.keys() | pages.keys()
@@ -2180,6 +2344,10 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr serve') -> None:
                     help='also answer to this host name, e.g. the machine\'s name under '
                          '`tailscale serve` (repeatable; added to "allow_hosts" in '
                          f'{CONFIG_PATH.name}); the server still listens on --host')
+    ap.add_argument('--herdr', action='store_true',
+                    help='also the repos open in herdr\'s panes, and stop when herdr\'s server does '
+                         f'(herdr\'s socket from $HERDR_SOCKET_PATH, else {tilde(str(HERDR_SOCKET))}); '
+                         'an address already served by gitr is left to it')
     ap.add_argument('--reload', action='store_true',
                     help=f'restart when server.py, gitr.py or {CONFIG_PATH.name} changes (for development)')
     ap.add_argument('--print-config', action='store_true',
@@ -2192,13 +2360,35 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr serve') -> None:
         print(f'gitr serve: save as {CONFIG_PATH}, e.g. with: '
               f'gitr serve --print-config ... > {CONFIG_PATH}', file=sys.stderr)
         return
-    if a.reload and not os.environ.get(RELOAD_CHILD_ENV):
+    child = bool(os.environ.get(RELOAD_CHILD_ENV))
+    herdr = None
+    if a.herdr:
+        herdr = Herdr(os.environ.get('HERDR_SOCKET_PATH') or str(HERDR_SOCKET))
+        # Before the supervisor of --reload, so that what is refused here ends
+        # the command at once (herdr's plugin reports it) rather than a child
+        # the supervisor would wait on. The config is the child's to read, as
+        # the supervisor waits for it to be written or fixed.
+        try:
+            herdr.call('ping')
+        except (OSError, ValueError) as e:
+            sys.exit(f'gitr serve: herdr at {tilde(herdr.sock)}: {e}')
+        if not child:
+            if serving_gitr(a.host, a.port):
+                print(f'gitr serve: http://{a.host}:{a.port}/ is served by gitr already', file=sys.stderr)
+                return
+            if not port_free(a.host, a.port):
+                sys.exit(f'gitr serve: port {a.port} is taken by something else')
+    if a.reload and not child:
+        if herdr:
+            # The supervisor too ends with herdr (and its plugin), also while
+            # its server is down, waiting for a save that fixes it.
+            herdr.watch_all()
         return supervise(argv)
     repos = load_repos(a.repos)
-    if not repos:
+    if not repos and not herdr:
         sys.exit(f'gitr serve: no repositories given and none in {CONFIG_PATH}\n'
                  f'  create it with: gitr serve --print-config [repo ...] > {CONFIG_PATH}')
-    Handler.state = State(repos)
+    Handler.state = State(repos, herdr)
     ALLOWED_HOSTS.add(a.host.lower())
     # Machine settings: they apply also when the repos come from the command line.
     allow = [*read_config().get('allow_hosts', []), *a.allow_host]
@@ -2209,11 +2399,125 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr serve') -> None:
     print(f'  config {tilde(str(CONFIG_PATH))}{found}', file=sys.stderr)
     for h in allow:
         print(f'  also answering as {h}', file=sys.stderr)
-    width = max(len(r['name']) for r in repos)
+    width = max((len(r['name']) for r in repos), default=0)
     for r in repos:
         multi = f" (multi-repo, depth {r['depth']})" if r.get('multi') else ''
         print(f"  {r['name']:<{width}}  {tilde(r['path'])}{multi}", file=sys.stderr)
+    if herdr:
+        print(f'  and the repos open in herdr ({tilde(herdr.sock)}), now {len(herdr.repos())}', file=sys.stderr)
+        herdr.watch_all()
     serve(srv)
+
+
+def port_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as the server binds it
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def serving_gitr(host: str, port: int) -> bool:
+    return gitr_at(host, port) is not None
+
+
+def gitr_at(host: str, port: int) -> 'dict | None':
+    """What a gitr on that address says of itself (/api/version), None if
+    none answers there."""
+    conn = HTTPConnection(host, port, timeout=2)
+    try:
+        conn.request('GET', '/api/version?probe=1')
+        info = json.loads(conn.getresponse().read())
+        return info if isinstance(info, dict) and 'gitr' in info else None
+    except (OSError, ValueError, TypeError):
+        return None
+    finally:
+        conn.close()
+
+
+def status(argv: list[str], prog: str = 'gitr status') -> None:
+    """`gitr status`: which gitr this is, and what of gitr runs: gitr serve,
+    this repository's window server, herdr's plugin."""
+    ap = argparse.ArgumentParser(prog=prog, description='What of gitr runs here: gitr serve, '
+                                 "this repository's server, herdr's plugin.")
+    ap.add_argument('--port', type=int, default=4487, help="gitr serve's port (default: 4487)")
+    a = ap.parse_args(argv)
+    sections: list[tuple[str, list[tuple[str, str]]]] = []
+
+    sections.append(('gitr', [('version', GITR_VERSION),
+                              ('runs from', tilde(str(Path(gitr.__file__).resolve())))]))
+
+    rows = []
+    info = gitr_at('127.0.0.1', a.port)
+    if info:
+        rows.append(('status', f'running at http://127.0.0.1:{a.port}/'))
+        rows.append(('version', info['gitr']))
+        rows.append(('herdr', "with the repos open in herdr's panes" if info.get('herdr') else 'no'))
+    else:
+        rows.append(('status', f'not running on port {a.port}'))
+    found = f'{len(read_config().get("projects", []))} entries' if CONFIG_PATH.exists() else 'not found'
+    rows.append(('config', f'{tilde(str(CONFIG_PATH))} ({found})'))
+    sections.append(('gitr serve', rows))
+
+    try:
+        top = os.path.realpath(git(os.getcwd(), 'rev-parse', '--show-toplevel').strip())
+        here = os.path.realpath(list_worktrees(top)[0]['path'])
+    except (GitError, IndexError):
+        here = None
+    rows = []
+    for w in running_windows():
+        n = w.get('pages')
+        count = '' if n is None else f", {n} window{'' if n == 1 else 's'}"
+        if w.get('answering') is False:
+            count = ', not answering'
+        mark = '  (this repository)' if w['repo'] == here else ''
+        rows.append((tilde(w['repo']), f"http://{WINDOW_HOST}:{w['port']}/{count}{mark}"))
+    sections.append(('gitr windows', rows or [('status', 'none running (`gitr` in a repository opens one)')]))
+
+    sections.append(('herdr', herdr_status()))
+
+    for i, (title, rows) in enumerate(sections):
+        width = max(len(k) for k, _ in rows) + 2
+        print(('\n' if i else '') + title)
+        for k, v in rows:
+            print(f"  {k + ':' if k else '':<{width}}{v}")
+
+
+def herdr_status() -> 'list[tuple[str, str]]':
+    sock = os.environ.get('HERDR_SOCKET_PATH') or str(HERDR_SOCKET)
+    if not shutil.which('herdr') and not os.path.exists(sock):
+        return [('status', 'not installed')]
+    try:
+        plugins = Herdr(sock).call('plugin.list', {'plugin_id': 'gitr'})['plugins']
+    except (OSError, ValueError, KeyError, TypeError):
+        return [('status', f'not running ({tilde(sock)})')]
+    rows = [('status', 'running')]
+    plugin = next((p for p in plugins if p.get('plugin_id') == 'gitr'), None)
+    if not plugin:
+        rows.append(('plugin', 'not installed (herdr plugin install trozen/gitr/herdr-plugin)'))
+        return rows
+    state = 'enabled' if plugin.get('enabled') else 'disabled'
+    if (plugin.get('source') or {}).get('kind') == 'local':
+        rows.append(('plugin', f"{state}, linked from {tilde(plugin.get('plugin_root', '?'))}"))
+    else:
+        rows.append(('plugin', f"{state}, installed ({plugin.get('version', '?')})"))
+    try:
+        config = subprocess.run(['herdr', 'plugin', 'config-dir', 'gitr'], capture_output=True,
+                                text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        config = ''
+    launcher = Path(config, 'bin', 'gitr') if config else None
+    if launcher and launcher.exists():
+        # the plugin's gitr for the shell, see write_launcher in start.py
+        rows.append(('gitr', tilde(str(launcher))))
+        found = shutil.which('gitr')
+        if not found or os.path.realpath(found) != os.path.realpath(launcher):
+            rows.append(('', 'to use it, put its directory on PATH'))
+            if found:
+                rows.append(('', f'(the shell runs {tilde(found)} now)'))
+    return rows
 
 
 # --gitr: one repo, in a window of its own -----------------------------------
@@ -2418,8 +2722,11 @@ def standalone(argv: list[str], prog: str = 'gitr') -> None:
     for port in range(first, first + 10):
         if serving(port, repo):
             # another gitr has it: one more window on that one
-            if not open_window(f'http://{WINDOW_HOST}:{port}{url}', browser):
-                print(f'gitr: already served at http://{WINDOW_HOST}:{port}{url}', file=sys.stderr)
+            full = f'http://{WINDOW_HOST}:{port}{url}'
+            if open_window(full, browser):
+                print(f'gitr: another window on the gitr already serving it, {full}', file=sys.stderr)
+            else:
+                print(f'gitr: already served at {full}', file=sys.stderr)
             return
         try:
             srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
@@ -2434,7 +2741,9 @@ def standalone(argv: list[str], prog: str = 'gitr') -> None:
     full = f'http://{WINDOW_HOST}:{srv.server_port}{url}'
     shown = open_window(full, browser)
     print(f'gitr: {full}' + ('' if shown else ' (open it in a browser)'), file=sys.stderr)
-    print('  Ctrl+C stops it, or closing its windows', file=sys.stderr)
+    print('Ctrl+C stops it, or closing its windows.', file=sys.stderr)
+    print('To list the options and the other commands:', file=sys.stderr)
+    print('  gitr -h', file=sys.stderr)
 
     def watch() -> None:
         while True:
@@ -2454,7 +2763,59 @@ def standalone(argv: list[str], prog: str = 'gitr') -> None:
         srv.shutdown()
 
     threading.Thread(target=watch, daemon=True).start()
-    serve(srv)
+    note = note_running(srv.server_port, repo)
+    try:
+        serve(srv)
+    finally:
+        note.unlink(missing_ok=True)
+
+
+# Each `gitr` notes its server here while it runs, for `gitr status` to list
+# them: their ports come from their repos' paths, so they cannot be probed
+# for. A note left by a server that was killed is told apart by asking its
+# port.
+RUNNING_DIR = (Path(os.environ['XDG_RUNTIME_DIR']) / 'gitr' if os.environ.get('XDG_RUNTIME_DIR')
+               else SETTINGS_PATH.parent / 'running')
+
+
+def note_running(port: int, repo: str) -> Path:
+    note = RUNNING_DIR / f'{port}.json'
+    try:
+        RUNNING_DIR.mkdir(parents=True, exist_ok=True)
+        note.write_text(json.dumps({'port': port, 'repo': repo, 'pid': os.getpid()}))
+    except OSError:
+        pass  # only `gitr status` misses it
+    return note
+
+
+def running_windows() -> 'list[dict]':
+    """The `gitr` servers running, with what each says of itself; notes of
+    ones no longer there are removed."""
+    out = []
+    try:
+        notes = sorted(RUNNING_DIR.glob('*.json'))
+    except OSError:
+        return out
+    for note in notes:
+        try:
+            entry = json.loads(note.read_text())
+            port, repo, pid = int(entry['port']), str(entry['repo']), entry['pid']
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            os.kill(int(pid), 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except (PermissionError, ValueError, TypeError, OverflowError):
+            alive = True
+        info = gitr_at('127.0.0.1', port) if alive else None
+        if not alive or (info is not None and info.get('pid') != pid):
+            note.unlink(missing_ok=True)  # gone, or its port another's now
+            continue
+        # one that does not answer (busy, starting) is listed as such
+        out.append({'port': port, 'repo': repo, **(info or {'answering': False})})
+    return out
 
 
 if __name__ == '__main__':

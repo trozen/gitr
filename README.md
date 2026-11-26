@@ -85,7 +85,8 @@ This is where [herdr](https://herdr.dev) fits in: herdr runs the agents
 (a pane each, their state at a glance, sessions that survive a dropped
 connection), and `gitr serve` on the same machine shows what each of them
 changed, for you to review and comment on, and for the agents to read
-back with `gitr export`.
+back with `gitr export`. gitr's plugin for herdr starts `gitr serve` along
+with herdr; see [Alongside herdr](#alongside-herdr).
 
 ![The commits pane: one commit shown, comments per commit](https://raw.githubusercontent.com/trozen/gitr/master/docs/commits.png)
 
@@ -99,6 +100,7 @@ gitr --browser list          # the browsers gitr found, the one it uses marked
 gitr --browser vivaldi       # that one (a listed name, or a path)
 gitr --browser default       # a tab in the default browser
 gitr --browser none          # only print the address
+gitr status                  # what of gitr runs: gitr serve, the windows, herdr's plugin
 ```
 
 `GITR_BROWSER` takes the same values, for a choice that sticks; `--browser`
@@ -176,6 +178,27 @@ up afresh with every listing, when its entry says so:
 Only the checkouts directly in it are found; `"depth": 2` looks one level
 further down (never inside a checkout).
 
+### Alongside herdr
+
+gitr's plugin for [herdr](https://herdr.dev) runs `gitr serve` while
+herdr's server runs:
+
+```bash
+herdr plugin install trozen/gitr/herdr-plugin
+```
+
+From herdr's next start, it serves the repositories open in herdr's panes,
+besides those in `projects.json`, and stops when herdr stops. The plugin
+is enough by itself: it runs the gitr in its own copy of the repository and
+needs only Python 3.10+. For the `gitr` command in the shell, add
+`~/.config/herdr/plugins/config/gitr/bin` to PATH, or install
+`gitr-review`. If a gitr already serves the port, the plugin leaves
+it alone. Its output goes to herdr's state directory for the plugin
+(`~/.local/state/herdr/plugins/gitr/gitr-serve.log`).
+
+The plugin follows this repository's master branch; `--ref <tag>` installs
+a release. `gitr serve --herdr` does the same without the plugin.
+
 ### From another machine
 
 The server listens on localhost only and has no authentication, so reach it
@@ -230,15 +253,7 @@ server's hostname.
 
 ## Development
 
-From a checkout, without installing: `python3 gitr_web/server.py`, with
-`--reload` to restart on changes to `gitr_web/server.py`, `gitr.py` or
-`~/.config/gitr/projects.json`. The page files under `gitr_web/static/` are
-read from disk on every request, so changes to them only need a browser
-refresh. Tests: `uv run pytest` (or `python3 -m unittest discover -s tests
--t .`). The Monaco bundle under `gitr_web/static/monaco/` is built and
-committed; to move to another Monaco version, change it in
-`monaco/package.json` and run `cd monaco && npm install && npm run build`
-(Node is needed for that only).
+See [DEVELOPMENT.md](https://github.com/trozen/gitr/blob/master/DEVELOPMENT.md).
 
 ## License
 

@@ -620,8 +620,30 @@ async function showPlugin() {
   $('plugin-row').hidden = false;
   const btn = $('plugin-update'), status = $('plugin-status');
   btn.hidden = linked;
-  const done = (text) => { status.textContent = text; btn.textContent = 'update'; btn.disabled = false; };
-  btn.onclick = async () => {
+  // "check for update" asks GitHub; only a newer commit turns it into "update"
+  let mode = 'check';
+  const idle = (text, next = 'check') => {
+    mode = next;
+    status.textContent = text;
+    btn.textContent = next === 'check' ? 'check for update' : 'update';
+    btn.disabled = false;
+  };
+  idle('');
+  btn.onclick = () => (mode === 'check' ? check() : update());
+
+  async function check() {
+    btn.disabled = true;
+    btn.textContent = 'checking\u2026';
+    try {
+      const r = await post('/api/plugin/check', {});
+      if (r.newer) idle(`${r.latest} available (running ${r.current})`, 'update');
+      else idle('up to date');
+    } catch (e) {
+      idle(String(e.message || e));
+    }
+  }
+
+  async function update() {
     btn.disabled = true;
     btn.textContent = 'updating\u2026';
     status.textContent = '';
@@ -633,10 +655,10 @@ async function showPlugin() {
     } catch (e) {
       // no answer at all: the handover may have stopped the server while
       // herdr was still at it; any other failure is herdr's, shown
-      if (!(e instanceof TypeError)) return done(String(e.message || e));
+      if (!(e instanceof TypeError)) return idle(String(e.message || e), 'update');
       updated = null;
     }
-    if (updated === false) return done('up to date');
+    if (updated === false) return idle('up to date');
     status.textContent = updated ? 'updated, restarting\u2026' : 'restarting?\u2026';
     // the server hands over to the new copy within seconds: the page
     // follows it once it answers as another server
@@ -645,8 +667,8 @@ async function showPlugin() {
       const v = await api('/api/version', {}).then((x) => x.version, () => null);
       if (v && was && v !== was) { location.reload(); return; }
     }
-    done(updated ? 'updated, but gitr serve did not restart (see gitr status)' : 'no restart; see gitr status');
-  };
+    idle(updated ? 'updated, but gitr serve did not restart (see gitr status)' : 'no restart; see gitr status');
+  }
 }
 const APP_TITLE = document.title;
 

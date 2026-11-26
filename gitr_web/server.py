@@ -532,6 +532,35 @@ class State:
         return {'plugin': p['plugin_id'], 'source': (p.get('source') or {}).get('kind'),
                 'version': p.get('version')}
 
+    def check_plugin(self) -> dict:
+        """Whether the plugin's branch (or the ref it was installed at) has
+        moved on GitHub from the commit this copy is: `git ls-remote` in the
+        plugin's clone, which herdr makes with git. The network only here,
+        on the user's asking."""
+        p = self._plugin()
+        if not p or (p.get('source') or {}).get('kind') == 'local':
+            raise GitError('not an installed herdr plugin')
+        root = Path(gitr.__file__).resolve().parent
+        if not (root / '.git').exists():
+            raise GitError('the plugin is no git clone to check')
+        ref = (p.get('source') or {}).get('requested_ref') or 'HEAD'
+        current = git(str(root), 'rev-parse', 'HEAD').strip()
+        try:
+            r = subprocess.run(['git', 'ls-remote', 'origin', ref, f'{ref}^{{}}'], cwd=root, capture_output=True,
+                               text=True, timeout=30, stdin=subprocess.DEVNULL,
+                               env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+        except (OSError, subprocess.SubprocessError) as e:
+            raise GitError(f'git ls-remote: {e}')
+        if r.returncode:
+            lines = r.stderr.strip().splitlines()
+            raise GitError(f"git ls-remote: {lines[-1] if lines else f'exit {r.returncode}'}")
+        heads = [line.split('\t') for line in r.stdout.splitlines() if '\t' in line]
+        # a tag's commit is its peeled line (^{}), where there is one
+        latest = next((sha for sha, name in heads if name.endswith('^{}')), heads[0][0] if heads else '')
+        if not latest:
+            raise GitError(f'{ref} not found on the remote')
+        return {'current': current[:7], 'latest': latest[:7], 'newer': latest != current}
+
     def update_plugin(self) -> dict:
         """`herdr plugin update`: a new copy beside this one, which this
         server then hands over to (Herdr.watch_plugin), so the page reloads
@@ -1975,6 +2004,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.save_settings(req))
             if path == '/api/viewed':
                 return self._json(self.state.mark_viewed(req))
+            if path == '/api/plugin/check':
+                return self._json(self.state.check_plugin())
             if path == '/api/plugin/update':
                 return self._json(self.state.update_plugin())
             if path == '/api/watch':

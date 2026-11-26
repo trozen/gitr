@@ -271,7 +271,7 @@ whole diff in one read-only document as in gitr.
       Publishing (no token): check the tag against the version in
       `pyproject.toml`, run the tests, `uv build`, `uv publish`; a `pypi`
       environment that asks for approval. Before the next release
-- [ ] Branches `main` (the default, moved only by releases) and `devel`
+- [x] Branches `release` (the default, moved only by releases) and `devel`
       (daily work) instead of `master`: herdr installs and updates a
       plugin from the default branch, and the plugin runs the gitr of its
       checkout, so plain installs would get releases only, no `--ref`
@@ -292,7 +292,7 @@ whole diff in one read-only document as in gitr.
 - [ ] herdr: gitr shown in herdr's UI, e.g. "gitr is running" in the tab
       bar's status area, or the review state per workspace in the sidebar
 - [ ] A newer gitr announced, as an opt-in setting (the README promises no
-      internet needed): a check of GitHub's master (the plugin) or PyPI
+      internet needed): a check of GitHub's release branch (the plugin) or PyPI
       (gitr-review) now and then, shown in the page or as a herdr
       notification with the command that updates
 - [x] Replace the Tk window with the web view: `gitr` launches a

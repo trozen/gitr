@@ -6,7 +6,7 @@ window, with a file list, review comments the agent can read back, viewed
 marks, and the branch's commits. Everything stays in the repository: no
 account, no cloud service, no internet needed.
 
-![gitr reviewing an agent's branch: the file list, the diff with comments](https://raw.githubusercontent.com/trozen/gitr/master/docs/screenshot.png)
+![gitr reviewing an agent's branch: the file list, the diff with comments](https://raw.githubusercontent.com/trozen/gitr/release/docs/screenshot.png)
 
 - **One diff for the whole review**: every changed file in one scrolling
   view, word-level highlights on edited lines, re-indented lines collapsed.
@@ -208,8 +208,9 @@ needs only Python 3.10+. For the `gitr` command in the shell, add
 it alone. Its output goes to herdr's state directory for the plugin
 (`~/.local/state/herdr/plugins/gitr/gitr-serve.log`).
 
-The plugin follows this repository's master branch; `--ref <tag>` installs
-a release. `gitr serve --herdr` does the same without the plugin.
+The plugin follows this repository's release branch, which moves only at
+releases; `--ref <tag>` installs a given one. `gitr serve --herdr` does the
+same without the plugin.
 
 To update it:
 
@@ -271,10 +272,10 @@ server's hostname.
 
 ## Development
 
-See [DEVELOPMENT.md](https://github.com/trozen/gitr/blob/master/DEVELOPMENT.md).
+See [DEVELOPMENT.md](https://github.com/trozen/gitr/blob/release/DEVELOPMENT.md).
 
 ## License
 
-MIT, see [LICENSE](https://github.com/trozen/gitr/blob/master/LICENSE). Bundled: [Monaco Editor](https://github.com/microsoft/monaco-editor)
+MIT, see [LICENSE](https://github.com/trozen/gitr/blob/release/LICENSE). Bundled: [Monaco Editor](https://github.com/microsoft/monaco-editor)
 (MIT) and [Codicons](https://github.com/microsoft/vscode-codicons) by
 Microsoft, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

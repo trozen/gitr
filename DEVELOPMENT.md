@@ -35,12 +35,17 @@ runs.
 A tag publishes it: `.github/workflows/publish.yml` checks that the tag
 is the version, runs the tests, builds and uploads to PyPI.
 
-1. Set the version (e.g. `0.2.0`) in `pyproject.toml` and in
+Daily work goes to `devel`; `release`, the default branch, moves only
+here, to the tagged commit. herdr installs the plugin from the default
+branch, so plain installs and their updates get releases only.
+
+1. On `devel`: set the version (e.g. `0.2.0`) in `pyproject.toml` and in
    `herdr-plugin/herdr-plugin.toml` (a test checks they agree), run
    `uv lock`, commit.
-2. Tag and push: `git tag v0.2.0 && git push origin master v0.2.0`.
+2. Tag it, push it, and move `release` to it (a fast-forward):
+   `git tag v0.2.0 && git push origin devel v0.2.0 v0.2.0:refs/heads/release`.
 3. Approve the run on GitHub, if the `pypi` environment asks for it.
-4. Back to a development version (`0.3.0.dev0`), commit.
+4. Back to a development version (`0.3.0.dev0`) on `devel`, commit.
 
 Set up once: on pypi.org, gitr-review > Settings > Publishing > Add a
 trusted publisher (GitHub: owner `trozen`, repository `gitr`, workflow

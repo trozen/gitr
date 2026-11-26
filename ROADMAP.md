@@ -253,8 +253,8 @@ whole diff in one read-only document as in gitr.
       one file at a time with a file picker, tap a line to comment, the
       comment boxes with accept / copy / delete as on the desktop. Same
       `review.json`, so a review moves between phone and desktop
-- [ ] UI polish, before the herdr integration
-- [ ] A count on the comments button in the left pane: how many comments
+- [x] UI polish, before the herdr integration
+- [x] A count on the comments button in the left pane: how many comments
       the review holds, coloured as the worst of them (bad over note over
       good)
 - [x] Tests: a small suite for the parts most changed of late (diff

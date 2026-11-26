@@ -321,6 +321,11 @@ h2 .grow { flex: 1; }
 #activity button:active { transform: none; }
 /* the open view: VS Code's bar along the button's left edge */
 #activity button.view.on { box-shadow: inset 2px 0 0 var(--fg); color: var(--fg); }
+#activity button.view { position: relative; }
+/* the number of comments, in the colour of the worst kind, as VS Code's counts */
+#activity .badge { position: absolute; right: 3px; bottom: 5px; min-width: 14px; height: 14px;
+                   padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--c);
+                   color: var(--bg-bar); font: bold 9px/14px sans-serif; text-align: center; }
 #commits-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #commit-list .row { padding-left: 8px; gap: 6px; align-items: center; }
 #commit-list .row.active { background: var(--sel); }

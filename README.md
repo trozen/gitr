@@ -101,8 +101,6 @@ changed, for you to review and comment on, and for the agents to read
 back with `gitr export`. gitr's plugin for herdr starts `gitr serve` along
 with herdr; see [Alongside herdr](#alongside-herdr).
 
-![The commits pane: one commit shown, comments per commit](https://raw.githubusercontent.com/trozen/gitr/master/docs/commits.png)
-
 ## Usage
 
 ```bash

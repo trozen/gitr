@@ -475,6 +475,7 @@ class State:
         self._repos_lock = threading.Lock()
         self._repos: 'tuple[float, list[dict]] | None' = None  # (when, expand_repos())
         self._refreshing = False
+        self._update_lock = threading.Lock()  # one herdr plugin update at a time
         # Documents by (worktree, id), least recently used first: word-diff
         # windows, comments and the change check are served from them without
         # recomputing the diff. See _evict_docs.
@@ -509,6 +510,53 @@ class State:
         with self._repos_lock:
             self._repos = (time.monotonic(), repos)
             return repos
+
+    def _plugin(self) -> 'dict | None':
+        """herdr's record of the plugin that started this server, if one did."""
+        plugin_id = os.environ.get(HERDR_PLUGIN_ENV)
+        if not plugin_id or not self._herdr:
+            return None
+        try:
+            plugins = self._herdr.call('plugin.list', {'plugin_id': plugin_id})['plugins']
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return next((p for p in plugins if p.get('plugin_id') == plugin_id), None)
+
+    def plugin_info(self) -> dict:
+        """For the settings popup: started by herdr's plugin, and whether it
+        can be updated from the page (an installed one; a linked checkout
+        is updated with git)."""
+        p = self._plugin()
+        if not p:
+            return {'plugin': None}
+        return {'plugin': p['plugin_id'], 'source': (p.get('source') or {}).get('kind'),
+                'version': p.get('version')}
+
+    def update_plugin(self) -> dict:
+        """`herdr plugin update`: a new copy beside this one, which this
+        server then hands over to (Herdr.watch_plugin), so the page reloads
+        into it. The network only here, on the user's asking."""
+        if not self._update_lock.acquire(blocking=False):
+            raise GitError('an update is running already')
+        try:
+            p = self._plugin()
+            if not p or (p.get('source') or {}).get('kind') == 'local':
+                raise GitError('not an installed herdr plugin')
+            herdr = os.environ.get('HERDR_BIN_PATH') or 'herdr'
+            try:
+                r = subprocess.run([herdr, 'plugin', 'update', p['plugin_id'], '--yes'], capture_output=True,
+                                   text=True, timeout=300, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise GitError(f'herdr plugin update: {e}')
+            if r.returncode:
+                lines = (r.stderr or r.stdout).strip().splitlines()
+                raise GitError(f"herdr plugin update: {lines[-1] if lines else f'exit {r.returncode}'}")
+            after = self._plugin()
+            # None: herdr did not say (busy); the page waits for a restart then
+            updated = None if after is None else after.get('plugin_root') != p.get('plugin_root')
+            return {'updated': updated}
+        finally:
+            self._update_lock.release()
 
     def projects(self) -> list[dict]:
         out = []
@@ -1849,6 +1897,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._events(q.get('id', ''))
             if url.path == '/api/alive':
                 return self._json({'standalone': Handler.standalone})
+            if url.path == '/api/plugin':
+                return self._json(self.state.plugin_info())
             if url.path == '/api/version':
                 return self._json({'version': page_version(), 'gitr': GITR_VERSION,
                                    'herdr': Handler.state._herdr is not None, 'pages': EVENTS.page_count(),
@@ -1925,6 +1975,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.state.save_settings(req))
             if path == '/api/viewed':
                 return self._json(self.state.mark_viewed(req))
+            if path == '/api/plugin/update':
+                return self._json(self.state.update_plugin())
             if path == '/api/watch':
                 EVENTS.watch(req['id'], req['subs'], req.get('pages', 0))
                 return self._json({})
@@ -2522,7 +2574,9 @@ def status(argv: list[str], prog: str = 'gitr status') -> None:
         rows.append((tilde(w['repo']), f"http://{WINDOW_HOST}:{w['port']}/{count}{mark}"))
     sections.append(('gitr windows', rows or [('status', 'none running (`gitr` in a repository opens one)')]))
 
-    sections.append(('herdr', herdr_status()))
+    # the plugin's gitr serve is on the default port, whichever --port asked
+    plugin_port = info if a.port == 4487 else gitr_at('127.0.0.1', 4487)
+    sections.append(('herdr', herdr_status(serve_running=plugin_port is not None)))
 
     for i, (title, rows) in enumerate(sections):
         width = max(len(k) for k, _ in rows) + 2
@@ -2531,7 +2585,7 @@ def status(argv: list[str], prog: str = 'gitr status') -> None:
             print(f"  {k + ':' if k else '':<{width}}{v}")
 
 
-def herdr_status() -> 'list[tuple[str, str]]':
+def herdr_status(serve_running: bool) -> 'list[tuple[str, str]]':
     sock = os.environ.get('HERDR_SOCKET_PATH') or str(HERDR_SOCKET)
     if not shutil.which('herdr') and not os.path.exists(sock):
         return [('status', 'not installed')]
@@ -2549,6 +2603,10 @@ def herdr_status() -> 'list[tuple[str, str]]':
         rows.append(('plugin', f"{state}, linked from {tilde(plugin.get('plugin_root', '?'))}"))
     else:
         rows.append(('plugin', f"{state}, installed ({plugin.get('version', '?')})"))
+    if plugin.get('enabled') and not serve_running:
+        # herdr runs the plugin's start only when its server starts
+        rows.append(('', 'gitr serve is not running; to start it:'))
+        rows.append(('', '  herdr plugin action invoke start --plugin gitr'))
     try:
         config = subprocess.run(['herdr', 'plugin', 'config-dir', 'gitr'], capture_output=True,
                                 text=True, timeout=5).stdout.strip()

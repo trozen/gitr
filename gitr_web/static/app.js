@@ -294,6 +294,14 @@ function renderCommentList() {
   const box = $('comment-list');
   box.textContent = '';
   $('comments-count').textContent = comments.length ? `(${comments.length})` : '';
+  const badge = $('comments-badge');
+  badge.hidden = !comments.length;
+  if (comments.length) {
+    const worst = comments.reduce((w, c) => SEVERITY[c.kind] > SEVERITY[w] ? c.kind : w, 'good');
+    badge.className = `badge c-${worst}`;
+    badge.textContent = comments.length > 99 ? '99+' : String(comments.length);
+    badge.title = `${comments.length} comment${comments.length === 1 ? '' : 's'}`;
+  }
   if (!doc) return;
   if (!comments.length) { box.append(el('div', 'empty', 'no comments')); return; }
   let file = null, elsewhere = false;
@@ -601,6 +609,45 @@ function updateCrumb() {
   $('gitr-version').textContent = gitrVersion ? 'gitr ' + gitrVersion : '';
 }
 let gitrVersion = '';
+
+// Started by herdr's plugin: said so in the settings popup, with an update
+// button for an installed one (a linked checkout is updated with git).
+async function showPlugin() {
+  const info = await api('/api/plugin', {}).catch(() => null);
+  if (!info?.plugin) return;
+  const linked = info.source === 'local';
+  $('plugin-info').textContent = 'started by herdr\u2019s plugin' + (linked ? ' (linked)' : '');
+  $('plugin-row').hidden = false;
+  const btn = $('plugin-update'), status = $('plugin-status');
+  btn.hidden = linked;
+  const done = (text) => { status.textContent = text; btn.textContent = 'update'; btn.disabled = false; };
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'updating\u2026';
+    status.textContent = '';
+    // the server as it is now, to tell its successor by
+    const was = await api('/api/version', {}).then((x) => x.version, () => null);
+    let updated;
+    try {
+      updated = (await post('/api/plugin/update', {})).updated;
+    } catch (e) {
+      // no answer at all: the handover may have stopped the server while
+      // herdr was still at it; any other failure is herdr's, shown
+      if (!(e instanceof TypeError)) return done(String(e.message || e));
+      updated = null;
+    }
+    if (updated === false) return done('up to date');
+    status.textContent = updated ? 'updated, restarting\u2026' : 'restarting?\u2026';
+    // the server hands over to the new copy within seconds: the page
+    // follows it once it answers as another server
+    for (let i = 0; i < 60; i++) {
+      await new Promise((ok) => setTimeout(ok, 1000));
+      const v = await api('/api/version', {}).then((x) => x.version, () => null);
+      if (v && was && v !== was) { location.reload(); return; }
+    }
+    done(updated ? 'updated, but gitr serve did not restart (see gitr status)' : 'no restart; see gitr status');
+  };
+}
 const APP_TITLE = document.title;
 
 function showSwitcher(on) {
@@ -2784,7 +2831,11 @@ function initMenus() {
     if (String(getSelection()).trim() && !e.target.closest('.monaco-editor')) return;
     e.preventDefault();
   });
-  api('/api/version', {}).then((r) => { gitrVersion = r.gitr || ''; updateCrumb(); }).catch(() => {});
+  api('/api/version', {}).then((r) => {
+    gitrVersion = r.gitr || '';
+    updateCrumb();
+    if (r.plugin) showPlugin();
+  }).catch(() => {});
 }
 
 function hideMenu() { $('cmenu').hidden = true; }

@@ -39,6 +39,19 @@ editor, Monaco, comes bundled). A Chromium-family browser (Chrome,
 Chromium, Edge, Brave, Vivaldi, Opera) gives it a window of its own;
 with others it opens in a tab.
 
+### With herdr
+
+As a [herdr](https://herdr.dev) plugin, `gitr serve` runs along with herdr,
+for the repositories open in its panes; the plugin needs only Python 3.10+,
+not the install above:
+
+```bash
+herdr plugin install trozen/gitr/herdr-plugin
+herdr plugin action invoke start --plugin gitr   # start it now, not at herdr's next start
+```
+
+See [Alongside herdr](#alongside-herdr).
+
 ## Quick start
 
 ```bash

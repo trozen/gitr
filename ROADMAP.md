@@ -283,8 +283,9 @@ whole diff in one read-only document as in gitr.
       gitr of the plugin's own checkout (herdr clones the whole repo), else
       `gitr` from PATH, and writes a `gitr` launcher for the shell
 - [x] `gitr status`: gitr serve, the running `gitr` windows, herdr's plugin
-- [ ] herdr plugin from GitHub: check that an install keeps the whole repo,
-      then the `herdr-plugin` topic on the repo for herdr's marketplace
+- [x] herdr plugin from GitHub: an install keeps the whole repo, so the
+      plugin runs the gitr of its own checkout (tried on a second machine)
+- [ ] The `herdr-plugin` topic on the GitHub repo, for herdr's marketplace
 - [ ] herdr: the agents' state (working, waiting, done) in the worktree list
 - [ ] herdr: comments sent to the agent's pane (`herdr agent prompt`), next
       to "copy for agent"

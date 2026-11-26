@@ -213,6 +213,12 @@ it alone. Its output goes to herdr's state directory for the plugin
 The plugin follows this repository's master branch; `--ref <tag>` installs
 a release. `gitr serve --herdr` does the same without the plugin.
 
+To update it:
+
+```bash
+herdr plugin update gitr   # the running gitr serve moves to the new version by itself
+```
+
 ### From another machine
 
 The server listens on localhost only and has no authentication, so reach it

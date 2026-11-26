@@ -7,3 +7,4 @@ monaco/node_modules/
 /.gitr/
 /.ccsbx/
 herdr-plugin/gitr-serve.log
+herdr-plugin/start.lock

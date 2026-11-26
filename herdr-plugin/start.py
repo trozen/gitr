@@ -6,11 +6,17 @@ session of its own and ends itself with herdr's server."""
 # so that an older python3 gets as far as the version check in main()
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
+from http.client import HTTPConnection
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -18,6 +24,7 @@ HERE = Path(__file__).resolve().parent
 # next to the plugin is the one it was released with, and needs no install
 CHECKOUT_GITR = HERE.parent / 'gitr.py'
 PLUGIN_ID = 'gitr'  # as in herdr-plugin.toml
+PORT = 4487  # gitr serve's
 
 
 def notify(body: str) -> None:
@@ -64,11 +71,77 @@ def command() -> list[str]:
     return [gitr]
 
 
+def running() -> 'dict | None':
+    """What the gitr serving the port says of itself, if one does."""
+    conn = HTTPConnection('127.0.0.1', PORT, timeout=2)
+    try:
+        conn.request('GET', '/api/version?probe=1')
+        info = json.loads(conn.getresponse().read())
+        return info if isinstance(info, dict) else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def root_id(path: Path) -> str:
+    # as server.py's root_id: which copy of gitr a server runs
+    return hashlib.sha256(str(path).encode()).hexdigest()[:16]
+
+
+def ours(pid: int) -> bool:
+    """Whether the pid is a gitr serve --herdr of this user: what answers
+    on the port names it, and is not to be trusted with any other."""
+    try:
+        if os.stat(f'/proc/{pid}').st_uid != os.getuid():
+            return False
+        argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+    except OSError:
+        return False
+    return b'--herdr' in argv and any(b'gitr' in a for a in argv)
+
+
+def stop_older() -> None:
+    """A gitr serve this plugin started from another copy of it (before
+    `herdr plugin update`, which installs the new one beside the old) is
+    stopped, so that this one starts in its place. One started otherwise is
+    left alone."""
+    info = running()
+    if (not info or info.get('plugin') != PLUGIN_ID or not CHECKOUT_GITR.exists()
+            or info.get('root') == root_id(CHECKOUT_GITR.parent)):
+        return
+    try:
+        pid = int(info['pid'])
+    except (KeyError, ValueError, TypeError):
+        return
+    if not ours(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)  # its --reload supervisor ends with it
+    except OSError:
+        return
+    # until the process is gone: it holds the port till it exits, also when
+    # too busy to answer
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    print(f"gitr: stopped the gitr serve of another copy, gitr {info.get('gitr')}")
+
+
 def main() -> None:
     if sys.version_info < (3, 10):
         fail(f'gitr needs Python 3.10 or newer, python3 here is {sys.version.split()[0]}')
     state = Path(os.environ.get('HERDR_PLUGIN_STATE_DIR') or HERE)
     state.mkdir(parents=True, exist_ok=True)
+    # One start at a time (herdr's hook, the start action and a handover
+    # after an update may meet): the next one finds this one's server.
+    lock = open(state / 'start.lock', 'w')
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    stop_older()
     log = state / 'gitr-serve.log'
     with open(log, 'a') as out:
         try:

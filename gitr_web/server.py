@@ -1852,7 +1852,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/version':
                 return self._json({'version': page_version(), 'gitr': GITR_VERSION,
                                    'herdr': Handler.state._herdr is not None, 'pages': EVENTS.page_count(),
-                                   'pid': os.getpid()})
+                                   'pid': os.getpid(), 'plugin': os.environ.get(HERDR_PLUGIN_ENV),
+                                   # which copy: herdr's plugin replaces one from before an update
+                                   'root': root_id(Path(gitr.__file__).resolve().parent)})
             if url.path == '/api/projects':
                 if q.get('expect'):
                     Handler.expect_until = time.monotonic() + EXPECT_S
@@ -2127,24 +2129,47 @@ class Herdr:
         self._last = out
         return out
 
-    def watch_all(self) -> None:
+    def watch_all(self, updates: bool = True) -> None:
         """herdr's server, and the plugin when it started this one, in
-        threads that end this process when they go."""
+        threads that end this process when they go. `updates`: hand over to
+        the plugin's new copy after an update: the top process does (with
+        --reload the supervisor, which outlives its server's restarts), so
+        that one alone starts it."""
         threading.Thread(target=self.watch, daemon=True).start()
         if os.environ.get(HERDR_PLUGIN_ENV):
-            threading.Thread(target=self.watch_plugin, args=(os.environ[HERDR_PLUGIN_ENV],), daemon=True).start()
+            threading.Thread(target=self.watch_plugin, args=(os.environ[HERDR_PLUGIN_ENV], updates),
+                             daemon=True).start()
 
-    def watch_plugin(self, plugin_id: str) -> None:
+    def watch_plugin(self, plugin_id: str, updates: bool) -> None:
+        here = Path(gitr.__file__).resolve().parent
+        # only gitr run from the plugin's checkout has a newer copy to go to
+        updates = updates and (here / 'herdr-plugin' / 'start.py').exists()
+        handed: 'Path | None' = None  # the copy started, once: it replaces us, or failed
         while True:
             time.sleep(HERDR_PLUGIN_S)
             try:
                 plugins = self.call('plugin.list', {'plugin_id': plugin_id})['plugins']
             except (OSError, ValueError, KeyError, TypeError):
                 continue  # herdr away: watch() decides
-            if not any(p.get('plugin_id') == plugin_id and p.get('enabled') for p in plugins):
+            plugin = next((p for p in plugins if p.get('plugin_id') == plugin_id and p.get('enabled')), None)
+            if not plugin:
                 print(f'gitr serve: herdr plugin {plugin_id} disabled or removed, stopping', file=sys.stderr)
                 os.kill(os.getpid(), signal.SIGTERM)
                 return
+            # `herdr plugin update` installs the new copy beside this one, and
+            # herdr's server keeps running: the new copy's start replaces us
+            start = Path(str(plugin.get('plugin_root')), 'start.py').resolve()
+            if updates and start.parent.parent != here and start != handed and start.exists():
+                handed = start
+                print(f'gitr serve: herdr plugin {plugin_id} updated, handing over to {tilde(str(start.parent))}',
+                      file=sys.stderr)
+                env = {k: v for k, v in os.environ.items() if k != RELOAD_CHILD_ENV}
+                try:
+                    subprocess.Popen([sys.executable, str(start)], cwd=start.parent, env=env,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                except OSError as e:
+                    print(f'gitr serve: cannot start {start}: {e}', file=sys.stderr)
 
     def watch(self) -> None:
         """Until herdr's server is gone: then end this one, as Ctrl+C would.
@@ -2235,7 +2260,9 @@ def supervise(argv: list[str]) -> None:
             seen = stamp()
             child = subprocess.Popen(cmd, env=env)
             pages = page_stamp()
-            while stamp() == seen:
+            while stamp() == seen or not all(p.exists() for p in watched[:2]):
+                # (a source file gone, as herdr may remove a plugin's old
+                # copy after an update, is no save to restart on)
                 time.sleep(0.5)
                 # A server that ended well by itself (--herdr: herdr stopped)
                 # ends the supervisor; one that failed (a save with a syntax
@@ -2405,8 +2432,14 @@ def main(argv: 'list[str] | None' = None, prog: str = 'gitr serve') -> None:
         print(f"  {r['name']:<{width}}  {tilde(r['path'])}{multi}", file=sys.stderr)
     if herdr:
         print(f'  and the repos open in herdr ({tilde(herdr.sock)}), now {len(herdr.repos())}', file=sys.stderr)
-        herdr.watch_all()
+        herdr.watch_all(updates=not child)
     serve(srv)
+
+
+def root_id(path: Path) -> str:
+    """A gitr copy's directory told apart without showing it (the home
+    directory) to whoever reaches the server; start.py makes the same."""
+    return hashlib.sha256(str(path).encode()).hexdigest()[:16]
 
 
 def port_free(host: str, port: int) -> bool:

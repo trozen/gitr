@@ -291,6 +291,10 @@ whole diff in one read-only document as in gitr.
       to "copy for agent"
 - [ ] herdr: gitr shown in herdr's UI, e.g. "gitr is running" in the tab
       bar's status area, or the review state per workspace in the sidebar
+- [ ] A newer gitr announced, as an opt-in setting (the README promises no
+      internet needed): a check of GitHub's master (the plugin) or PyPI
+      (gitr-review) now and then, shown in the page or as a herdr
+      notification with the command that updates
 - [x] Replace the Tk window with the web view: `gitr` launches a
       one-repo server in a Chrome app window (see "The Tk window replaced"
       above). Not carried over: pipe mode, the window's keys (postponed

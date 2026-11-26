@@ -2303,12 +2303,25 @@ def page_stamp() -> dict:
 
 def gitr_version() -> str:
     """gitr's own version, for the window title: a checkout's
-    pyproject.toml, else the installed package's."""
-    pyproject = Path(__file__).resolve().parent.parent / 'pyproject.toml'
+    pyproject.toml, else the installed package's. A checkout's pre-release
+    (0.2.0.dev0, the same for every commit until the release) gets its
+    commit too, as a local version: 0.2.0.dev0+1a2b3c4, .dirty when changed."""
+    root = Path(__file__).resolve().parent.parent
     try:
-        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M)
+        m = re.search(r'^version\s*=\s*"([^"]+)"', (root / 'pyproject.toml').read_text(), re.M)
         if m:
-            return m.group(1)
+            v = m.group(1)
+            # .git of its own: git would otherwise answer for a repository
+            # above a copy without one (unpacked inside another project)
+            if 'dev' in v and (root / '.git').exists():
+                try:
+                    # --exclude: the commit alone, not a tag before it
+                    commit = git(str(root), 'describe', '--always', '--dirty=.dirty', '--abbrev=7',
+                                 '--exclude=*').strip()
+                    v += f'+{commit}' if commit else ''
+                except GitError:
+                    pass
+            return v
     except OSError:
         pass
     try:

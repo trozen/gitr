@@ -88,6 +88,9 @@ h2 .grow { flex: 1; }
 .wt .branch { color: var(--file); }
 /* the multi-repo directory a checkout is in */
 .project .pre { color: var(--dim); }
+#projects .recent { padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--sel); }
+/* the project before a recent worktree's branch */
+#projects .recent .pre { color: var(--dim); }
 .err { color: var(--rem); padding: 1px 24px; white-space: pre-wrap; }
 
 .file .st { font-family: var(--mono); width: 1ch; text-align: center; }
@@ -184,6 +187,13 @@ h2 .grow { flex: 1; }
 #qo-list .hl { color: var(--hunk); font-weight: 600; }
 #qo-list .n { font-family: monospace; font-size: .92em; }
 #qo-list .st { font-family: var(--mono); width: 1ch; text-align: center; }
+/* the keys' column as wide as the longest */
+#keys { display: grid; grid-template-columns: max-content 1fr; column-gap: 24px; align-content: start; align-items: baseline;
+        padding: 2px 14px 8px; overflow-y: auto; font-size: var(--sidebar-px); }
+#keys h2 { grid-column: 1 / -1; padding: 8px 0 2px; }
+#keys .row { display: contents; }
+#keys .row > * { padding: 2px 0; }
+#keys kbd { font-family: var(--mono); font-size: .92em; color: var(--hunk); }
 .pop .none { padding: 2px 12px 6px; color: var(--dim); }
 /* the base field drawn as a dropdown, which it also is (the base picker) */
 .base-field { display: inline-flex; align-items: center; gap: 6px; padding: 1px 7px 1px 5px; cursor: text;
@@ -392,6 +402,8 @@ h2 .grow { flex: 1; }
   border: 1px solid var(--sel); border-radius: 4px; box-shadow: 0 4px 12px #0008; }
 #cmenu .c-item { padding: 3px 14px; cursor: pointer; white-space: nowrap; }
 #cmenu .c-item:hover { background: var(--sel); }
+#cmenu .c-item:has(kbd) { display: flex; align-items: baseline; justify-content: space-between; }
+#cmenu .c-item kbd { margin-left: 24px; font-family: var(--mono); font-size: .92em; color: var(--dim); }
 #cmenu .c-item.c-note, #cmenu .c-item.c-good, #cmenu .c-item.c-bad { color: var(--c); font-family: monospace; }
 #cmenu .c-sep { height: 1px; margin: 4px 0; background: var(--sel); }
 .c-zone { position: absolute; }

@@ -24,7 +24,7 @@
   <!-- notes, in this order; "news" takes the place of "changed" after a reload -->
   <span id="removed" class="chip" hidden>worktree removed</span>
   <span id="gone" class="chip" hidden title="The server does not answer: gitr stopped (Ctrl+C, or its windows closed), or gitr serve is down. Run it again; this page reconnects by itself.">server stopped</span>
-  <span id="changed" class="chip" hidden><span>worktree changed<span id="changed-what"></span></span><button id="reload" class="chip-act">reload</button></span>
+  <span id="changed" class="chip" hidden><span>worktree changed<span id="changed-what"></span></span><button id="reload" class="chip-act" title="Load the changes">reload</button></span>
   <span id="news" class="chip" hidden><span id="news-text"></span><button id="news-close" class="chip-x" title="Clear the marks of the last reload">&#215;</button></span>
   <span id="outside" class="chip" hidden title="review.json was written by something else (another tab, gitr comments, an agent); the comments it added or edited are flagged"><span id="outside-text"></span><button id="outside-close" class="chip-x" title="Clear the flags">&#215;</button></span>
   <span id="updated" class="chip" hidden title="gitr serve restarted or its page files changed, so the code running in this page may no longer fit it"><span>app changed</span><button id="reload-page" class="chip-act">reload</button></span>
@@ -58,7 +58,7 @@
   <aside id="sidebar">
     <section id="files-section">
       <h2>Changed files <span id="files-count"></span><span class="grow"></span>
-        <button id="go-to-file" class="h-act" title="Go to file (Ctrl+P)"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M10.0195 10.7266C9.06578 11.5217 7.83875 12 6.5 12C3.46243 12 1 9.53757 1 6.5C1 3.46243 3.46243 1 6.5 1C9.53757 1 12 3.46243 12 6.5C12 7.83875 11.5217 9.06578 10.7266 10.0195L13.8535 13.1464C14.0488 13.3417 14.0488 13.6583 13.8535 13.8536C13.6583 14.0488 13.3417 14.0488 13.1464 13.8536L10.0195 10.7266ZM11 6.5C11 4.01472 8.98528 2 6.5 2C4.01472 2 2 4.01472 2 6.5C2 8.98528 4.01472 11 6.5 11C8.98528 11 11 8.98528 11 6.5Z"/></svg></button>
+        <button id="go-to-file" class="h-act" title="Go to file"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M10.0195 10.7266C9.06578 11.5217 7.83875 12 6.5 12C3.46243 12 1 9.53757 1 6.5C1 3.46243 3.46243 1 6.5 1C9.53757 1 12 3.46243 12 6.5C12 7.83875 11.5217 9.06578 10.7266 10.0195L13.8535 13.1464C14.0488 13.3417 14.0488 13.6583 13.8535 13.8536C13.6583 14.0488 13.3417 14.0488 13.1464 13.8536L10.0195 10.7266ZM11 6.5C11 4.01472 8.98528 2 6.5 2C4.01472 2 2 4.01472 2 6.5C2 8.98528 4.01472 11 6.5 11C8.98528 11 11 8.98528 11 6.5Z"/></svg></button>
         <button id="collapse-all" class="h-act" title="Collapse all folders"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M14 4.27051C14.5999 4.62053 15 5.26009 15 6V11C15 13.21 13.21 15 11 15H6C5.26009 15 4.62053 14.5999 4.27051 14H11C12.65 14 14 12.65 14 11V4.27051Z"/><path d="M9.5 7C9.776 7 10 7.224 10 7.5C10 7.776 9.776 8 9.5 8H5.5C5.224 8 5 7.776 5 7.5C5 7.224 5.224 7 5.5 7H9.5Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M11 2C12.103 2 13 2.897 13 4V11C13 12.103 12.103 13 11 13H4C2.897 13 2 12.103 2 11V4C2 2.897 2.897 2 4 2H11ZM4 3C3.449 3 3 3.449 3 4V11C3 11.552 3.449 12 4 12H11C11.551 12 12 11.552 12 11V4C12 3.449 11.551 3 11 3H4Z"/></svg></button>
         <button id="expand-all" class="h-act" title="Expand all folders"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M15 6V11C15 13.21 13.21 15 11 15H6C5.26 15 4.62 14.6 4.27 14H11C12.65 14 14 12.65 14 11V4.27C14.6 4.62 15 5.26 15 6ZM11 13H4C2.897 13 2 12.103 2 11V4C2 2.897 2.897 2 4 2H11C12.103 2 13 2.897 13 4V11C13 12.103 12.103 13 11 13ZM4 12H11C11.551 12 12 11.552 12 11V4C12 3.449 11.551 3 11 3H4C3.449 3 3 3.449 3 4V11C3 11.552 3.449 12 4 12ZM9.5 7H8V5.5C8 5.224 7.776 5 7.5 5C7.224 5 7 5.224 7 5.5V7H5.5C5.224 7 5 7.224 5 7.5C5 7.776 5.224 8 5.5 8H7V9.5C7 9.776 7.224 10 7.5 10C7.776 10 8 9.776 8 9.5V8H9.5C9.776 8 10 7.776 10 7.5C10 7.224 9.776 7 9.5 7Z"/></svg></button>
         <button id="prev-unviewed" class="h-act" title="Previous hunk not viewed yet"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.5v-8M4.5 9 8 5.5 11.5 9M3.5 2.5h9"/></svg></button>
@@ -95,6 +95,7 @@
       <label class="set-row" title="Show a removed + added pair that differs only in whitespace as one ~ line"><input type="checkbox" id="reindent"> Collapse re-indented lines</label>
       <h2>Commits</h2>
       <div class="set-row" id="older-row" title="Commits from before the base, shown faded below the review's own"><span class="grow">Older commits</span></div>
+      <div class="set-row"><button id="show-keys" title="The page's key bindings">keyboard shortcuts</button></div>
       <div class="set-row reload-row">
         <button id="reload-app" title="Load the page again, e.g. after gitr serve changed">reload the app</button>
         <span class="grow"></span><span id="gitr-version" class="dim"></span>
@@ -117,6 +118,7 @@
     aria-expanded="true" placeholder="Go to a changed file or a worktree by name" spellcheck="false" autocomplete="off">
   <div id="qo-list" class="list" role="listbox"></div>
 </div>
+<div id="keys" class="pop" hidden></div>
 <script src="monaco/editor.js"></script>
 <script src="app.js"></script>
 </body>

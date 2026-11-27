@@ -157,19 +157,18 @@ function init() {
   $('reindent').checked = prefs.reindent ?? true;
   $('wrap').addEventListener('change', () => {
     editor.updateOptions({ wordWrap: $('wrap').checked ? 'on' : 'off' });
-    prefs = { ...prefs, wrap: $('wrap').checked };
-    savePrefs();
+    setPref('wrap', $('wrap').checked);
   });
   // Only how the lines are shown changes, so the marks of the last reload stay.
   $('reindent').addEventListener('change', () => {
-    prefs = { ...prefs, reindent: $('reindent').checked };
-    savePrefs();
+    setPref('reindent', $('reindent').checked);
     if (current) load(current.wt, current.base, null, viewPosition(), current.commit, newsSince);
   });
   initSash();
   initSettings();
   initSwitcher();
   initQuickOpen();
+  initKeys();
   initViews();
   loadProjects();
   setInterval(pollChanges, POLL_MS);
@@ -240,17 +239,23 @@ function setFont(f, px) {
   const fonts = { ...prefs.fonts };
   px = clampFont(px);
   if (px === f.def) delete fonts[f.key]; else fonts[f.key] = px;
-  prefs = { ...prefs, fonts };
+  setPref('fonts', fonts);
   applyFont(f);
   // Comment boxes have fixed zone heights, measured at their font size.
   if (f.key === 'comments') renderZones(true);
   // the graph is drawn in pixels of the row height
   if (f.key === 'sidebar') renderCommits();
-  savePrefs();
 }
 
-function savePrefs() {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(prefs)); }
+function storedPrefs() {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) { return {}; }
+}
+
+// One setting, written over what is stored rather than with this page's
+// copy of the rest: another tab may have changed those since.
+function setPref(key, value) {
+  prefs = { ...prefs, [key]: value };
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...storedPrefs(), [key]: value })); }
   catch (e) { /* storage blocked: the choice lasts for this page only */ }
 }
 
@@ -262,7 +267,7 @@ function setView(view) {
   for (const b of document.querySelectorAll('#activity .view')) b.classList.toggle('on', b.dataset.view === view);
   for (const v of VIEWS) $(v + '-section').hidden = view !== v;
   if (view === 'commits' && commitsUndrawn) renderCommits();
-  if (prefs.view !== view) { prefs = { ...prefs, view }; savePrefs(); }
+  if (prefs.view !== view) setPref('view', view);
 }
 
 function initViews() {
@@ -281,8 +286,7 @@ function initViews() {
   $('range-mode').addEventListener('click', () => setRangeMode(rangeMode ? null : 'first'));
   $('on-base').classList.toggle('on', onBaseShown());
   $('on-base').addEventListener('click', () => {
-    prefs = { ...prefs, onBase: !onBaseShown() };
-    savePrefs();
+    setPref('onBase', !onBaseShown());
     $('on-base').classList.toggle('on', onBaseShown());
     if (current) loadCommits(wordGen);
   });
@@ -365,8 +369,7 @@ function initSettings() {
     out.value = n;
     reset.classList.toggle('off', n === OLDER_DEF);
     if (n === olderCount()) return;
-    prefs = { ...prefs, older: n };
-    savePrefs();
+    setPref('older', n);
     if (current) loadCommits(wordGen);
   };
   // on Enter or leaving the field, not per keystroke: 1 on the way to 150
@@ -381,6 +384,7 @@ function initSettings() {
   btn.addEventListener('click', () => show(panel.hidden));
   // An installed app has no browser reload button.
   $('reload-app').addEventListener('click', reloadPage);
+  $('show-keys').addEventListener('click', () => { show(false); showKeys(true); });
   addEventListener('mousedown', (e) => {
     if (!panel.contains(e.target) && !btn.contains(e.target)) show(false);
   });
@@ -554,6 +558,7 @@ function renderProjects(projects) {
   projectsSig = listSignature(projects);
   worktrees.clear();
   const box = $('projects');
+  const sel = box.querySelector('.wt.sel')?.dataset.wt;
   box.textContent = '';
   for (const p of projects) {
     // a checkout of a multi-repo directory: the directories leading to it
@@ -577,9 +582,41 @@ function renderProjects(projects) {
     box.append(group);
   }
   box.append(el('div', 'none', 'no match'));
-  filterSwitcher();
+  renderRecent();
+  filterSwitcher(sel);
   updateRemoved();
   updateCrumb();
+}
+
+// The worktrees last opened in this browser, newest first: the switcher's
+// "Recent", without the one shown.
+const RECENT_KEEP = 10, RECENT_SHOWN = 5;
+
+function noteRecent(wt) {
+  // the stored list: other tabs add to it too
+  const recent = storedPrefs().recent || prefs.recent || [];
+  setPref('recent', [wt, ...recent.filter((r) => r !== wt)].slice(0, RECENT_KEEP));
+}
+
+function renderRecent() {
+  const box = $('projects');
+  box.querySelector('.recent')?.remove();
+  const paths = (prefs.recent || []).filter((r) => r !== current?.wt && worktrees.has(r)).slice(0, RECENT_SHOWN);
+  if (!paths.length) return;
+  const group = el('div', 'group recent', [el('h2', null, 'Recent')]);
+  for (const path of paths) {
+    const { p, w } = worktrees.get(path);
+    const rel = w.path === p.path ? '' : w.path.split('/').pop();
+    const row = el('div', 'row wt', [
+      el('span', 'grow', [el('span', 'pre', projectParts(p).filter(Boolean).join(' \u203a ') + ' \u203a '),
+                          el('span', 'branch', wtLabel(w))]),
+      el('span', 'dim', rel)]);
+    row.title = path;
+    row.dataset.wt = path;
+    row.addEventListener('click', () => { showSwitcher(false); openWorktree(path); });
+    group.append(row);
+  }
+  box.prepend(group);
 }
 
 function openWorktree(path) {
@@ -597,7 +634,7 @@ function updateCrumb() {
   const entry = current && worktrees.get(current.wt);
   $('crumb-text').textContent = !current ? 'select a worktree'
     : entry ? `${projectParts(entry.p).filter(Boolean).join(' \u203a ')} \u203a ${wtLabel(entry.w)}` : current.wt;
-  $('crumb').title = (current ? current.wt + '\n' : '') + 'Switch project or worktree';
+  $('crumb').title = (current ? current.wt + '\n' : '') + 'Switch project or worktree' + keyHint('crumb');
   // the version, and which worktree: several windows tell apart in the
   // taskbar; the server's title names its machine ("gitr - host")
   document.title = [APP_TITLE.replace('gitr', 'gitr' + (gitrVersion ? ' ' + gitrVersion : '')),
@@ -689,16 +726,21 @@ function showSwitcher(on) {
   sw.style.top = r.bottom + 2 + 'px';
   const f = $('switch-filter');
   f.value = '';
+  renderRecent();
   filterSwitcher();
   f.focus();
   $('projects').querySelector('.wt.active')?.scrollIntoView({ block: 'nearest' });
 }
 
 // Every word typed has to appear in the project name, branch or folder.
-function filterSwitcher() {
+// keep: the worktree to keep selected (the list was drawn anew), if shown.
+function filterSwitcher(keep) {
   const words = $('switch-filter').value.toLowerCase().split(/\s+/).filter(Boolean);
   let any = false;
-  for (const g of $('projects').querySelectorAll('.group')) {
+  // Recent only while nothing is typed: a match is in the full list anyway
+  const recent = $('projects').querySelector('.recent');
+  if (recent) recent.hidden = words.length > 0;
+  for (const g of $('projects').querySelectorAll('.group:not(.recent)')) {
     let shown = 0;
     for (const row of g.querySelectorAll('.wt')) {
       row.hidden = !words.every((w) => row.dataset.hay.includes(w));
@@ -708,13 +750,18 @@ function filterSwitcher() {
     any ||= !g.hidden;
   }
   $('projects').querySelector('.none').hidden = any;
-  // the current worktree while it matches, else the first match
+  // the last worktree before this one (Enter goes back to it), else the
+  // current worktree while it matches, else the first match
   const rows = visibleWorktrees();
-  setSwitchSel(rows.find((r) => r.classList.contains('active')) || rows[0]);
+  setSwitchSel((typeof keep === 'string' && rows.find((r) => r.dataset.wt === keep))
+               || (recent && !recent.hidden && rows[0]) || rows.find((r) => r.classList.contains('active')) || rows[0]);
 }
 
+// for the arrows: a worktree listed in Recent is not selected again below
 function visibleWorktrees() {
-  return [...$('projects').querySelectorAll('.group:not([hidden]) .wt:not([hidden])')];
+  const rows = [...$('projects').querySelectorAll('.group:not([hidden]) .wt:not([hidden])')];
+  const recent = new Set(rows.filter((r) => r.closest('.recent')).map((r) => r.dataset.wt));
+  return rows.filter((r) => r.closest('.recent') || !recent.has(r.dataset.wt));
 }
 
 function setSwitchSel(row) {
@@ -739,11 +786,9 @@ function moveSwitchSel(d, page) {
 function initSwitcher() {
   const sw = $('switcher'), btn = $('crumb'), f = $('switch-filter');
   btn.addEventListener('click', () => showSwitcher(sw.hidden));
-  f.addEventListener('input', filterSwitcher);
+  f.addEventListener('input', () => filterSwitcher());
   f.addEventListener('keydown', (e) => {
-    const move = { ArrowDown: [1], ArrowUp: [-1], PageDown: [1, true], PageUp: [-1, true] }[e.key];
-    if (move) { e.preventDefault(); moveSwitchSel(...move); }
-    else if (e.key === 'Enter') sw.querySelector('.wt.sel')?.click();
+    runKeys(LIST_KEYS, e, { move: moveSwitchSel, open: () => sw.querySelector('.wt.sel')?.click() });
   });
   addEventListener('mousedown', (e) => {
     if (!sw.contains(e.target) && !btn.contains(e.target)) showSwitcher(false);
@@ -919,26 +964,186 @@ function openQuickItem(n) {
 
 function initQuickOpen() {
   const input = $('qo-input');
-  // Capture, so that it works with the focus in Monaco too; it replaces
-  // the browser's print dialog, which this page has no use for.
-  addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
-      e.preventDefault();
-      e.stopPropagation();
-      showQuickOpen(true);
-    }
-  }, true);
   $('go-to-file').addEventListener('click', () => showQuickOpen(true));
   input.addEventListener('input', renderQuickOpen);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); moveQuickSel(1); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); moveQuickSel(-1); }
-    else if (e.key === 'PageDown') { e.preventDefault(); moveQuickSel(1, true); }
-    else if (e.key === 'PageUp') { e.preventDefault(); moveQuickSel(-1, true); }
-    else if (e.key === 'Enter') { e.preventDefault(); openQuickItem(qoSel); }
-    else if (e.key === 'Escape') { e.preventDefault(); showQuickOpen(false); editor.focus(); }
+    if (runKeys(LIST_KEYS, e, { move: moveQuickSel, open: () => openQuickItem(qoSel) })) return;
+    if (e.key === 'Escape') { e.preventDefault(); showQuickOpen(false); editor.focus(); }
   });
   input.addEventListener('blur', () => showQuickOpen(false));
+}
+
+// --key bindings ------------------------------------------------------------
+
+// Each context's keys in one table: what the ? popup lists is what the
+// handlers dispatch on. A row without run is a key the page does not
+// handle itself (Monaco's, a text field's own), only listed. The comment
+// editor's table is with it (COMMENT_KEYS).
+//   keys: one or more combos, as shown ("Ctrl+O", "Up", "?"); run gets
+//   the context's object and which of the combos it was, and returns false
+//   for a key it leaves alone; ids: per combo, what else does the same: a
+//   button's id, whose tooltip then names the key, or a name the code
+//   looks the key up by (keyHint).
+
+const KEY_NAMES = { Up: 'ArrowUp', Down: 'ArrowDown', PgUp: 'PageUp', PgDn: 'PageDown', Esc: 'Escape' };
+
+function keyMatches(e, combo) {
+  if (typeof e.key !== 'string') return false;  // e.g. autofill's keydowns
+  const parts = combo.split('+');
+  const name = parts.pop() || '+';
+  const key = KEY_NAMES[name] || name;
+  // Ctrl is Cmd on a Mac
+  if ((e.ctrlKey || e.metaKey) !== parts.includes('Ctrl') || e.altKey !== parts.includes('Alt')) return false;
+  // a symbol as typed, whatever Shift it took (? is Shift+/ on most layouts)
+  if (key.length === 1 && !/[a-z0-9]/i.test(key)) return e.key === key;
+  return e.shiftKey === parts.includes('Shift') && e.key.toLowerCase() === key.toLowerCase();
+}
+
+// Whether a key was handled, its default then prevented.
+function runKeys(table, e, ctx) {
+  for (const row of table.rows) {
+    const i = row.run ? row.keys.findIndex((c) => keyMatches(e, c)) : -1;
+    if (i >= 0 && row.run(ctx, i) !== false) { e.preventDefault(); return true; }
+  }
+  return false;
+}
+
+function closePops() {
+  showKeys(false);
+  showSwitcher(false);
+  showQuickOpen(false);
+}
+
+// The browser's own Ctrl+P, O and B (print, open a file, the bookmarks
+// bar) are of no use in this page.
+const GLOBAL_KEYS = { title: 'Anywhere', rows: [
+  { keys: ['Ctrl+P'], ids: ['go-to-file'], what: 'go to a changed file or a worktree', run: () => { closePops(); showQuickOpen(true); } },
+  { keys: ['Ctrl+O'], ids: ['crumb'], what: 'switch project or worktree',
+    run: (c) => { closePops(); if (c.switcherOpen) editor.focus(); else showSwitcher(true); } },
+  { keys: ['Ctrl+B'], ids: ['base'], what: 'change the base', run: () => { closePops(); if (current) focusBase(); } },
+  { keys: ['?'], ids: ['show-keys'], what: 'this list', run: (c) => (c.typing ? false : showKeys($('keys').hidden)) },
+  // each popup closes itself; false: so that they still get it
+  { keys: ['Esc'], what: 'close a popup', run: () => { showKeys(false); return false; } },
+] };
+
+// Single letters, so only outside text fields; c and v act on the diff's
+// cursor line, which j and k move too.
+const REVIEW_KEYS = { title: 'Outside text fields', rows: [
+  { keys: ['j', 'k'], ids: ['next-unviewed', 'prev-unviewed'], what: 'next / previous hunk not viewed yet', run: (c, i) => jumpUnviewed(i ? -1 : 1) },
+  { keys: ['c'], ids: ['comment'], what: 'comment on the cursor line', run: () => commentCursorLine() },
+  { keys: ['v', 'Shift+V'], ids: ['hunk-viewed', 'file-viewed'], what: 'mark the cursor\u2019s hunk / file viewed (or not)', run: (c, i) => viewedCursor(i) },
+  { keys: ['r'], ids: ['reload'], what: 'reload when the worktree changed',
+    run: () => ($('changed').hidden ? flash('no changes to reload') : $('reload').click()) },
+] };
+
+const cursorLine = () => editor.getPosition()?.lineNumber;
+
+function commentCursorLine() {
+  const ln = cursorLine();
+  if (!ln || !commentable(ln)) return flash('no line to comment on here');
+  // the wheel scrolls without moving the cursor, so it may be out of view
+  editor.revealLineInCenterIfOutsideViewport(ln);
+  openEditor(ln);
+}
+
+// The cursor's line while it is in view, else the top of the view: the
+// wheel and the file list move the view, not the cursor, and v / Shift+V
+// marking something out of sight would go unnoticed.
+function viewedLine() {
+  const ln = cursorLine(), ranges = editor.getVisibleRanges();
+  return ln && ranges.some((r) => ln >= r.startLineNumber && ln <= r.endLineNumber) ? ln
+    : ranges[0]?.startLineNumber;
+}
+
+function viewedCursor(wholeFile) {
+  const ln = viewedLine();
+  if (!doc || !ln || !doc.files.length) return;
+  // a commit's header, above the files
+  if (doc.kinds[ln - 1] === 'k') return flash('not in a file');
+  const fi = fileOf(ln), h = hunkAt(ln);
+  if (wholeFile) markViewed(fileHunks[fi], viewedState([fi]) !== 'all');
+  else if (h >= 0) markViewed([h], !viewed.has(doc.hunks[h][2]));
+  else flash('not in a hunk');
+}
+
+// the project switcher's and go to file's
+const LIST_KEYS = { title: 'In the switcher and go to file', rows: [
+  { keys: ['Up', 'Down'], what: 'select', run: (c, i) => c.move(i ? 1 : -1) },
+  { keys: ['PgUp', 'PgDn'], what: 'a page further', run: (c, i) => c.move(i ? 1 : -1, true) },
+  { keys: ['Enter'], what: 'open the selected one', run: (c) => c.open() },
+] };
+
+// Monaco's own
+const DIFF_KEYS = { title: 'In the diff', rows: [
+  { keys: ['Ctrl+F'], ids: ['find'], what: 'find' },
+  { keys: ['F3', 'Shift+F3'], what: 'next / previous match' },
+] };
+
+// Whether a key goes into a text field. Monaco's own input counts as none:
+// the diff is read-only, so ? typed there would do nothing anyway.
+function typing(e) {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return false;
+  if (t.closest('.monaco-editor') && t.matches('.inputarea, .native-edit-context')) return false;
+  return t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);
+}
+
+// "Ctrl+1 / 2 / 3": a modifier all of them share, only once
+function keysLabel(keys) {
+  const mods = (k) => k.slice(0, k.lastIndexOf('+', k.length - 2) + 1);
+  const shared = keys.every((k) => mods(k) === mods(keys[0])) ? mods(keys[0]) : '';
+  return keys.map((k, i) => (i ? k.slice(shared.length) : k)).join(' / ');
+}
+
+function showKeys(on) {
+  const box = $('keys');
+  box.hidden = !on;
+  if (!on) return;
+  box.textContent = '';
+  for (const table of KEY_TABLES()) {
+    box.append(el('h2', null, table.title));
+    for (const row of table.rows)
+      box.append(el('div', 'row', [el('kbd', null, keysLabel(row.keys)), el('span', null, row.what)]));
+  }
+  const r = $('editor-wrap').getBoundingClientRect();
+  const w = Math.min(440, r.width - 40);
+  box.style.width = w + 'px';
+  box.style.left = r.left + (r.width - w) / 2 + 'px';
+  box.style.top = r.top + 6 + 'px';
+}
+
+function focusBase() {
+  const input = $('base');
+  if (document.activeElement !== input) input.focus();  // which opens the list
+  else if ($('basepop').hidden) showBasePicker();
+}
+
+const KEY_TABLES = () => [GLOBAL_KEYS, REVIEW_KEYS, LIST_KEYS, DIFF_KEYS, COMMENT_KEYS];
+
+function keyFor(id) {
+  for (const table of KEY_TABLES())
+    for (const row of table.rows) {
+      const i = row.ids?.indexOf(id) ?? -1;
+      if (i >= 0) return row.keys[i];
+    }
+  return null;
+}
+
+// " (Ctrl+O)", for a tooltip
+const keyHint = (id) => (keyFor(id) ? ` (${keyFor(id)})` : '');
+
+function initKeys() {
+  for (const table of KEY_TABLES())
+    for (const id of table.rows.flatMap((r) => r.ids || []))
+      // the crumb's and the base field's are rewritten as they change, with it
+      if ($(id)) $(id).title += keyHint(id);
+  // Capture, so that it works with the focus in Monaco too.
+  addEventListener('keydown', (e) => {
+    const t = typing(e);
+    if (runKeys(GLOBAL_KEYS, e, { typing: t, switcherOpen: !$('switcher').hidden })
+        || (!t && runKeys(REVIEW_KEYS, e, {}))) e.stopPropagation();
+  }, true);
+  addEventListener('mousedown', (e) => { if (!$('keys').contains(e.target)) showKeys(false); });
 }
 
 // --commits pane: base..HEAD as a graph, as gitk draws it ------------------
@@ -1456,6 +1661,7 @@ function startLoad(wt, base, defaultBase, restore, commit) {
   const gen = ++wordGen;
   if (current?.wt !== wt || current?.base !== base) commitList = null;
   current = { wt, base, defaultBase: defaultBase || current?.defaultBase || base, commit };
+  noteRecent(wt);
   // a single commit restored from the address is where a shift-click starts
   if (commit && !commit.includes('..') && !commitAnchor) commitAnchor = commit;
   // on the whole review, a shift-click goes from "All changes"
@@ -1463,7 +1669,7 @@ function startLoad(wt, base, defaultBase, restore, commit) {
   const state = { wt, base, ...(commit ? { commit } : {}) };
   setHash({ ...state, ...(restore || {}) });
   showCommitShown(commit ? { hash: commit } : null);
-  document.querySelectorAll('.wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
+  document.querySelectorAll('#projects .group:not(.recent) .wt').forEach((r) => r.classList.toggle('active', r.dataset.wt === wt));
   $('base').value = base;
   updateCrumb();
   $('changed').hidden = true;
@@ -1531,7 +1737,7 @@ async function showDiff(d, gen, state, since, restore, t0, k = null) {
   watchShown();
   showCommitShown(d.commit);
   $('base').classList.remove('bad');
-  $('base').title = 'Any branch, tag or commit; click for a list';
+  $('base').title = 'Any branch, tag or commit; click for a list' + keyHint('base');
   // only a base that loaded is worth remembering; a kept one was, and may
   // since have been changed in another tab
   if (!k) saveSettings(wt, base);
@@ -2029,6 +2235,11 @@ function jumpUnviewed(dir) {
   const h = dir > 0 ? open.find((i) => at(i) > top) ?? open[0]
     : open.findLast((i) => at(i) < top) ?? open[open.length - 1];
   editor.setScrollTop(editor.getTopForLineNumber(at(h)));
+  // the cursor along, for the keys acting on its line: on the hunk's first
+  // line that takes a comment (c), not on its @@ line
+  let ln = doc.hunks[h][0];
+  while (ln < doc.hunks[h][1] && !commentable(ln)) ln++;
+  editor.setPosition({ lineNumber: ln, column: 1 });
 }
 
 const fileOf = (ln) => Math.max(0, upperBound(fileStarts, ln) - 1);
@@ -2285,6 +2496,14 @@ function upperBound(arr, x) {
 const KIND_MARK = { note: '>>', good: '++', bad: '!!' };
 const SEVERITY = { good: 0, note: 1, bad: 2 };
 const KIND_COLOR = { note: '#f1fa8c', good: '#8be9fd', bad: '#ff79c6' };
+// as GLOBAL_KEYS, for the comment editor
+const COMMENT_KEYS = { title: 'Writing a comment', rows: [
+  { keys: ['Enter', 'Ctrl+Enter'], what: 'save', run: (c) => { c.save(); } },
+  { keys: ['Shift+Enter'], what: 'new line' },  // the text field's own
+  { keys: ['Esc'], what: 'cancel', run: () => cancelEditor() },
+  { keys: Object.keys(KIND_MARK).map((k, i) => `Ctrl+${i + 1}`), what: Object.keys(KIND_MARK).join(', '),
+    run: (c, i) => c.setKind(Object.keys(KIND_MARK)[i]) },
+] };
 const PRESETS = [['okay', 'good'], ['wtf', 'bad'], ['why?', 'note'], ['nice', 'good'], ['no', 'bad']];
 const commentable = (ln) => doc && 'arci'.includes(doc.kinds[ln - 1] || 'x');
 const keyStr = (c) => (c.key ? c.key.join('\0') + '\0' + c.file : 'new\0' + c.line);
@@ -2343,7 +2562,9 @@ function initComments() {
 // the + that adds a comment, in the gutter of the line under the mouse
 function showHover(ln) {
   const show = ln && commentable(ln) && !commentAt(ln);
-  hoverDecos.set(show ? [{ range: new monaco.Range(ln, 1, ln, 1), options: { linesDecorationsClassName: 'c-add' } }] : []);
+  hoverDecos.set(show ? [{ range: new monaco.Range(ln, 1, ln, 1),
+                           options: { linesDecorationsClassName: 'c-add',
+                                      linesDecorationsTooltip: 'Add a comment' + keyHint('comment') } }] : []);
 }
 
 function commentAt(ln) { return comments.find((c) => c.line === ln && !c.orphan); }
@@ -2515,6 +2736,12 @@ function renderZones(all) {
                      onDomNodeTop: (top) => {
                        overlay.style.top = top + 'px';
                        overlay.style.display = top < -100000 ? 'none' : '';
+                       // a hidden field cannot take the focus, so it waits
+                       // for this when the frame below came too early
+                       if (focusPending === node && top >= -100000) {
+                         focusPending = null;
+                         if (focusFree()) node.querySelector('textarea')?.focus();
+                       }
                      } };
       const z = { sig: sigOf(w), zone, node, overlay, widget };
       z.id = acc.addZone(zone);
@@ -2524,7 +2751,21 @@ function renderZones(all) {
   });
   if (anchor && anchor <= editor.getModel().getLineCount())
     editor.setScrollTop(editor.getTopForLineNumber(anchor) + offset);
-  if (focus) requestAnimationFrame(() => focus.querySelector('textarea')?.focus());
+  if (focus) {
+    focusPending = focus;
+    requestAnimationFrame(() => {
+      const ta = focus.querySelector('textarea');
+      if (ta?.checkVisibility()) { focusPending = null; ta.focus(); }
+    });
+  }
+}
+let focusPending = null;  // the comment editor to focus once it shows
+
+// Nothing else has the focus: it is not taken from the switcher's filter,
+// the base field or the like, which the user may have gone to meanwhile.
+function focusFree() {
+  const a = document.activeElement;
+  return !a || a === document.body || a.matches('.inputarea, .native-edit-context');
 }
 
 const JUMP_CONTEXT = 3;  // lines of the diff left above a comment jumped to
@@ -2672,14 +2913,7 @@ function editorBox(ed) {
     buttons.push(del);
   }
   const box = el('div', 'c-box c-edit', [ta, el('div', 'c-bar', [kinds, el('span', 'grow'), ...buttons])]);
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) { e.preventDefault(); save(); }
-    else if (e.key === 'Escape') { e.preventDefault(); cancelEditor(); }
-    else if (e.ctrlKey && ['1', '2', '3'].includes(e.key)) {
-      e.preventDefault();
-      setKind(Object.keys(KIND_MARK)[+e.key - 1]);
-    }
-  });
+  ta.addEventListener('keydown', (e) => runKeys(COMMENT_KEYS, e, { save, setKind }));
   ta.addEventListener('input', () => {
     ed.text = ta.value;
     ta.rows = Math.max(2, ta.value.split('\n').length);
@@ -2714,20 +2948,21 @@ function showMenu(ln, x, y) {
   const c = commentAt(ln);
   const m = $('cmenu');
   m.textContent = '';
-  const item = (label, fn, cls) => {
-    const it = el('div', 'c-item' + (cls ? ' ' + cls : ''), label);
+  // key: shown at the right, as menus do
+  const item = (label, fn, cls, key) => {
+    const it = el('div', 'c-item' + (cls ? ' ' + cls : ''), key ? [label, el('kbd', null, key)] : label);
     it.addEventListener('click', () => { hideMenu(); fn(); });
     m.append(it);
   };
   if (doc.kinds[ln - 1] === 'k') {
     const h = doc.commit.hash;
     item(`Copy "${h.slice(0, 10)}"`, () => copyText(h, `copied ${h}`));
-    item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); });
-    item('Go to file...', () => showQuickOpen(true));
+    item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); }, null, keyFor('find'));
+    item('Go to file...', () => showQuickOpen(true), null, keyFor('go-to-file'));
     return placeMenu(m, x, y);
   }
   if (commentable(ln)) {
-    item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c));
+    item(c ? 'Edit comment...' : 'Add comment...', () => openEditor(ln, c), null, keyFor('comment'));
     m.append(el('div', 'c-sep'));
     for (const [text, kind] of PRESETS)
       item(`${KIND_MARK[kind]} ${text}`, () => saveComment(c || { line: ln }, text, kind), 'c-' + kind);
@@ -2740,17 +2975,18 @@ function showMenu(ln, x, y) {
   const fi = fileOf(ln);
   const path = doc.files[fi].path;
   const fileOn = fileHunks[fi].every((h) => viewed.has(doc.hunks[h][2]));
-  item(fileOn ? 'Mark file not viewed' : 'Mark file viewed', () => markViewed(fileHunks[fi], !fileOn));
+  item(fileOn ? 'Mark file not viewed' : 'Mark file viewed', () => markViewed(fileHunks[fi], !fileOn), null,
+       keyFor('file-viewed'));
   const h = hunkAt(ln);
   if (h >= 0 && fileHunks[fi].length > 1) {
     const on = viewed.has(doc.hunks[h][2]);
-    item(on ? 'Mark hunk not viewed' : 'Mark hunk viewed', () => markViewed([h], !on));
+    item(on ? 'Mark hunk not viewed' : 'Mark hunk viewed', () => markViewed([h], !on), null, keyFor('hunk-viewed'));
   }
   m.append(el('div', 'c-sep'));
   item('Reveal in file list', () => revealFile(fi));
   // Monaco's find widget; it starts from the selected text, if any.
-  item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); });
-  item('Go to file...', () => showQuickOpen(true));
+  item('Find...', () => { editor.focus(); editor.getAction('actions.find').run(); }, null, keyFor('find'));
+  item('Go to file...', () => showQuickOpen(true), null, keyFor('go-to-file'));
   m.append(el('div', 'c-sep'));
   const loc = locationOf(ln);
   item(`Copy "${path}"`, () => copyText(path, `copied ${path}`));
